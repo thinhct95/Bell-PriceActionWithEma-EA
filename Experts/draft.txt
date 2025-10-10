@@ -1,0 +1,355 @@
+//+------------------------------------------------------------------+
+//|  EA_Trend_EMA50_EMA200_M5_M1.mq5                                 |
+//|  Phiên bản: 1.0                                                  |
+//|  Mục đích:                                                       |
+//|  - Xác định xu hướng bằng EMA50 & EMA200 (M5)                    |
+//|  - Vào lệnh trên M1 khi có tín hiệu: 2 đáy / 2 đỉnh / nến nhấn chìm |
+//|  - Rủi ro cố định: 1% Equity mỗi lệnh                            |
+//|  - Giới hạn tối đa 2 lệnh mở cùng lúc                            |
+//|  - Tùy chọn hiển thị EMA lên biểu đồ                              |
+//+------------------------------------------------------------------+
+#property copyright "Bell Hyperpush"
+#property version   "1.00"
+#property strict
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+// ================== INPUTS =========================================
+input ENUM_TIMEFRAMES TrendTF = PERIOD_M5;   // khung thời gian dùng để lọc xu hướng
+input ENUM_TIMEFRAMES EntryTF = PERIOD_M1;   // khung thời gian để tìm điểm vào
+input int EMA_Fast = 50;                     // EMA nhanh
+input int EMA_Slow = 200;                    // EMA chậm
+input double RiskPercent = 1.0;              // rủi ro % equity cho mỗi lệnh
+input double TP_Multiplier = 2.0;            // tỉ lệ TP = Risk * multiplier
+input int MaxOpenPositions = 2;              // tối đa 2 lệnh mở
+input double DoubleTolerancePoints = 30;     // dung sai giữa 2 đáy/đỉnh
+input int MinBarsBetweenDouble = 4;          // khoảng cách tối thiểu giữa 2 đáy/đỉnh
+input int SL_Pips_Default = 35;              // SL mặc định (điểm)
+input int Slippage = 10;                     // trượt giá tối đa
+input bool VisualizeEMAs = true;             // có vẽ EMA lên chart không
+
+// ================== BIẾN TOÀN CỤC =================================
+int handleEMA50 = INVALID_HANDLE;
+int handleEMA200 = INVALID_HANDLE;
+
+// ================== HÀM HỖ TRỢ ====================================
+
+// ---- Đếm số lệnh đang mở cho symbol hiện tại ----
+int CountOpenPositionsSymbol() {
+   int count = 0;
+
+   for(int i=0; i<PositionsTotal(); i++) {
+      if(PositionGetSymbol(i) == _Symbol) // nếu symbol trùng với symbol hiện tại
+         count++;
+   }
+   
+   return count;
+}
+
+// ---- Kiểm tra mô hình nến nhấn chìm tăng ----
+bool IsBullishEngulfing(ENUM_TIMEFRAMES tf) {
+   double open1 = iOpen(_Symbol, tf, 1);
+   double close1 = iClose(_Symbol, tf, 1);
+   double open2 = iOpen(_Symbol, tf, 2);
+   double close2 = iClose(_Symbol, tf, 2);
+
+   // Nến trước giảm (đỏ), nến sau tăng (xanh)
+   if(close2 < open2 && close1 > open1) {
+      // Và thân nến sau bao phủ hoàn toàn thân nến trước
+      if(close1 > open2 && open1 < close2)
+         return true;
+   }
+
+   return false;
+}
+
+// ---- Kiểm tra mô hình nến nhấn chìm giảm ----
+bool IsBearishEngulfing(ENUM_TIMEFRAMES tf) {
+   double open1 = iOpen(_Symbol, tf, 1);
+   double close1 = iClose(_Symbol, tf, 1);
+   double open2 = iOpen(_Symbol, tf, 2);
+   double close2 = iClose(_Symbol, tf, 2);
+
+   // Nến trước tăng (xanh), nến sau giảm (đỏ)
+   if(close2 > open2 && close1 < open1) {
+      // Và thân nến sau bao phủ hoàn toàn thân nến trước
+      if(close1 < open2 && open1 > close2)
+         return true;
+   }
+   return false;
+}
+
+// ---- Phát hiện mô hình 2 ĐÁY ----
+bool DetectDoubleBottom(ENUM_TIMEFRAMES tf, int lookbackBars, double tolerancePoints, double &levelPrice) {
+   levelPrice = 0.0;
+
+   // Duyệt từng nến (bắt đầu từ nến thứ 2 để tránh lỗi biên)
+   for(int i=2; i<lookbackBars-2; i++) {
+      double l1 = iLow(_Symbol, tf, i);
+
+      // Kiểm tra nến i có phải là "đáy cục bộ" hay không
+      bool isLow1 = (l1 < iLow(_Symbol, tf, i-1) && l1 < iLow(_Symbol, tf, i+1));
+      if(!isLow1) continue;  // nếu không phải đáy -> qua nến tiếp
+
+      // Khi đã có đáy thứ nhất, tìm đáy thứ hai cách ít nhất MinBarsBetweenDouble nến
+      for(int j=i+MinBarsBetweenDouble; j<lookbackBars-1; j++) {
+         double l2 = iLow(_Symbol, tf, j);
+
+         // Kiểm tra nến j có phải đáy cục bộ không
+         bool isLow2 = (l2 < iLow(_Symbol, tf, j-1) && l2 < iLow(_Symbol, tf, j+1));
+         if(!isLow2) continue;
+
+         // So sánh độ chênh giữa 2 đáy (tính theo points)
+         double diffPoints = MathAbs(l1 - l2)/_Point;
+
+         // Nếu chênh lệch nhỏ hơn hoặc bằng tolerancePoints → coi là 2 đáy
+         if(diffPoints <= tolerancePoints) {
+            levelPrice = MathMin(l1, l2); // giá đáy thấp hơn làm mốc
+            return true; // tìm thấy 2 đáy -> thoát hàm
+         }
+      }
+   }
+
+   return false; // không tìm thấy
+}
+
+// ---- Phát hiện mô hình 2 ĐỈNH ----
+bool DetectDoubleTop(ENUM_TIMEFRAMES tf, int lookbackBars, double tolerancePoints, double &levelPrice) {
+   levelPrice = 0.0;
+
+   // Duyệt nến để tìm đỉnh đầu tiên
+   for(int i=2; i<lookbackBars-2; i++) {
+      double h1 = iHigh(_Symbol, tf, i);
+      bool isHigh1 = (h1 > iHigh(_Symbol, tf, i-1) && h1 > iHigh(_Symbol, tf, i+1));
+      if(!isHigh1) continue;
+
+      // Tìm đỉnh thứ 2 sau đỉnh đầu
+      for(int j=i+MinBarsBetweenDouble; j<lookbackBars-1; j++) {
+         double h2 = iHigh(_Symbol, tf, j);
+         bool isHigh2 = (h2 > iHigh(_Symbol, tf, j-1) && h2 > iHigh(_Symbol, tf, j+1));
+         if(!isHigh2) continue;
+
+         // So sánh độ cao giữa 2 đỉnh
+         double diffPoints = MathAbs(h1 - h2)/_Point;
+
+         // Nếu 2 đỉnh gần bằng nhau → xác nhận mô hình
+         if(diffPoints <= tolerancePoints) {
+            levelPrice = MathMax(h1, h2); // lấy đỉnh cao hơn làm mốc
+            return true;
+         }
+      }
+   }
+   
+   return false;
+}
+
+// ---- Tính khối lượng lệnh dựa theo % rủi ro ----
+double CalculateLotByRisk(double riskPercent, double stopLossPoints) {
+   if(stopLossPoints <= 0)
+      return(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN));
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskMoney = equity * (riskPercent / 100.0);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   // Nếu broker không trả tickValue chuẩn → fallback
+   if(tickValue <= 0 || tickSize <= 0) {
+      double fallback = riskMoney / (stopLossPoints * _Point);
+      double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+      double lot = MathMax(SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
+                           MathFloor(fallback/step)*step);
+      return lot;
+   }
+
+   // Giá trị mỗi point cho 1 lot
+   double valuePerPointFor1Lot = tickValue / tickSize;
+
+   // Tính số lot phù hợp với rủi ro cho phép
+   double lots = riskMoney / (stopLossPoints * valuePerPointFor1Lot);
+
+   // Làm tròn theo bước lot tối thiểu
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(step <= 0) step = 0.01;
+   lots = MathFloor(lots/step)*step;
+
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   if(lots < minLot) lots = minLot;
+
+   return NormalizeDouble(lots,2);
+}
+
+// ---- Bộ lọc xu hướng EMA ----
+// Trả về:
+//   1  -> chỉ cho BUY
+//  -1  -> chỉ cho SELL
+//   0  -> không rõ xu hướng
+int EMAFilter() {
+   double ema50  = iMA(_Symbol, TrendTF, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   double ema200 = iMA(_Symbol, TrendTF, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(ema50 == 0 || ema200 == 0) return 0;
+
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double diff = MathAbs(ema50 - ema200);
+   double thresh = 0.001 * price; // nếu 2 EMA quá gần nhau thì bỏ qua
+
+   if(diff < thresh) return 0; // EMA chồng nhau -> không rõ xu hướng
+   if(ema50 > ema200) return 1; // EMA nhanh trên EMA chậm -> uptrend
+   if(ema50 < ema200) return -1; // EMA nhanh dưới EMA chậm -> downtrend
+   return 0;
+}
+
+// ---- Đặt lệnh thị trường ----
+bool PlaceMarketOrder(bool isBuy, double lots, double sl, double tp) {
+   trade.SetExpertMagicNumber(20251008);
+   trade.SetDeviationInPoints(Slippage);
+
+   bool ok = false;
+   if(isBuy)
+      ok = trade.Buy(lots, NULL, 0, sl, tp, NULL);
+   else
+      ok = trade.Sell(lots, NULL, 0, sl, tp, NULL);
+
+   if(!ok) {
+      Print("Đặt lệnh thất bại: ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   return true;
+}
+
+// ================== VÒNG LẶP CHÍNH ================================
+void OnTick() {
+   static datetime lastEntryTime = 0;
+   datetime t = iTime(_Symbol, EntryTF, 0);
+
+   // Đảm bảo chỉ chạy 1 lần mỗi cây nến mới
+   if(t == lastEntryTime) return;
+   lastEntryTime = t;
+
+   // Giới hạn số lệnh mở
+   if(CountOpenPositionsSymbol() >= MaxOpenPositions) return;
+
+   // Kiểm tra hướng xu hướng từ EMA
+   int filter = EMAFilter();
+   if(filter == 0) return; // nếu chưa rõ xu hướng thì bỏ qua
+
+   double level = 0.0;
+   bool buySignal = false;
+   bool sellSignal = false;
+
+   // --- TÌM TÍN HIỆU MUA ---
+   if(filter == 1 && DetectDoubleBottom(EntryTF, 40, DoubleTolerancePoints, level)) {
+      // Nếu thấy mô hình 2 đáy + nến nhấn chìm tăng hoặc giá vượt qua level -> BUY
+      if(IsBullishEngulfing(EntryTF) || iClose(_Symbol, EntryTF, 0) > level)
+         buySignal = true;
+   }
+
+   // --- TÌM TÍN HIỆU BÁN ---
+   if(filter == -1 && DetectDoubleTop(EntryTF, 40, DoubleTolerancePoints, level)) {
+      // Nếu thấy mô hình 2 đỉnh + nến nhấn chìm giảm hoặc giá cắt xuống level -> SELL
+      if(IsBearishEngulfing(EntryTF) || iClose(_Symbol, EntryTF, 0) < level)
+         sellSignal = true;
+   }
+
+   // --- Kiểm tra chạm EMA như hỗ trợ/kháng cự phụ ---
+   double ema50_trend = iMA(_Symbol, TrendTF, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(filter == 1 && !buySignal) {
+      double lowTouch = iLow(_Symbol, EntryTF, 1);
+      // Nếu nến vừa rồi chạm EMA50 (hỗ trợ) và có nhấn chìm tăng -> BUY
+      if(lowTouch <= ema50_trend && IsBullishEngulfing(EntryTF))
+         buySignal = true;
+   }
+
+   if(filter == -1 && !sellSignal) {
+      double highTouch = iHigh(_Symbol, EntryTF, 1);
+      // Nếu nến vừa rồi chạm EMA50 (kháng cự) và có nhấn chìm giảm -> SELL
+      if(highTouch >= ema50_trend && IsBearishEngulfing(EntryTF))
+         sellSignal = true;
+   }
+
+   // Không có tín hiệu nào -> thoát
+   if(!buySignal && !sellSignal) return;
+
+   // --- TÍNH TOÁN ENTRY, SL, TP ---
+   double entryPrice = (buySignal ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                  : SymbolInfoDouble(_Symbol, SYMBOL_BID));
+   double slPrice = 0.0;
+   double tpPrice = 0.0;
+   double stopLossPoints = SL_Pips_Default;
+
+   // Nếu có level từ mô hình (double top/bottom)
+   if(level > 0) {
+      if(buySignal) {
+         slPrice = level - 5*_Point; // SL thấp hơn đáy 5 points
+         stopLossPoints = MathAbs(entryPrice - slPrice)/_Point;
+      }
+      if(sellSignal) {
+         slPrice = level + 5*_Point; // SL cao hơn đỉnh 5 points
+         stopLossPoints = MathAbs(entryPrice - slPrice)/_Point;
+      }
+   } else {
+      // Nếu không có mô hình -> dùng SL mặc định
+      if(buySignal) slPrice = entryPrice - SL_Pips_Default*_Point;
+      if(sellSignal) slPrice = entryPrice + SL_Pips_Default*_Point;
+      stopLossPoints = SL_Pips_Default;
+   }
+
+   // Tính khối lượng phù hợp với rủi ro
+   double lots = CalculateLotByRisk(RiskPercent, stopLossPoints);
+
+   // Nếu có TP multiplier -> tính TP
+   if(TP_Multiplier > 0) {
+      double riskPriceDiff = MathAbs(entryPrice - slPrice);
+      if(buySignal)
+         tpPrice = entryPrice + TP_Multiplier * riskPriceDiff;
+      else
+         tpPrice = entryPrice - TP_Multiplier * riskPriceDiff;
+   }
+
+   // Kiểm tra lại số lệnh mở (phòng trường hợp vừa mở xong)
+   if(CountOpenPositionsSymbol() >= MaxOpenPositions) return;
+
+   // Đặt lệnh BUY hoặc SELL
+   bool placed = false;
+   if(buySignal)
+      placed = PlaceMarketOrder(true, lots, slPrice, tpPrice);
+   else if(sellSignal)
+      placed = PlaceMarketOrder(false, lots, slPrice, tpPrice);
+
+   if(placed)
+      PrintFormat("Đặt lệnh %s lots=%.2f SL=%.5f TP=%.5f",
+                  (buySignal?"BUY":"SELL"), lots, slPrice, tpPrice);
+}
+
+// ================== KHỞI TẠO & KẾT THÚC ===========================
+int OnInit() {
+   // Tạo các handle EMA để vẽ và tính toán
+   handleEMA50  = iMA(_Symbol, TrendTF, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   handleEMA200 = iMA(_Symbol, TrendTF, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(handleEMA50 == INVALID_HANDLE || handleEMA200 == INVALID_HANDLE){
+      Print("Lỗi tạo EMA handle. Mã lỗi: ", GetLastError());
+      return(INIT_FAILED);
+   }
+
+   // Nếu bật hiển thị -> vẽ lên biểu đồ
+   if(VisualizeEMAs) {
+      bool ok1 = ChartIndicatorAdd(0, 0, handleEMA50);
+      bool ok2 = ChartIndicatorAdd(0, 0, handleEMA200);
+
+      if(!ok1 || !ok2) Print("Không thể vẽ EMA lên chart. Mã lỗi: ", GetLastError());
+   }
+
+   return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+   if(handleEMA50  != INVALID_HANDLE) IndicatorRelease(handleEMA50);
+   if(handleEMA200 != INVALID_HANDLE) IndicatorRelease(handleEMA200);
+}
+
