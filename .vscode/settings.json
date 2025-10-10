@@ -24,7 +24,7 @@
   "editor.wordWrap": "wordWrapColumn",     // "on"|"off"|"wordWrapColumn"|"bounded"
   "editor.wordWrapColumn": 100,            // wrap column (set to whatever you prefer)
   "editor.wrappingIndent": "indent",       // keeps wrapped lines indented
-  "editor.rulers": [90, 100],              // visual guides for line length
+  "editor.rulers": [100],              // visual guides for line length
   "C_Cpp.default.forcedInclude": [
     "c:\\Users\\thinh\\.vscode\\extensions\\l-i-v.mql-tools-2.2.0\\data\\mql5_en.mqh"
   ],
