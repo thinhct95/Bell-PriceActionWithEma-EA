@@ -16,8 +16,8 @@
 CTrade trade;
 
 // ================== INPUTS =========================================
-input ENUM_TIMEFRAMES TrendTF = PERIOD_M5;   // khung thời gian dùng để lọc xu hướng
-input ENUM_TIMEFRAMES EntryTF = PERIOD_M1;   // khung thời gian để tìm điểm vào
+input ENUM_TIMEFRAMES TrendTF = PERIOD_M15;   // khung thời gian dùng để lọc xu hướng
+input ENUM_TIMEFRAMES EntryTF = PERIOD_M5;   // khung thời gian để tìm điểm vào
 input int EMA_Fast = 50;                     // EMA nhanh
 input int EMA_Slow = 200;                    // EMA chậm
 input double RiskPercent = 1.0;              // rủi ro % equity cho mỗi lệnh
@@ -186,8 +186,12 @@ double CalculateLotByRisk(double riskPercent, double stopLossPoints) {
 //  -1  -> chỉ cho SELL
 //   0  -> không rõ xu hướng
 int EMAFilter() {
-   double ema50  = iMA(_Symbol, TrendTF, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
-   double ema200 = iMA(_Symbol, TrendTF, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+   double buf50[], buf200[];
+   
+   if(CopyBuffer(handleEMA50,  0, 1, 1, buf50)  <= 0) return 0;
+   if(CopyBuffer(handleEMA200, 0, 1, 1, buf200) <= 0) return 0;
+   double ema50  = buf50[0];
+   double ema200 = buf200[0];
 
    if(ema50 == 0 || ema200 == 0) return 0;
 
@@ -352,4 +356,3 @@ void OnDeinit(const int reason)
    if(handleEMA50  != INVALID_HANDLE) IndicatorRelease(handleEMA50);
    if(handleEMA200 != INVALID_HANDLE) IndicatorRelease(handleEMA200);
 }
-
