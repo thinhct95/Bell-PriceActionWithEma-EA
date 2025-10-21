@@ -48,3 +48,11 @@ Khung thời gian con: PERIOD_M5
 - Khung thời gian con: Giá tạo mô hình 2 đáy tại vùng hợp lưu này và xuất hiện cặp nến đóng xác nhận Egguffing thể hiện lực mua mạnh (Phe mua lao vào đẩy giá khung con từ nghịch sang thuận chiều xu hướng khung mẹ) ở đáy 2.
 
 - Lưu ý: Cặp nến Engguffing xác nhận này phải là nến mazubozu (Nến mazubozu không có râu hoặc râu không dài quá 10% tổng chiều cao thân nến)
+
+---
+
+4. Quy tắc đặt dừng lỗ và chốt lời
+
+- Chốt Lời khi lợi nhuận đạt 2R
+- Đặt dừng lỗ ngay dưới cây nến xác nhận 60Pips
+- Dịch SL về dương 10pips khi giá đã đi được ít nhất 1R
