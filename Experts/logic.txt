@@ -1,0 +1,50 @@
+R = 1%
+R:R = 1:2
+Khung thời gian mẹ: PERIOD_M15
+Khung thời gian con: PERIOD_M5
+
+=====================
+
+1. Xác định xu hướng ở thời điểm hiện tại của khung thời gian mẹ (lực phe bò hay gấu đang mạnh hơn)
+1.1 Uptrend (Bò mạnh hơn):
+
+- Cấu trúc xu hướng rõ ràng: Higher high, higher low
+- EMA50 nằm trên EMA200
+- Uptrend ngắn hạn: Giá nằm trên EMA50
+- Uptrend dài hạn: Giá nằm trên EMA200
+
+1.2 Downtrend (Gấu mạnh hơn): Ngược lại
+
+---
+
+2. Xác định vùng mua / Vùng bán tiềm năng (thuận trend) của sóng khung thời gian mẹ
+2.1 Uptrend: 
+
+- VÙNG MUA TIỀM NĂNG 1 chỉ khi thỏa mãn đồng thời các điều kiện sau:
++ Giá đã hồi về hơn ít nhất 50% hoặc hơn con sóng vừa tăng (sóng n)
++ Giá hiện tại nằm trong vùng giá tạo đỉnh cũ của con sóng tăng ngay trước (sóng n-1) hoặc nằm trong 1 vùng giá tranh chấp của sóng n hoặc sóng n-1 (order block)
+
+- VÙNG MUA TIỀM NĂNG 2 chỉ khi thỏa mãn đồng thời các điều kiện sau:
++ Giá đã hồi về vùng giá trùng với vùng đáy của con sóng vừa tăng (Con sóng tạo đỉnh cao nhất trong uptrend hiện tại có vùng đáy gọi là KeyLevel)
+
+2.2 Downtrend: Ngược lại
+
+---
+
+3. Vào lệnh khi có tín hiệu xác nhận tiếp diễn trend rõ ràng tại vùng mua / bán tiềm năng (Tín hiệu tại khung thời gian con chuyển từ xu hướng nghịch sang thuận với khung thời gian mẹ)
+3.1 Uptrend:
+
+3.1.1 Tín hiệu xác nhận vào lệnh 1 phải thỏa mãn đồng thời:
+- Khung thời gian con: Giá tạo vùng đi ngang tranh chấp tại khung thời gian con với ít nhất 3 cây nến Doji, 
+- Khung thời gian con: Xuất hiện cây nến đóng là nến Mazubozu mạnh thuận xu hướng mẹ phá vỡ ra khỏi vùng tranh chấp. (Nến mazubozu không có râu hoặc râu không dài quá 10% tổng chiều cao thân nến)
+
+- Lưu ý:
+
++ Nếu độ dài thân nến mazubozu không vượt quá 2.5 lần biên độ vùng tranh chấp thì vào lệnh buy ngay khi nến mazubozu đóng.
++ Nếu độ dài thân nến mazubozu vượt quá 2.5 lần và dưới 4 lần biên độ vùng tranh chấp thì vào lệnh buy limit ở vùng giá 1/2 của thân nến mazubozu
++ Nếu độ dài thân nến mazubozu vượt quá 4 lần biên độ vùng tranh chấp thì không vào lệnh
+
+3.1.2 Tín hiệu xác nhận vào lệnh 2 phải thỏa mãn đồng thời:
+- Khung thời gian con: Giá tạo mô hình 2 đáy tại vùng hợp lưu này và xuất hiện cặp nến đóng xác nhận Egguffing thể hiện lực mua mạnh (Phe mua lao vào đẩy giá khung con từ nghịch sang thuận chiều xu hướng khung mẹ) ở đáy 2.
+
+- Lưu ý: Cặp nến Engguffing xác nhận này phải là nến mazubozu (Nến mazubozu không có râu hoặc râu không dài quá 10% tổng chiều cao thân nến)
