@@ -14,11 +14,11 @@
 
 #include <Trade/Trade.mqh>
 CTrade trade;
-int handleEMA50 = INVALID_HANDLE;
-int handleEMA200 = INVALID_HANDLE;
+int handleEMAFast = INVALID_HANDLE;
+int handleEMASlow = INVALID_HANDLE;
 
 // ================== INPUTS =========================================
-input ENUM_TIMEFRAMES TrendTF = PERIOD_M15;   // khung thời gian dùng để lọc xu hướng
+input ENUM_TIMEFRAMES TrendTF = PERIOD_H1;   // khung thời gian dùng để lọc xu hướng
 input ENUM_TIMEFRAMES EntryTF = PERIOD_M5;   // khung thời gian để tìm điểm vào
 input int EMA_Fast = 50;                     // EMA nhanh
 input int EMA_Slow = 200;                    // EMA chậm
@@ -27,7 +27,7 @@ input double TP_Multiplier = 2.0;            // tỉ lệ TP = Risk * multiplier
 input int MaxOpenPositions = 2;              // tối đa 2 lệnh mở
 input double DoubleTolerancePoints = 30;     // dung sai giữa 2 đáy/đỉnh
 input int MinBarsBetweenDouble = 4;          // khoảng cách tối thiểu giữa 2 đáy/đỉnh
-input int SL_Pips_Default = 35;              // SL mặc định (points)
+input int SL_Pips_Default = 40;              // SL mặc định (points)
 input int Slippage = 10;                     // trượt giá tối đa
 input bool VisualizeEMAs = true;             // có vẽ EMA lên chart không
 input int TrendShift = 1;                    // shift dùng để đọc nến đóng (tránh nến đang hình thành)
@@ -36,19 +36,9 @@ input int StructurePrevOffset = 2;           // offset cho nến trước đó k
 
 // ================== FUNCTIONS =====================================
 
-// ----- Enums for structured states (avoid hard-coded strings) -----
-enum TREND_STRUCTURE { STRUCTURE_NEUTRAL = 0, STRUCTURE_HH_HL, STRUCTURE_LH_LL, STRUCTURE_SIDEWAY };
-enum EMA_COND       { EMA_INSUFFICIENT = 0, EMA_UPTREND, EMA_DOWNTREND, EMA_NEUTRAL };
-enum TREND_RESULT   { TREND_NEUTRAL = 0, TREND_UPTREND, TREND_DOWNTREND, TREND_SIDEWAY_RESULT };
-
-string StructureToString(const int s) {
-   switch(s) {
-      case STRUCTURE_HH_HL: return "HH-HL (Uptrend)";
-      case STRUCTURE_LH_LL: return "LH-LL (Downtrend)";
-      case STRUCTURE_SIDEWAY: return "Sideway";
-      default: return "Neutral";
-   }
-}
+// ----- Enums for EMA and trend result (avoid hard-coded strings) -----
+enum EMA_COND     { EMA_INSUFFICIENT = 0, EMA_UPTREND, EMA_DOWNTREND, EMA_NEUTRAL };
+enum TREND_RESULT { TREND_NEUTRAL = 0, TREND_UPTREND, TREND_DOWNTREND, TREND_SIDEWAY_RESULT };
 
 string EmaConditionToString(const int e) {
    switch(e) {
@@ -76,57 +66,42 @@ string GetTrendDirection() {
    double buf[];
 
    // read EMA50 value by copying buffer from handle
-   if(handleEMA50 != INVALID_HANDLE) {
-      if(CopyBuffer(handleEMA50, 0, shift, 1, buf) > 0) emaFast = buf[0];
+   if(handleEMAFast != INVALID_HANDLE) {
+      if(CopyBuffer(handleEMAFast, 0, shift, 1, buf) > 0) emaFast = buf[0];
    }
    
    // read EMA200 value by copying buffer from handle
-   if(handleEMA200 != INVALID_HANDLE) {
-      if(CopyBuffer(handleEMA200, 0, shift, 1, buf) > 0) emaSlow = buf[0];
+   if(handleEMASlow != INVALID_HANDLE) {
+      if(CopyBuffer(handleEMASlow, 0, shift, 1, buf) > 0) emaSlow = buf[0];
    }
    double priceClose = iClose(_Symbol, TrendTF, shift);
 
-   // Lấy giá cao thấp theo cấu hình offsets (recent vs prev)
-   double high1 = iHigh(_Symbol, TrendTF, StructureRecentOffset);
-   double high2 = iHigh(_Symbol, TrendTF, StructurePrevOffset);
-   double low1  = iLow(_Symbol, TrendTF, StructureRecentOffset);
-   double low2  = iLow(_Symbol, TrendTF, StructurePrevOffset);
-
-   int structureEnum = STRUCTURE_NEUTRAL;
    int emaEnum = EMA_INSUFFICIENT;
    int trendEnum = TREND_NEUTRAL;
 
-   // --- B1: Kiểm tra cấu trúc xu hướng
-   if(high1 > high2 && low1 > low2)
-      structureEnum = STRUCTURE_HH_HL;
-   else if(high1 < high2 && low1 < low2)
-      structureEnum = STRUCTURE_LH_LL;
-   else
-      structureEnum = STRUCTURE_SIDEWAY;
-
    // --- B2: Kiểm tra EMA (an toàn: đảm bảo dữ liệu hợp lệ)
-   if(priceClose <= 0.0 || emaFast <= 0.0 || emaSlow <= 0.0)
+   if(priceClose <= 0.0 || emaFast <= 0.0 || emaSlow <= 0.0) {
       emaEnum = EMA_INSUFFICIENT;
-   else if(emaFast > emaSlow && priceClose > emaFast)
+      trendEnum = TREND_NEUTRAL;
+   }
+   else if(emaFast > emaSlow ) {  // && priceClose > emaFast
       emaEnum = EMA_UPTREND;
-   else if(emaFast < emaSlow && priceClose < emaFast)
-      emaEnum = EMA_DOWNTREND;
-   else
-      emaEnum = EMA_NEUTRAL;
-
-   // --- B3: Tổng hợp kết luận
-   if(structureEnum == STRUCTURE_HH_HL && emaEnum == EMA_UPTREND)
       trendEnum = TREND_UPTREND;
-   else if(structureEnum == STRUCTURE_LH_LL && emaEnum == EMA_DOWNTREND)
+   }
+   else if(emaFast < emaSlow) { // && priceClose < emaFast
+      emaEnum = EMA_DOWNTREND;
       trendEnum = TREND_DOWNTREND;
-   else
+   }
+   else {
+      emaEnum = EMA_NEUTRAL;
       trendEnum = TREND_SIDEWAY_RESULT;
+   }
 
-   // --- B4: Log chi tiết (debug)
+   // --- Log chi tiết (debug)
    PrintFormat("[TREND DEBUG] === %s ===", TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS));
-   PrintFormat("EMA50=%.2f | EMA200=%.2f | Close=%.2f", emaFast, emaSlow, priceClose);
-   PrintFormat("Structure: %s | EMA: %s | => TREND: %s",
-               StructureToString(structureEnum), EmaConditionToString(emaEnum), TrendResultToString(trendEnum));
+   // print the EMA periods and their current values instead of hard-coded labels
+   PrintFormat("EMA%d=%.5f | EMA%d=%.5f | PriceClose=%.5f", EMA_Fast, emaFast, EMA_Slow, emaSlow, priceClose);
+   PrintFormat("EMA: %s | => TREND: %s", EmaConditionToString(emaEnum), TrendResultToString(trendEnum));
 
    return TrendResultToString(trendEnum);
 }
@@ -148,17 +123,32 @@ void OnTick()
 
 // ================== KHỞI TẠO & KẾT THÚC ===========================
 int OnInit() {
-   // create EMA indicator handles
-   handleEMA50  = iMA(_Symbol, TrendTF, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
-   handleEMA200 = iMA(_Symbol, TrendTF, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
-   if(handleEMA50 == INVALID_HANDLE || handleEMA200 == INVALID_HANDLE) {
+   Sleep(500); // đợi chart visual load hoàn tất
+
+   handleEMAFast  = iMA(_Symbol, _Period, EMA_Fast, 0, MODE_EMA, PRICE_CLOSE);
+   handleEMASlow = iMA(_Symbol, _Period, EMA_Slow, 0, MODE_EMA, PRICE_CLOSE);
+
+   if(handleEMAFast == INVALID_HANDLE || handleEMASlow == INVALID_HANDLE) {
       Print("Failed to create EMA handles. Err=", GetLastError());
       return(INIT_FAILED);
    }
+
+   // Diagnostic: print which EA file is running and the active EMA periods (helps detect .set overrides)
+   PrintFormat("Init: EA=%s EMA_Fast=%d EMA_Slow=%d handles=(%d,%d)", __FILE__, EMA_Fast, EMA_Slow, handleEMAFast, handleEMASlow);
+
+   if(VisualizeEMAs) {
+      long chart_id = ChartID();
+      bool ok1 = ChartIndicatorAdd(chart_id, 0, handleEMAFast);
+      bool ok2 = ChartIndicatorAdd(chart_id, 0, handleEMASlow);
+
+      if(!ok1 || !ok2)
+         Print("Warning: ChartIndicatorAdd failed. Err=", GetLastError());
+   }
+
    return(INIT_SUCCEEDED);
 }
 
 void OnDeinit(const int reason) {
-   if(handleEMA50  != INVALID_HANDLE) IndicatorRelease(handleEMA50);
-   if(handleEMA200 != INVALID_HANDLE) IndicatorRelease(handleEMA200);
+   if(handleEMAFast  != INVALID_HANDLE) IndicatorRelease(handleEMAFast);
+   if(handleEMASlow != INVALID_HANDLE) IndicatorRelease(handleEMASlow);
 }
