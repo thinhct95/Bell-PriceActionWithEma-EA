@@ -1,0 +1,22 @@
+- Hiện tại code đang xác định xu hướng bằng việc so sánh price > ema && high1 > low1 => chưa chính xác.
+
+-> cần xác định KeyLevel của xu hướng
+
+---
+
+1. Ý tưởng xác định KeyLV Xu hướng tăng:
+
+Tạo các biến lưu trữ dữ liệu của con sóng cao nhất:
+- highest = đỉnh cao nhất của xu hướng hiện tại
+- KeyLV = vùng giá đáy mà giá từ đáy đó đi lên tạo thành đỉnh cao nhất
+
+=> Xu hướng tăng được xác định khi:
+
+- Giá vẫn đang giao động trong khoảng keyLV < Giá hiện tại < highest
+- Cấu trúc giá:
++ Sóng gần nhất: keyLV < highest
++ Sóng liền trước sóng gần nhất: oldKeyLV < OldHighest
++ keyLV < OldHighest
+- Giá trung bình 20 nến gần nhất > ema50
+
+2. Ý tưởng xác định KeyLV Xu hướng giảm: ngược với xu hướng tăng
