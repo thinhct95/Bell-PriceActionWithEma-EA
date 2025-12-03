@@ -9,13 +9,18 @@
 
 input ENUM_TIMEFRAMES HighTF = PERIOD_D1;    // Khung thời gian cao
 input ENUM_TIMEFRAMES MiddleTF = PERIOD_H1;  // Khung thời gian trung bình (dùng để tìm FVG)
+input ENUM_TIMEFRAMES LowTF = PERIOD_M5;    // Khung thời gian thấp (Tìm điểm vào lệnh)
+
 input string        LabelName = "HighTF_Trend_Label"; // Tên object hiển thị
 input int           MaxSkip = 10;             // Không dùng nhiều trong phiên bản này nhưng giữ để tương thích
 input bool          ShowLabel = true;         // Hiển thị label trên chart
 input bool          PrintToExperts = true;    // In log ra Expert
 
 // Cấu hình Swing
-input int           SwingRange = 2;           // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           htfSwingRange = 1;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+
 input int           SwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Cấu hình vẽ Swing trên chart
@@ -24,15 +29,15 @@ input string SwingObjPrefix   = "Swing_"; // Tiền tố tên object (dễ xóa/
 input int    SwingMarkerFontSize    = 10;        // Kích thước font cho label
 
 // --- multi-TF swing storage (slots) ---
-// slot 0 = HighTF, slot 1 = MiddleTF
+// slot 0 = HighTF, slot 1 = MiddleTF, slot 2 = LowTF
 // dimension: [slot][index]  (index 0 = nearest, 1 = older)
-double SwingHighPriceTF[2][2];
-datetime SwingHighTimeTF[2][2];
-int    SwingHighCountTF[2];
+double SwingHighPriceTF[3][2];
+datetime SwingHighTimeTF[3][2];
+int    SwingHighCountTF[3];
 
-double SwingLowPriceTF[2][2];
-datetime SwingLowTimeTF[2][2];
-int    SwingLowCountTF[2];
+double SwingLowPriceTF[3][2];
+datetime SwingLowTimeTF[3][2];
+int    SwingLowCountTF[3];
 
 
 // FVG results (global)
@@ -52,7 +57,9 @@ int    FVG_count = 0;
 int CalculateTrendFromSwings(string symbol, ENUM_TIMEFRAMES TimeframeSwingRange)
 {
   // Map timeframe -> slot
-  int slot = (TimeframeSwingRange == MiddleTF) ? 1 : 0;
+  int slot = 0; // default 0=HTF
+  if(TimeframeSwingRange == MiddleTF) slot = 1;
+  else if (TimeframeSwingRange == LowTF) slot = 2;
 
   // Cập nhật swings cho slot tương ứng
   UpdateSwings(symbol, TimeframeSwingRange, slot);
@@ -157,7 +164,7 @@ bool IsSwingLow(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
 // UpdateSwings vào slot (0 = HighTF, 1 = MiddleTF)
 // Cập nhật mảng SwingHighPrice/Time và SwingLowPrice/Time (giữ SwingKeep phần tử gần nhất)
 // UpdateSwings vào slot (0 = HighTF, 1 = MiddleTF)
-void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot)
+void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingRange = 1)
 {
   // Reset slot
   SwingHighCountTF[slot] = 0;
@@ -231,27 +238,34 @@ void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot)
 // Updated: use explicit prefixes "htf_" and "MTF_" and delete only matching objects
 void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
 {
-   if(!ShowSwingMarkers) return;
+  if(!ShowSwingMarkers) return;
 
-   // map timeframe -> slot
-   int slot = 0;
-   if(timeframe == MiddleTF) slot = 1;
-   else slot = 0; // default to HighTF slot
+  // mapping chung: 0=HTF, 1=MTF, 2=LTF
+  int slot = 0; // default 0=HTF
+  string inChartSwingPrefix = "h_";
 
-   string inChartSwingPrefix = (slot == 0) ? "htf_" : "mtf_";
-   string prefix = SwingObjPrefix + inChartSwingPrefix;
+  if(timeframe == MiddleTF) {
+    slot = 1;
+    inChartSwingPrefix = "m_";
+  } else if (timeframe == LowTF) {
+    slot = 2;
+    inChartSwingPrefix = "l_";
+  }
 
-   // Xóa các marker cũ chỉ theo prefix này (không xóa chung tất cả SwingObjPrefix)
-   int total = ObjectsTotal(0);
-   for(int i = total - 1; i >= 0; i--)
-   {
-      string name = ObjectName(0, i);
-      if(StringLen(name) >= StringLen(prefix))
-      {
-         if(StringSubstr(name, 0, StringLen(prefix)) == prefix)
-            ObjectDelete(0, name);
-      }
-   }
+  string prefix = SwingObjPrefix + inChartSwingPrefix;
+
+  // Xóa các marker cũ chỉ theo prefix này (không xóa chung tất cả SwingObjPrefix)
+  int total = ObjectsTotal(0);
+
+  for(int i = total - 1; i >= 0; i--)
+  {
+    string name = ObjectName(0, i);
+    if(StringLen(name) >= StringLen(prefix))
+    {
+        if(StringSubstr(name, 0, StringLen(prefix)) == prefix)
+          ObjectDelete(0, name);
+    }
+  }
 
    // Thời lượng bar (giây)
    datetime bar_secs = (datetime)PeriodSeconds(timeframe);
@@ -264,6 +278,8 @@ void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
       datetime t = SwingHighTimeTF[slot][h];
       double price = SwingHighPriceTF[slot][h];
       datetime display_time_h = (datetime)(t + (bar_secs/2));
+
+      if(t == 0 || price == 0.0) continue; 
       if(!ObjectCreate(0, obj, OBJ_TEXT, 0, display_time_h, price))
       {
          Print("Cannot create object: ", obj);
@@ -583,10 +599,9 @@ void UpdateLabel(string labelName, ENUM_TIMEFRAMES timeframe, int trend)
     // nếu timeframe giống MiddleTF (khung nhỏ hơn) -> dịch xuống thêm 1 hàng
     // bạn có thể tinh chỉnh offset_down tuỳ ý (ví dụ 20 px)
     int offset_down = 30;
-    if(timeframe == MiddleTF) 
-        ydist = ydist_default + offset_down;
-    else
-        ydist = ydist_default;
+    if (timeframe == MiddleTF) ydist = ydist_default + offset_down;
+    else if(timeframe == LowTF) ydist = ydist_default + offset_down * 2;
+
 
     // Nếu object đã tồn tại -> cập nhật text và giữ vị trí
     if(ObjectFind(0, labelName) >= 0)
@@ -620,20 +635,22 @@ void UpdateLabel(string labelName, ENUM_TIMEFRAMES timeframe, int trend)
 
 int OnInit()
 {
-  // Khởi tạo 2 label cho 2 timeframe
+  // Khởi tạo 3 label cho 3 timeframe
   UpdateLabel("LBL_HTF", HighTF, 0);
   UpdateLabel("LBL_MTF", MiddleTF, 0);
+  UpdateLabel("LBL_LTF", LowTF, 0);
 
   return(INIT_SUCCEEDED);
 }
 
 void OnDeinit(const int reason)
 {
-  // Xoá 2 label
+  // Xoá 3 label
   if(ObjectFind(0, "LBL_HTF") >= 0) ObjectDelete(0, "LBL_HTF");
   if(ObjectFind(0, "LBL_MTF") >= 0) ObjectDelete(0, "LBL_MTF");
+  if(ObjectFind(0, "LBL_LTF") >= 0) ObjectDelete(0, "LBL_LTF");
 
-  // Xóa tất cả object dùng tiền tố SwingObjPrefix (bao gồm mid_ và FVG)
+  // Xóa tất cả object dùng tiền tố SwingObjPrefix (bao gồm htf_/mtf_/ltf_ và FVG)
   int tot = ObjectsTotal(0);
   for(int i = tot - 1; i >= 0; i--)
   {
@@ -648,14 +665,16 @@ void OnTick()
   string sym = Symbol();
 
   // Cập nhật swings cho cả 2 timeframe vào slot tương ứng
-  UpdateSwings(sym, HighTF,   0); // slot 0 = HighTF
-  UpdateSwings(sym, MiddleTF, 1); // slot 1 = MiddleTF
+  UpdateSwings(sym, HighTF,   0, htfSwingRange);
+  UpdateSwings(sym, MiddleTF, 1, mtfSwingRange);
+  UpdateSwings(sym, LowTF,    2, ltfSwingRange);
 
   // Vẽ marker cho từng timeframe (prefix sẽ thêm "MTF_" cho middle)
   if(ShowSwingMarkers)
   {
     DrawSwingsOnChart(HighTF);
     DrawSwingsOnChart(MiddleTF);
+    DrawSwingsOnChart(LowTF);
   }
 
 
@@ -664,11 +683,10 @@ void OnTick()
   PrintFormat("Found %d FVG on %s", found, EnumToString(MiddleTF));
   DrawFVG(sym, MiddleTF, true); // vẽ FVG, start từ bar C
 
-  // Tính high timeframe trend từ SwingHigh/SwingLow
+  // Tính trend từ swings
   int htfTrend = CalculateTrendFromSwings(sym, HighTF);
-
-  // Tính middle timeframe trend
-  int midTrend = CalculateTrendFromSwings(sym, MiddleTF);
+  int mtfTrend = CalculateTrendFromSwings(sym, MiddleTF);
+  int ltfTrend = CalculateTrendFromSwings(sym, LowTF);
 
   if(PrintToExperts)
   {
@@ -686,10 +704,17 @@ void OnTick()
     if(SwingLowCountTF[1]>=1)  PrintFormat("MTF_SwingL[0]=%.5f at %s", SwingLowPriceTF[1][0], TimeToString(SwingLowTimeTF[1][0], TIME_DATE|TIME_MINUTES));
     if(SwingLowCountTF[1]>=2)  PrintFormat("MTF_SwingL[1]=%.5f at %s", SwingLowPriceTF[1][1], TimeToString(SwingLowTimeTF[1][1], TIME_DATE|TIME_MINUTES));
 
+    // In thông tin low timeframe swings
+    if(SwingHighCountTF[2]>=1) PrintFormat("LTF_SwingH[0]=%.5f at %s", SwingHighPriceTF[2][0], TimeToString(SwingHighTimeTF[2][0], TIME_DATE|TIME_MINUTES));
+    if(SwingHighCountTF[2]>=2) PrintFormat("LTF_SwingH[1]=%.5f at %s", SwingHighPriceTF[2][1], TimeToString(SwingHighTimeTF[2][1], TIME_DATE|TIME_MINUTES));
+    if(SwingLowCountTF[2]>=1)  PrintFormat("LTF_SwingL[0]=%.5f at %s", SwingLowPriceTF[2][0], TimeToString(SwingLowTimeTF[2][0], TIME_DATE|TIME_MINUTES));
+    if(SwingLowCountTF[2]>=2)  PrintFormat("LTF_SwingL[1]=%.5f at %s", SwingLowPriceTF[2][1], TimeToString(SwingLowTimeTF[2][1], TIME_DATE|TIME_MINUTES));
+
   }
 
   UpdateLabel("LBL_HTF", HighTF, htfTrend);
-  UpdateLabel("LBL_MTF", MiddleTF, midTrend);
+  UpdateLabel("LBL_MTF", MiddleTF, mtfTrend);
+  UpdateLabel("LBL_LTF", LowTF, ltfTrend);
 
   // Nơi để thêm logic entry/exit dựa trên trend
 }
