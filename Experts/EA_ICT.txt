@@ -1,0 +1,18 @@
+Bước 1: Xác định Daily bias:
+- Xét 2 cây nến D1 đã đóng cửa gần nhất (Không tính nến hiện tại)
++ Nếu nến D[1] đóng cửa cao hơn giá đóng cửa cao nhất của nến D[2] ngày hôm trước (D[2] tính cả râu nến) -> xu hướng ngày hôm nay (D[0]) uptrend
++ Nếu nến D[1] đóng cửa thấp hơn giá đóng cửa thấp nhất của nến D[2] ngày hôm trước (D[2] tính cả râu nến) -> xu hướng ngày hôm nay (D[0]) downtrend
++ Nếu nến D[1] đóng cửa bên trong nến D[2], không cao hơn và không thấp hơn -> Bỏ qua D[1], dùng nến D[2] và D[3] để xác định xu hướng ngày hôm nay theo cách tương tự
+
+Bước 2: Xác định FVG của khung H1 thuận chiều với daily bias và đánh dấu lại
+- Nếu Daily Bias là uptrend -> Tìm uptrend FVG
+- Nếu Daily Bias là downtrend -> Tìm downtrend FVG
+
+Bước 3: Vào lệnh pullback khi có xác nhận tín hiệu tại khung m5 khi giá hồi về H1 FVG ở bước 2 như sau:
+- Xu hướng hồi của khung M5 bị phá vỡ (Xuất hiện market structure shift, key level bị phá)
+- Khung m5 xuất hiện M5 FVG thuận chiều với H1 trend
+- Vào 1 lệnh buy limit hoặc sell limit thuận chiều xu hướng của H1 tại M5 FVG
+- Tính toán lot size để đặt SL:
++ Nếu buy limit: Tính toán lot size vào lệnh sao cho khoảng cách từ entry tới đáy thấp nhất của sóng hồi m5 vừa bằng 1% equity
++ Nếu sell limit: Tính toán lot size vào lệnh sao cho khoảng cách từ entry tới đỉnh cao nhất của sóng hồi m5 vừa bằng 1% equity
+- R:R = 1:3
