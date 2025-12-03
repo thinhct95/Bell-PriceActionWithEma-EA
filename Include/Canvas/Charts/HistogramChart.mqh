@@ -226,7 +226,7 @@ void CHistogramChart::DrawData(const uint idx)
 //--- draw
    for(int i=0;i<total;i++,x+=dx)
      {
-      int y,h;
+      int y,h = 0;
       double val=data[i];
       if(val==EMPTY_VALUE)
          continue;
@@ -237,13 +237,13 @@ void CHistogramChart::DrawData(const uint idx)
 //      int val=(int)(value*m_scale_y);
       if(value>0)
         {
-         y=(m_y_0-(int)(value*m_scale_y));
+         y=(m_y_0+(int)(value*m_scale_y));
          h=m_y_0-y;
         }
       else
         {
          y=m_y_0;
-         h=-(int)(value*m_scale_y);
+         h=(int)(value*m_scale_y);
         }
       DrawBar(x,y,w,h,clr);
       //--- draw text of value
