@@ -1,25 +1,26 @@
 //+------------------------------------------------------------------+
-//| EA: HighTF Trend Detector (v2 - Swing High/Low)                  |
-//| Mục đích: Xác định xu hướng trên khung thời gian lớn theo logic  |
-//| Người tạo: ChatGPT (mã mẫu)                                      |
+//| EA: ICT v2                                                       |
+//| Mục đích: Setup ICT đồng thuận trend 3 timeframes                |
+//| Người tạo: Bell CW                                     |
 //+------------------------------------------------------------------+
-#property copyright "ChatGPT"
+#property copyright "Bell CW"
 #property version   "2.00"
 #property strict
+
+// --- lưu trend đã tính cho mỗi slot ---
+// slot 0 = HTF, 1 = MTF, 2 = LTF
+int TrendTF[3]; // 1 = up, -1 = down, 0 = sideway / unknown
 
 input ENUM_TIMEFRAMES HighTF = PERIOD_D1;    // Khung thời gian cao
 input ENUM_TIMEFRAMES MiddleTF = PERIOD_H1;  // Khung thời gian trung bình (dùng để tìm FVG)
 input ENUM_TIMEFRAMES LowTF = PERIOD_M5;    // Khung thời gian thấp (Tìm điểm vào lệnh)
 
-input string        LabelName = "HighTF_Trend_Label"; // Tên object hiển thị
-input int           MaxSkip = 10;             // Không dùng nhiều trong phiên bản này nhưng giữ để tương thích
-input bool          ShowLabel = true;         // Hiển thị label trên chart
 input bool          PrintToExperts = true;    // In log ra Expert
 
 // Cấu hình Swing
-input int           htfSwingRange = 1;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 
 input int           SwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
@@ -39,6 +40,9 @@ double SwingLowPriceTF[3][2];
 datetime SwingLowTimeTF[3][2];
 int    SwingLowCountTF[3];
 
+// --- cấu hình cho trend provisional (phát hiện sớm) ---
+input int ProvisionalBreakPips = 5; // số pips để coi là phá sớm (change-as-you-like)
+input int ProvisionalConsecCloses = 1; // số nến đóng liên tiếp vượt level để xác nhận provisional (thường 1 hoặc 2)
 
 // FVG results (global)
 double FVG_top[];        // giá trên của zone (lớn hơn)
@@ -48,115 +52,403 @@ datetime FVG_timeC[];    // time của bar C (newer)
 int    FVG_type[];       //  1 = bullish, -1 = bearish
 int    FVG_count = 0;
 
-//+------------------------------------------------------------------+
-//| CalculateTrendFromSwings - phiên bản nhận symbol và timeframe    |
-//| symbol: symbol để lấy giá và truyền vào UpdateSwings             |
-//| TimeframeSwingRange: khung thời gian dùng để tìm swing (HighTF / MiddleTF ...) |
-//| Trả về: 1 = Uptrend, -1 = Downtrend, 0 = Sideway                 |
-//+------------------------------------------------------------------+
-int CalculateTrendFromSwings(string symbol, ENUM_TIMEFRAMES TimeframeSwingRange)
+// last closed bar time per slot (index 0=HighTF,1=MiddleTF,2=LowTF)
+datetime lastClosedBarTime[3] = {0,0,0};
+
+// cache last FVG compute time (bar C or bar index 1 time used to detect change)
+datetime lastFVGBarTime = 0;
+
+// Bật/tắt MSS detection cho từng TF
+input bool DetectMSS_HTF = false;
+input bool DetectMSS_MTF = false;
+input bool DetectMSS_LTF = true;
+
+// struct dùng để trả thông tin khi phát hiện MSS
+struct MSSInfo {
+  bool  found;                 // true nếu tìm thấy MSS
+  int   direction;             //  1 = down->up (bull MSS), -1 = up->down (bear MSS)
+  datetime sweep_time;         // thời điểm bar "sweep" (bar quét thanh khoản)
+  double sweep_price;          // giá (râu) bị sweep (low cho bull, high cho bear)
+  // --- thêm: swing gốc đã bị swept (time/price) ---
+  datetime swept_swing_time;   // time của swing bar trước khi bị sweep (ví dụ l0/h0 tại thời điểm detect)
+  double   swept_swing_price;  // giá swing gốc
+
+  double key_level;            // mức key level (swing cần phá)
+  datetime break_time;         // thời điểm bar phá key level (thỏa điều kiện break)
+  // --- thêm: swing gốc bị broken (time/price) ---
+  datetime broken_swing_time;  // time của swing bar bị phá (ví dụ sh0/sl0 tại thời điểm detect)
+  double   broken_swing_price; // giá swing gốc bị phá
+};
+
+// ---------------------- Helper: pip size ----------------------
+// Trả về 1 "pip" cho symbol (không phải point). 
+// Lý do: nhiều broker dùng 5 chữ số (0.00001) => pip = point*10; 4 chữ số => pip = point.
+double GetPipSize(string symbol)
 {
-  // Map timeframe -> slot
-  int slot = 0; // default 0=HTF
-  if(TimeframeSwingRange == MiddleTF) slot = 1;
-  else if (TimeframeSwingRange == LowTF) slot = 2;
-
-  // Cập nhật swings cho slot tương ứng
-  UpdateSwings(symbol, TimeframeSwingRange, slot);
-
-  // Kiểm tra đủ swings
-  if(SwingHighCountTF[slot] < 2 || SwingLowCountTF[slot] < 2)
-  {
-    if(PrintToExperts) PrintFormat("CalculateTrendFromSwings(%s,%s): Không đủ swing (slot=%d H=%d L=%d)", symbol, EnumToString(TimeframeSwingRange), slot, SwingHighCountTF[slot], SwingLowCountTF[slot]);
-    return 0;
-  }
-
-  double sh0 = SwingHighPriceTF[slot][0];
-  double sh1 = SwingHighPriceTF[slot][1];
-  double sl0 = SwingLowPriceTF[slot][0];
-  double sl1 = SwingLowPriceTF[slot][1];
-
-  // Lấy giá hiện tại
-  MqlTick tick;
-  if(!SymbolInfoTick(symbol, tick))
-  {
-     if(PrintToExperts) PrintFormat("CalculateTrendFromSwings: Không lấy được tick của %s", symbol);
-     return 0;
-  }
-  double currentPrice = tick.bid;
-  if(currentPrice == 0.0)
-  {
-    if(tick.last > 0) currentPrice = tick.last;
-    else if(tick.ask > 0) currentPrice = tick.ask;
-    else { if(PrintToExperts) PrintFormat("CalculateTrendFromSwings: Không lấy được giá cho %s", symbol); return 0; }
-  }
-
+  // Lấy số chữ số (digits) và point của symbol
+  int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-  double tol   = (point > 0 ? point * 0.5 : 0.0);
 
-  // Logic xác định trend (theo spec của bạn)
-  if(sh1 < sh0 && sl1 < sl0)
-  {
-    if(currentPrice > sl0 + tol) return 1;
-    if(currentPrice < sl0 - tol) return -1;
-    return 0;
-  }
+  // Quy ước phổ biến:
+  // - digits 5 hoặc 3 => broker dùng extra digit -> 1 pip = point * 10
+  // - digits 4 hoặc 2 => 1 pip = point
+  // Việc dùng pip (không phải point) thuận tiện để người dùng nhập ngưỡng theo pips (ví dụ 30 pips).
+  if(digits==5 || digits==3) return point * 10.0;
+  return point;
+}
 
-  if(sh1 > sh0 && sl1 > sl0)
-  {
-    if(currentPrice < sh0 - tol) return -1;
-    if(currentPrice > sh0 + tol) return 1;
-    return 0;
-  }
+bool HasBullFVGAfter(string symbol, ENUM_TIMEFRAMES timeframe, datetime after_time, int fvgLookback)
+{
+   FindFVG(symbol, timeframe, fvgLookback); // cập nhật FVG_count và FVG_* arrays
 
-  return 0;
+   for(int k = 0; k < FVG_count; k++)
+   {
+      if(FVG_type[k] == 1 && FVG_timeC[k] > after_time)
+         return true;
+   }
+   return false;
+}
+
+bool HasBearFVGAfter(string symbol, ENUM_TIMEFRAMES timeframe, datetime after_time, int fvgLookback)
+{
+   FindFVG(symbol, timeframe, fvgLookback);
+
+   for(int k = 0; k < FVG_count; k++)
+   {
+      if(FVG_type[k] == -1 && FVG_timeC[k] > after_time)
+         return true;
+   }
+   return false;
+}
+
+
+
+// ---------------------- Hàm chính: DetectMSSOnSlot ----------------------
+// Mục tiêu: xác định Market Structure Shift (MSS) trên một timeframe (slot).
+// - Dùng các swing đã tính sẵn: SwingHighPriceTF[slot][*], SwingLowPriceTF[slot][*]
+// - Có thể yêu cầu FVG xuất hiện sau sweep (requireFVG = true)
+// Tham số:
+//   symbol            : ký hiệu (Symbol())
+//   timeframe         : timeframe để kiểm tra (ví dụ MiddleTF)
+//   slot              : index trong mảng swings (0=HTF,1=MTF,2=LTF trong EA của bạn)
+//   minBreakPips      : số pips tối thiểu để coi là "phá" key level (ví dụ 30 pips)
+//   minConsec         : số nến liên tiếp cùng màu sau sweep để chứng minh momentum
+//   lookbackBarsForSweep : số bar tối đa quét tìm bar sweep sau swing (giảm chi phí tính toán)
+//   fvgLookback       : nếu dùng FVG, đưa vào FindFVG(..., fvgLookback)
+//   requireFVG        : nếu true, bắt buộc phải có FVG loại phù hợp xuất hiện sau sweep
+MSSInfo DetectMSSOnSlot(
+        string symbol, ENUM_TIMEFRAMES timeframe, int slot,
+        double minBreakPips = 5.0,
+        int minConsec = 2,
+        int lookbackBarsForSweep = 50,
+        int fvgLookback = 200,
+        bool requireFVG = true)
+{
+   MSSInfo result;
+   result.found = false;
+   result.direction = 0;
+   result.sweep_time = 0;
+   result.sweep_price = 0.0;
+   result.key_level = 0.0;
+   result.break_time = 0;
+
+   if(PrintToExperts)
+     PrintFormat("DetectMSSOnSlot START: sym=%s tf=%s slot=%d minBreakPips=%.1f minConsec=%d lookback=%d requireFVG=%s",
+                 symbol, EnumToString(timeframe), slot, minBreakPips, minConsec, lookbackBarsForSweep, (requireFVG ? "true":"false"));
+
+   // cần ít nhất 2 swing high + 2 swing low
+   if(SwingHighCountTF[slot] < 2 || SwingLowCountTF[slot] < 2)
+   {
+      if(PrintToExperts)
+        PrintFormat("DetectMSSOnSlot slot=%d: not enough swings H=%d L=%d -> exit", slot, SwingHighCountTF[slot], SwingLowCountTF[slot]);
+      return result;
+   }
+
+   // lấy swing (index 0 = nearest, 1 = older)
+   double sh0 = SwingHighPriceTF[slot][0];
+   double sh1 = SwingHighPriceTF[slot][1];
+   double sl0 = SwingLowPriceTF[slot][0];
+   double sl1 = SwingLowPriceTF[slot][1];
+
+   if(PrintToExperts)
+     PrintFormat("DetectMSSOnSlot slot=%d swings: sh0=%.5f sh1=%.5f sl0=%.5f sl1=%.5f",
+                 slot, sh0, sh1, sl0, sl1);
+
+   double pip = GetPipSize(symbol);
+   double minBreakPoints = minBreakPips * pip;
+   double tol = SymbolInfoDouble(symbol, SYMBOL_POINT) * 0.5;
+
+   int barsAvailable = iBars(symbol, timeframe);
+   if(barsAvailable <= 3)
+   {
+     if(PrintToExperts) PrintFormat("DetectMSSOnSlot slot=%d: not enough bars (%d) -> exit", slot, barsAvailable);
+     return result;
+   }
+   int maxScan = MathMin(lookbackBarsForSweep, barsAvailable - 1);
+
+   // trend đã tính trước và lưu vào TrendTF[]
+   int currentTrend = TrendTF[slot];
+
+   if(PrintToExperts)
+     PrintFormat("DetectMSSOnSlot slot=%d currentTrend=%d maxScan=%d minBreakPoints=%.8f tol=%.8f",
+                 slot, currentTrend, maxScan, minBreakPoints, tol);
+
+   // ----------------------- BULLISH PATH -----------------------
+   // Logic (updated): swept = sl0 (nearest low), key_level = sh0 (nearest high)
+   if(currentTrend == -1 || currentTrend == 0)
+   {
+      double sweptLow = sl0;       // đáy gần nhất phải bị sweep
+      double key_level = sh0;      // đỉnh gần nhất cần bị phá để xác nhận MSS (breaker)
+      if(PrintToExperts) PrintFormat("DetectMSSOnSlot slot=%d BULL check: sweptLow=%.5f key_level=%.5f", slot, sweptLow, key_level);
+
+      for(int idx = 1; idx <= maxScan; idx++)
+      {
+         double low_i   = iLow(symbol, timeframe, idx);
+         double close_i = iClose(symbol, timeframe, idx);
+         datetime t_i   = iTime(symbol, timeframe, idx);
+
+         if(low_i == 0 || close_i == 0) continue;
+
+         // sweep xuống dưới sweptLow và đóng trở lại trên sweptLow
+         if(low_i < sweptLow - tol && close_i > sweptLow + tol)
+         {
+            if(PrintToExperts)
+              PrintFormat("slot=%d idx=%d: potential BULL sweep at low=%.5f close=%.5f sweptLow=%.5f t=%s",
+                          slot, idx, low_i, close_i, sweptLow, TimeToString(t_i, TIME_DATE|TIME_MINUTES));
+
+            // check momentum (nến xanh liên tiếp ngay sau sweep)
+            int consec = 0;
+            int j = idx - 1;
+            while(j >= 0 && consec < minConsec)
+            {
+               double c_j = iClose(symbol, timeframe, j);
+               double o_j = iOpen(symbol, timeframe, j);
+               if(c_j == 0 || o_j == 0) break;
+               if(c_j > o_j) consec++; else break;
+               j--;
+            }
+            if(PrintToExperts) PrintFormat("slot=%d idx=%d: consec green=%d required=%d", slot, idx, consec, minConsec);
+
+            if(consec >= minConsec)
+            {
+               bool fvg_ok = true;
+               if(requireFVG)
+                  fvg_ok = HasBullFVGAfter(symbol, timeframe, t_i, fvgLookback);
+
+               if(PrintToExperts && requireFVG) PrintFormat("slot=%d idx=%d: fvg_ok=%s", slot, idx, (fvg_ok?"true":"false"));
+
+               if(fvg_ok)
+               {
+                  // tìm breaker: nến đóng >= key_level + threshold
+                  bool broke = false;
+                  datetime break_time = 0;
+                  for(int k = idx - 1; k >= 0; k--)
+                  {
+                     double close_k = iClose(symbol, timeframe, k);
+                     if(close_k == 0) continue;
+                     if(close_k >= key_level + minBreakPoints)
+                     {
+                        broke = true;
+                        break_time = iTime(symbol, timeframe, k);
+                        if(PrintToExperts)
+                          PrintFormat("slot=%d idx=%d: breaker at k=%d close=%.5f (>= %.5f) t=%s",
+                                      slot, idx, k, close_k, key_level + minBreakPoints, TimeToString(break_time, TIME_DATE|TIME_MINUTES));
+                        break;
+                     }
+                  }
+
+                  if(broke)
+                  {
+                    result.found = true;
+                    result.direction = 1;
+                    result.sweep_time = t_i;
+                    result.sweep_price = low_i;
+                    result.key_level = key_level;
+                    result.break_time = break_time;
+
+                    // --- lưu swing gốc tại thời điểm detect ---
+                    // swept swing = nearest low at detect time => sl0 (index 0)
+                    result.swept_swing_time  = SwingLowTimeTF[slot][0];
+                    result.swept_swing_price = SwingLowPriceTF[slot][0];
+                    // broken swing (key) = nearest high sh0 (index 0)
+                    result.broken_swing_time  = SwingHighTimeTF[slot][0];
+                    result.broken_swing_price = SwingHighPriceTF[slot][0];
+
+                     if(PrintToExperts)
+                       PrintFormat("DetectMSSOnSlot slot=%d -> BULL MSS FOUND sweep=%.5f key=%.5f break=%s",
+                                   slot, result.sweep_price, result.key_level, TimeToString(result.break_time, TIME_DATE|TIME_MINUTES));
+                     return result;
+                  }
+                  else
+                  {
+                     if(PrintToExperts) PrintFormat("slot=%d idx=%d: no breaker after sweep (need >= %.5f)", slot, idx, key_level + minBreakPoints);
+                  }
+               }
+            }
+         } // end if sweep
+      } // end for idx
+      if(PrintToExperts) PrintFormat("DetectMSSOnSlot slot=%d: finished BULL checks, not found", slot);
+   }
+
+   // ----------------------- BEARISH PATH -----------------------
+   // Logic (updated): swept = sh0 (nearest high), key_level = sl0 (nearest low)
+   if(currentTrend == 1 || currentTrend == 0)
+   {
+      double sweptHigh = sh0;     // đỉnh gần nhất phải bị sweep
+      double key_level = sl0;     // đáy gần nhất cần bị phá để xác nhận MSS (breaker)
+      if(PrintToExperts) PrintFormat("DetectMSSOnSlot slot=%d BEAR check: sweptHigh=%.5f key_level=%.5f", slot, sweptHigh, key_level);
+
+      for(int idx = 1; idx <= maxScan; idx++)
+      {
+         double high_i  = iHigh(symbol, timeframe, idx);
+         double close_i = iClose(symbol, timeframe, idx);
+         datetime t_i   = iTime(symbol, timeframe, idx);
+
+         if(high_i == 0 || close_i == 0) continue;
+
+         // sweep lên trên sweptHigh và đóng trở lại dưới sweptHigh
+         if(high_i > sweptHigh + tol && close_i < sweptHigh - tol)
+         {
+            if(PrintToExperts)
+              PrintFormat("slot=%d idx=%d: potential BEAR sweep at high=%.5f close=%.5f sweptHigh=%.5f t=%s",
+                          slot, idx, high_i, close_i, sweptHigh, TimeToString(t_i, TIME_DATE|TIME_MINUTES));
+
+            // check momentum (nến đỏ liên tiếp)
+            int consec = 0;
+            int j = idx - 1;
+            while(j >= 0 && consec < minConsec)
+            {
+               double c_j = iClose(symbol, timeframe, j);
+               double o_j = iOpen(symbol, timeframe, j);
+               if(c_j == 0 || o_j == 0) break;
+               if(c_j < o_j) consec++; else break;
+               j--;
+            }
+            if(PrintToExperts) PrintFormat("slot=%d idx=%d: consec red=%d required=%d", slot, idx, consec, minConsec);
+
+            if(consec >= minConsec)
+            {
+               bool fvg_ok = true;
+               if(requireFVG)
+                  fvg_ok = HasBearFVGAfter(symbol, timeframe, t_i, fvgLookback);
+
+               if(PrintToExperts && requireFVG) PrintFormat("slot=%d idx=%d: fvg_ok=%s", slot, idx, (fvg_ok?"true":"false"));
+
+               if(fvg_ok)
+               {
+                  // tìm breaker: nến đóng <= key_level - threshold
+                  bool broke = false;
+                  datetime break_time = 0;
+                  for(int k = idx - 1; k >= 0; k--)
+                  {
+                     double close_k = iClose(symbol, timeframe, k);
+                     if(close_k == 0) continue;
+                     if(close_k <= key_level - minBreakPoints)
+                     {
+                        broke = true;
+                        break_time = iTime(symbol, timeframe, k);
+                        if(PrintToExperts)
+                          PrintFormat("slot=%d idx=%d: breaker at k=%d close=%.5f (<= %.5f) t=%s",
+                                      slot, idx, k, close_k, key_level - minBreakPoints, TimeToString(break_time, TIME_DATE|TIME_MINUTES));
+                        break;
+                     }
+                  }
+
+                  if(broke)
+                  {
+                    result.found = true;
+                    result.direction = -1;
+                    result.sweep_time = t_i;
+                    result.sweep_price = high_i;
+                    result.key_level = key_level;
+                    result.break_time = break_time;
+
+                    // lưu swing gốc
+                    result.swept_swing_time  = SwingHighTimeTF[slot][0];
+                    result.swept_swing_price = SwingHighPriceTF[slot][0];
+                    // broken swing (key) = nearest low sl0
+                    result.broken_swing_time  = SwingLowTimeTF[slot][0];
+                    result.broken_swing_price = SwingLowPriceTF[slot][0];
+
+                     if(PrintToExperts)
+                       PrintFormat("DetectMSSOnSlot slot=%d -> BEAR MSS FOUND sweep=%.5f key=%.5f break=%s",
+                                   slot, result.sweep_price, result.key_level, TimeToString(result.break_time, TIME_DATE|TIME_MINUTES));
+                     return result;
+                  }
+                  else
+                  {
+                     if(PrintToExperts) PrintFormat("slot=%d idx=%d: no breaker after sweep (need <= %.5f)", slot, idx, key_level - minBreakPoints);
+                  }
+               }
+            }
+         } // end if sweep up
+      } // end for idx
+      if(PrintToExperts) PrintFormat("DetectMSSOnSlot slot=%d: finished BEAR checks, not found", slot);
+   }
+
+   if(PrintToExperts) PrintFormat("DetectMSSOnSlot END: slot=%d not found any MSS", slot);
+   return result;
 }
 
 // Kiểm tra 1 bar tại index i có phải SwingHigh không (dùng giá đóng cửa theo yêu cầu)
+// Kiểm tra 1 bar tại index i có phải SwingHigh không (xét râu - High)
 bool IsSwingHigh(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
 {
-  double ci = iClose(symbol, timeframe, i);
-  if(ci==0) return false;
+  double hi = iHigh(symbol, timeframe, i);
+  if(hi == 0.0) return false;
 
-  // So sánh với X nến trước (chỉ xét nến đóng)
-  for(int j=1; j<=X; j++)
+  // So sánh với X nến trước (index giảm)
+  for(int j = 1; j <= X; j++)
   {
-    double cprev = iClose(symbol, timeframe, i - j);
-    if(cprev==0) return false; // dữ liệu không đủ
-    if(cprev >= ci) // nếu có nến nào đóng bằng hoặc cao hơn -> không phải SwingHigh
+    int idxPrev = i - j;
+    if(idxPrev < 0) return false; // không đủ dữ liệu
+    double hprev = iHigh(symbol, timeframe, idxPrev);
+    if(hprev == 0.0) return false; // dữ liệu thiếu
+    if(hprev >= hi) // nếu có râu high trước >= hi -> không phải swing high
       return false;
   }
-  // So sánh với X nến sau (các nến cũ hơn, index tăng)
-  for(int k=1; k<=X; k++)
+
+  // So sánh với X nến sau (index tăng)
+  for(int k = 1; k <= X; k++)
   {
-    double cnext = iClose(symbol, timeframe, i + k);
-    if(cnext==0) return false;
-    if(cnext >= ci)
+    int idxNext = i + k;
+    // nếu idxNext vượt quá bars available -> không có dữ liệu đủ -> return false
+    double hnext = iHigh(symbol, timeframe, idxNext);
+    if(hnext == 0.0) return false;
+    if(hnext >= hi) // nếu có râu high sau >= hi -> không phải swing high
       return false;
   }
+
   return true;
 }
 
-// Kiểm tra 1 bar tại index i có phải SwingLow không
+// Kiểm tra 1 bar tại index i có phải SwingLow không (xét râu - Low)
 bool IsSwingLow(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
 {
-  double ci = iClose(symbol, timeframe, i);
-  if(ci==0) return false;
+  double lo = iLow(symbol, timeframe, i);
+  if(lo == 0.0) return false;
 
-  for(int j=1; j<=X; j++)
+  // So sánh với X nến trước (index giảm)
+  for(int j = 1; j <= X; j++)
   {
-    double cprev = iClose(symbol, timeframe, i - j);
-    if(cprev==0) return false;
-    if(cprev <= ci) // có nến đóng bằng hoặc thấp hơn -> không phải swing low
+    int idxPrev = i - j;
+    if(idxPrev < 0) return false; // không đủ dữ liệu
+    double lprev = iLow(symbol, timeframe, idxPrev);
+    if(lprev == 0.0) return false; // dữ liệu thiếu
+    if(lprev <= lo) // nếu râu low trước <= lo -> không phải swing low
       return false;
   }
-  for(int k=1; k<=X; k++)
+
+  // So sánh với X nến sau (index tăng)
+  for(int k = 1; k <= X; k++)
   {
-    double cnext = iClose(symbol, timeframe, i + k);
-    if(cnext==0) return false;
-    if(cnext <= ci)
+    int idxNext = i + k;
+    double lnext = iLow(symbol, timeframe, idxNext);
+    if(lnext == 0.0) return false;
+    if(lnext <= lo) // nếu râu low sau <= lo -> không phải swing low
       return false;
   }
+
   return true;
 }
 
@@ -164,7 +456,7 @@ bool IsSwingLow(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
 // UpdateSwings vào slot (0 = HighTF, 1 = MiddleTF)
 // Cập nhật mảng SwingHighPrice/Time và SwingLowPrice/Time (giữ SwingKeep phần tử gần nhất)
 // UpdateSwings vào slot (0 = HighTF, 1 = MiddleTF)
-void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingRange = 1)
+void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingRange)
 {
   // Reset slot
   SwingHighCountTF[slot] = 0;
@@ -188,7 +480,7 @@ void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingR
       bool isH = IsSwingHigh(symbol, timeframe, i, SwingRange);
       if(isH)
       {
-        double ci = iClose(symbol, timeframe, i);
+        double ci = iHigh(symbol, timeframe, i);
         datetime ti = iTime(symbol, timeframe, i);
         if(SwingHighCountTF[slot] == 0)
         {
@@ -211,7 +503,7 @@ void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingR
       bool isL = IsSwingLow(symbol, timeframe, i, SwingRange);
       if(isL)
       {
-        double ci2 = iClose(symbol, timeframe, i);
+        double ci2 = iLow(symbol, timeframe, i);
         datetime ti2 = iTime(symbol, timeframe, i);
         if(SwingLowCountTF[slot] == 0)
         {
@@ -242,14 +534,14 @@ void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
 
   // mapping chung: 0=HTF, 1=MTF, 2=LTF
   int slot = 0; // default 0=HTF
-  string inChartSwingPrefix = "h_";
+  string inChartSwingPrefix = "h";
 
   if(timeframe == MiddleTF) {
     slot = 1;
-    inChartSwingPrefix = "m_";
+    inChartSwingPrefix = "m";
   } else if (timeframe == LowTF) {
     slot = 2;
-    inChartSwingPrefix = "l_";
+    inChartSwingPrefix = "l";
   }
 
   string prefix = SwingObjPrefix + inChartSwingPrefix;
@@ -286,7 +578,7 @@ void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
          continue;
       }
 
-      ObjectSetString(0, obj, OBJPROP_TEXT,  "▲ " + inChartSwingPrefix +"H" + IntegerToString(h));
+      ObjectSetString(0, obj, OBJPROP_TEXT,  "▲ " + inChartSwingPrefix + "H" + IntegerToString(h));
       ObjectSetInteger(0, obj, OBJPROP_COLOR, clrRed);
       ObjectSetInteger(0, obj, OBJPROP_FONTSIZE, SwingMarkerFontSize);
       ObjectSetInteger(0, obj, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
@@ -317,12 +609,369 @@ void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
    }
 }
 
+// ---------------------------------------------------------------------
+// FindTouchTime(): tìm thời điểm bar đầu tiên sau start_time mà bar chạm price
+// ---------------------------------------------------------------------
+datetime FindTouchTime(string symbol, ENUM_TIMEFRAMES timeframe,
+                       datetime start_time, double price, double tol, datetime bar_secs)
+{
+   // Lấy index bar tại thời điểm start_time
+   int idxStart = iBarShift(symbol, timeframe, start_time, false);
+   if(idxStart == -1) idxStart = 0;
+
+   // Quét các bar mới hơn (index nhỏ hơn)
+   for(int idx = idxStart - 1; idx >= 0; idx--)
+   {
+      double highM = iHigh(symbol, timeframe, idx);
+      double lowM  = iLow(symbol, timeframe, idx);
+      if(highM == 0 || lowM == 0) continue;
+
+      // Nếu bar chạm price
+      if(lowM <= price + tol && highM >= price - tol)
+         return iTime(symbol, timeframe, idx);
+   }
+
+   // Không tìm thấy → kéo đến bar hiện tại + 1 bar
+   datetime t0 = iTime(symbol, timeframe, 0);
+   if(t0 != 0) return (datetime)((long)t0 + (long)bar_secs);
+
+   return TimeCurrent();
+}
+
+// DrawMss: vẽ MSS + liquidity sweep cho 1 slot/timeframe
+// symbol      : symbol (Symbol())
+// timeframe   : timeframe (MiddleTF / HighTF / LowTF ...)
+// info        : MSSInfo struct (result của DetectMSSOnSlot) - truyền bằng tham chiếu
+// slot        : 0=HTF,1=MTF,2=LTF (dùng để phân biệt object name và xoá cũ)
+// DrawMss: vẽ MSS + liquidity sweep cho 1 slot/timeframe
+// symbol      : symbol (Symbol())
+// timeframe   : timeframe (MiddleTF / HighTF / LowTF ...)
+// info        : MSSInfo struct (result của DetectMSSOnSlot) - truyền bằng tham chiếu
+// slot        : 0=HTF,1=MTF,2=LTF (dùng để phân biệt object name và xoá cũ)
+void DrawMss(string symbol, ENUM_TIMEFRAMES timeframe, const MSSInfo &info, int slot)
+{
+  if(!ShowSwingMarkers) return;
+
+  // tiền tố timeframe cho tên object
+  string tfPrefix = "ltf_";
+  if(slot == 0) tfPrefix = "htf_";
+  else if(slot == 1) tfPrefix = "mtf_";
+
+  string basePrefix = SwingObjPrefix + "MSS_" + IntegerToString(slot) + "_";
+
+  // Xóa object MSS cũ cho slot này
+  int total = ObjectsTotal(0);
+  for(int i = total - 1; i >= 0; i--)
+  {
+    string nm = ObjectName(0, i);
+    if(StringLen(nm) >= StringLen(basePrefix))
+      if(StringSubstr(nm, 0, StringLen(basePrefix)) == basePrefix)
+        ObjectDelete(0, nm);
+  }
+
+  if(!info.found) {
+    PrintFormat("Error: DrawMss: no MSS found for slot=%d, nothing to draw", slot);
+    return;
+  }
+
+  if(info.sweep_time == 0 || info.break_time == 0) {
+    PrintFormat("Error: DrawMss: invalid MSSInfo for slot=%d (sweep_time=%d break_time=%d)", slot, info.sweep_time, info.break_time);
+    return;
+  }
+
+  // object names (có tiền tố tfPrefix)
+  string nm_sweep_ray = basePrefix + tfPrefix + "SWEEP_RAY";
+  string nm_key_ray   = basePrefix + tfPrefix + "KEY_RAY";
+  string nm_sweep_txt = basePrefix + tfPrefix + "SWEEP_TXT";
+  string nm_key_txt   = basePrefix + tfPrefix + "KEY_TXT";
+
+  // style
+  int col_sweep = clrMagenta; // màu sweep (tím)
+  int col_key   = clrOrange;  // màu key/break
+  int width_line = 2;
+  int font_sweep = SwingMarkerFontSize + 2;
+  int font_key   = SwingMarkerFontSize;
+
+  datetime bar_secs = (datetime)PeriodSeconds(timeframe);
+  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+
+  // --- SWEEP RAY ---
+  // End of sweep ray is the sweep bar (info.sweep_time, info.sweep_price)
+  datetime end_sweep_time = info.sweep_time;
+  double   end_sweep_price = info.sweep_price;
+  if(end_sweep_time == 0) end_sweep_time = iTime(symbol, timeframe, 0);
+  if(end_sweep_price == 0.0) end_sweep_price = (info.direction == 1 ? SwingLowPriceTF[slot][0] : SwingHighPriceTF[slot][0]);
+
+  // Start of sweep ray must be the swing bar that was swept:
+  // - bullish (direction==1): start from SwingLow index 0 (l0)
+  // - bearish (direction==-1): start from SwingHigh index 0 (h0)
+  datetime start_sweep_time = end_sweep_time;
+  double   start_sweep_price = end_sweep_price;
+
+  // ưu tiên dùng swing gốc đã lưu trong info (nếu có)
+  if(info.swept_swing_time != 0 && info.swept_swing_price != 0.0)
+  {
+    start_sweep_time  = info.swept_swing_time;
+    start_sweep_price = info.swept_swing_price;
+  }
+  else
+  {
+    // fallback: dùng current Swing arrays nếu info không có
+    if(info.direction == 1)
+    {
+      if(SwingLowTimeTF[slot][0] != 0 && SwingLowPriceTF[slot][0] != 0.0)
+      {
+        start_sweep_time  = SwingLowTimeTF[slot][0];
+        start_sweep_price = SwingLowPriceTF[slot][0];
+      }
+    }
+    else if(info.direction == -1)
+    {
+      if(SwingHighTimeTF[slot][0] != 0 && SwingHighPriceTF[slot][0] != 0.0)
+      {
+        start_sweep_time  = SwingHighTimeTF[slot][0];
+        start_sweep_price = SwingHighPriceTF[slot][0];
+      }
+    }
+  }
+
+  // Draw sweep ray from start_sweep -> sweep bar (end_sweep)
+  if(!ObjectCreate(0, nm_sweep_ray, OBJ_TREND, 0,
+                   start_sweep_time, start_sweep_price,
+                   end_sweep_time,   end_sweep_price))
+    PrintFormat("DrawMss: Cannot create %s", nm_sweep_ray);
+
+  ObjectSetInteger(0, nm_sweep_ray, OBJPROP_COLOR, col_sweep);
+  ObjectSetInteger(0, nm_sweep_ray, OBJPROP_WIDTH, width_line);
+  ObjectSetInteger(0, nm_sweep_ray, OBJPROP_STYLE, STYLE_SOLID);
+  ObjectSetInteger(0, nm_sweep_ray, OBJPROP_SELECTABLE, false);
+  ObjectSetInteger(0, nm_sweep_ray, OBJPROP_BACK, true);
+
+  // sweep label (ở giữa đoạn)
+  datetime mid_sweep = (datetime)(((long)start_sweep_time + (long)end_sweep_time)/2);
+  if(!ObjectCreate(0, nm_sweep_txt, OBJ_TEXT, 0, mid_sweep, end_sweep_price))
+    PrintFormat("DrawMss: Cannot create %s", nm_sweep_txt);
+  else
+  {
+    ObjectSetString(0, nm_sweep_txt, OBJPROP_TEXT,
+                    StringFormat("%sSweep: %s", tfPrefix, DoubleToString(end_sweep_price, _Digits)));
+    ObjectSetInteger(0, nm_sweep_txt, OBJPROP_COLOR, col_sweep);
+    ObjectSetInteger(0, nm_sweep_txt, OBJPROP_FONTSIZE, font_sweep);
+    ObjectSetInteger(0, nm_sweep_txt, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, nm_sweep_txt, OBJPROP_BACK, true);
+  }
+
+  // --- KEY / BREAKER RAY ---
+  // Start of key ray should be the broken swing bar (sh0 for bullish breaker, sl0 for bearish breaker)
+  datetime start_key_time = info.break_time;
+  double   start_key_price = info.key_level;
+
+  // ưu tiên dùng broken swing gốc đã lưu trong info
+  if(info.broken_swing_time != 0 && info.broken_swing_price != 0.0)
+  {
+    start_key_time  = info.broken_swing_time;
+    start_key_price = info.broken_swing_price;
+  }
+  else
+  {
+    // fallback: dùng current Swing arrays
+    if(info.direction == 1)
+    {
+      if(SwingHighTimeTF[slot][0] != 0 && SwingHighPriceTF[slot][0] != 0.0)
+      {
+        start_key_time  = SwingHighTimeTF[slot][0];
+        start_key_price = SwingHighPriceTF[slot][0];
+      }
+    }
+    else if(info.direction == -1)
+    {
+      if(SwingLowTimeTF[slot][0] != 0 && SwingLowPriceTF[slot][0] != 0.0)
+      {
+        start_key_time  = SwingLowTimeTF[slot][0];
+        start_key_price = SwingLowPriceTF[slot][0];
+      }
+    }
+  }
+
+  // End of key ray: use close price of breaker bar (info.break_time). If not available fallback to key_level
+  double end_key_price = info.key_level;
+  datetime end_key_time = info.break_time;
+  if(end_key_time != 0)
+  {
+    int idxBreak = iBarShift(symbol, timeframe, end_key_time, false);
+    if(idxBreak >= 0)
+    {
+      double closeBreak = iClose(symbol, timeframe, idxBreak);
+      if(closeBreak != 0.0) end_key_price = closeBreak;
+      // set end_key_time to the exact time of that bar (safe)
+      end_key_time = iTime(symbol, timeframe, idxBreak);
+    }
+    else
+    {
+      // fallback to current bar time + 1
+      datetime t0 = iTime(symbol, timeframe, 0);
+      end_key_time = (t0 != 0) ? (datetime)((long)t0 + (long)bar_secs) : TimeCurrent();
+    }
+  }
+  else
+  {
+    // if no break_time, extend to current + 1 bar
+    datetime t0 = iTime(symbol, timeframe, 0);
+    end_key_time = (t0 != 0) ? (datetime)((long)t0 + (long)bar_secs) : TimeCurrent();
+  }
+
+  // Draw key ray from start_key -> breaker close (end_key)
+  if(!ObjectCreate(0, nm_key_ray, OBJ_TREND, 0,
+                   start_key_time, start_key_price,
+                   end_key_time,   end_key_price))
+    PrintFormat("DrawMss: Cannot create %s", nm_key_ray);
+
+  ObjectSetInteger(0, nm_key_ray, OBJPROP_COLOR, col_key);
+  ObjectSetInteger(0, nm_key_ray, OBJPROP_WIDTH, width_line);
+  ObjectSetInteger(0, nm_key_ray, OBJPROP_STYLE, STYLE_DOT);
+  ObjectSetInteger(0, nm_key_ray, OBJPROP_SELECTABLE, false);
+  ObjectSetInteger(0, nm_key_ray, OBJPROP_BACK, true);
+
+  // key label (ở giữa đoạn)
+  datetime mid_key = (datetime)(((long)start_key_time + (long)end_key_time)/2);
+  if(!ObjectCreate(0, nm_key_txt, OBJ_TEXT, 0, mid_key, end_key_price))
+    PrintFormat("DrawMss: Cannot create %s", nm_key_txt);
+  else
+  {
+    ObjectSetString(0, nm_key_txt, OBJPROP_TEXT,
+                    StringFormat("%sBreak: %s", tfPrefix, DoubleToString(info.key_level, _Digits)));
+    ObjectSetInteger(0, nm_key_txt, OBJPROP_COLOR, col_key);
+    ObjectSetInteger(0, nm_key_txt, OBJPROP_FONTSIZE, font_key);
+    ObjectSetInteger(0, nm_key_txt, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, nm_key_txt, OBJPROP_BACK, true);
+  }
+
+  if(PrintToExperts)
+  {
+    PrintFormat("DrawMss: [%s] SWEEP start=%s price=%.5f -> sweepAt=%s price=%.5f | KEY start=%s price=%.5f -> breakerAt=%s price=%.5f",
+                tfPrefix,
+                TimeToString(start_sweep_time, TIME_DATE|TIME_MINUTES), start_sweep_price,
+                TimeToString(end_sweep_time, TIME_DATE|TIME_MINUTES), end_sweep_price,
+                TimeToString(start_key_time, TIME_DATE|TIME_MINUTES), start_key_price,
+                TimeToString(end_key_time, TIME_DATE|TIME_MINUTES), end_key_price);
+  }
+}
+
 // Hàm tiện ích chuyển giá trị xu hướng thành chuỗi
 string TrendToString(int trend)
 {
   if(trend==1) return "UPTREND";
   if(trend==-1) return "DOWNTREND";
   return "SIDEWAY";
+}
+
+// Cập nhật TrendTF[slot] dựa trên 2 swing gần nhất (không gọi UpdateSwings bên trong)
+// Bổ sung: phát hiện sớm (provisional) dựa trên các nến đóng gần nhất nếu swing chưa hoàn chỉnh
+void UpdateTrendForSlot(int slot, ENUM_TIMEFRAMES timeframe, string symbol)
+{
+  // mặc định giữ trend hiện tại (không reset về 0 ngay lập tức để tránh flicker)
+  int oldTrend = TrendTF[slot];
+
+  // Tolerances / thresholds
+  double pip = GetPipSize(symbol);
+  double provisionalThresh = (double)ProvisionalBreakPips * pip;
+  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+
+  // Nếu không có đủ dữ liệu swing, ta vẫn sẽ thử provisional detection
+  bool haveTwoSwings = (SwingHighCountTF[slot] >= 2 && SwingLowCountTF[slot] >= 2);
+
+  // Lấy giá swing (index 0 = nearest, 1 = older). Có thể = 0 nếu chưa có.
+  double sh0 = (SwingHighCountTF[slot] >= 1) ? SwingHighPriceTF[slot][0] : 0.0;
+  double sh1 = (SwingHighCountTF[slot] >= 2) ? SwingHighPriceTF[slot][1] : 0.0;
+  double sl0 = (SwingLowCountTF[slot] >= 1) ? SwingLowPriceTF[slot][0] : 0.0;
+  double sl1 = (SwingLowCountTF[slot] >= 2) ? SwingLowPriceTF[slot][1] : 0.0;
+
+  int newTrend = oldTrend; // default giữ trend cũ nếu không xác định được
+
+  // 1) Rule "cứng" nếu có đủ 2 swings (như trước)
+  if(haveTwoSwings)
+  {
+    if(sh0 > sh1 && sl0 > sl1) newTrend = 1;      // uptrend
+    else if(sh0 < sh1 && sl0 < sl1) newTrend = -1; // downtrend
+    else newTrend = 0; // không rõ
+  }
+  else
+  {
+    // nếu chưa có đủ swings, tạm giữ oldTrend (sẽ có chance bị override bởi provisional)
+    newTrend = oldTrend;
+  }
+
+  // 2) Provisional / early detection:
+  // Nếu swing "cứng" không xác định được (newTrend == 0) hoặc chúng ta thiếu swings,
+  // thử kiểm tra xem last closed candle(s) đã đóng vượt sh0/sl0 chưa => áp provisional.
+  // Lấy last closed candle close (index 1)
+  double lastClosedClose = iClose(symbol, timeframe, 1);
+  if(lastClosedClose == 0.0) lastClosedClose = iClose(symbol, timeframe, 0); // fallback
+
+  int provisionalTrend = 0;
+  if(sh0 != 0.0 && lastClosedClose > sh0 + provisionalThresh)
+    provisionalTrend = 1;
+  else if(sl0 != 0.0 && lastClosedClose < sl0 - provisionalThresh)
+    provisionalTrend = -1;
+
+  if(provisionalTrend != 0)
+  {
+    // Nếu chúng ta có provisionalTrend, xác nhận bằng số nến đóng liên tiếp (ProvisionalConsecCloses)
+    int countClosers = 0;
+    for(int i = 1; i <= ProvisionalConsecCloses; i++)
+    {
+      double c = iClose(symbol, timeframe, i);
+      if(c == 0.0) break;
+      if(provisionalTrend == 1)
+      {
+        if(c > sh0 + provisionalThresh) countClosers++;
+        else break;
+      }
+      else // provisionalTrend == -1
+      {
+        if(c < sl0 - provisionalThresh) countClosers++;
+        else break;
+      }
+    }
+
+    if(countClosers >= ProvisionalConsecCloses)
+    {
+      // Áp provisional nếu: (a) không có trend cứng (newTrend==0) hoặc (b) thiếu swings (haveTwoSwings==false)
+      // hoặc bạn muốn provisional override cả khi newTrend khác (cẩn trọng) - ở đây ta chỉ override khi newTrend == 0 hoặc không đủ swings
+      if(!haveTwoSwings || newTrend == 0)
+      {
+        newTrend = provisionalTrend;
+        if(PrintToExperts)
+          PrintFormat("UpdateTrendForSlot slot=%d tf=%s: provisionalTrend applied=%d (sh0=%.5f sl0=%.5f lastClose=%.5f thresh=%.5f count=%d)",
+                      slot, EnumToString(timeframe), newTrend, sh0, sl0, lastClosedClose, provisionalThresh, countClosers);
+      }
+      else
+      {
+        // Nếu bạn muốn provisional override ngay cả khi haveTwoSwings==true && newTrend != 0,
+        // uncomment dòng dưới đây (cẩn thận: có thể gây false positives)
+        // newTrend = provisionalTrend;
+        if(PrintToExperts)
+          PrintFormat("UpdateTrendForSlot slot=%d tf=%s: provisional candidate=%d but two-swing trend exists=%d -> not applied",
+                      slot, EnumToString(timeframe), provisionalTrend, newTrend);
+      }
+    }
+    else
+    {
+      if(PrintToExperts)
+        PrintFormat("UpdateTrendForSlot slot=%d tf=%s: provisional candidate=%d NOT confirmed, consecutive closes=%d (required %d)",
+                    slot, EnumToString(timeframe), provisionalTrend, countClosers, ProvisionalConsecCloses);
+    }
+  }
+
+  // Ghi kết quả vào biến global TrendTF
+  TrendTF[slot] = newTrend;
+
+  if(PrintToExperts)
+    PrintFormat("UpdateTrendForSlot slot=%d tf=%s -> TrendTF=%d (haveTwoSwings=%s sh0=%.5f sh1=%.5f sl0=%.5f sl1=%.5f lastClose=%.5f)",
+                slot, EnumToString(timeframe), TrendTF[slot], (haveTwoSwings ? "true":"false"),
+                sh0, sh1, sl0, sl1, lastClosedClose);
 }
 
 //+------------------------------------------------------------------+
@@ -446,6 +1095,7 @@ uint MakeARGB(int a, uint clr)
 //+------------------------------------------------------------------+
 void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true)
 {
+  if(!ShowSwingMarkers) return;
   // prefix object để dễ xóa
   string prefix = SwingObjPrefix + "FVG_";
 
@@ -586,7 +1236,7 @@ void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true
 // ------------------------------------------------------------
 void UpdateLabel(string labelName, ENUM_TIMEFRAMES timeframe, int trend)
 {
-    if(!ShowLabel) return;
+    if(!ShowSwingMarkers) return;
 
     string txt = StringFormat("%s: %s", EnumToString(timeframe), TrendToString(trend));
 
@@ -660,74 +1310,139 @@ void OnDeinit(const int reason)
   }
 }
 
+// Trả true nếu bar đóng mới xuất hiện (dựa vào iTime(...,1))
+bool IsNewClosedBar(string symbol, ENUM_TIMEFRAMES tf, int slot)
+{
+  datetime t = iTime(symbol, tf, 1); // time of last closed bar
+  if(t == -1 || t == 0) return false;
+  if(t != lastClosedBarTime[slot])
+  {
+    lastClosedBarTime[slot] = t;
+    return true;
+  }
+  return false;
+}
+
+// Tính FVG cho MiddleTF chỉ khi bar C (hoặc bar 1) thay đổi
+void EnsureFVGUpToDate(string symbol, ENUM_TIMEFRAMES tf, int lookback)
+{
+  if(tf != MiddleTF) return; // chỉ cache cho MiddleTF (theo EA bạn)
+  datetime currentClosed = iTime(symbol, tf, 1);
+  if(currentClosed == -1 || currentClosed == 0) return;
+  if(currentClosed != lastFVGBarTime)
+  {
+    // bar vừa thay -> recompute FVG
+    FindFVG(symbol, tf, lookback);
+    lastFVGBarTime = currentClosed;
+    if(PrintToExperts) PrintFormat("EnsureFVGUpToDate: recomputed FVG at %s", TimeToString(currentClosed, TIME_DATE|TIME_MINUTES));
+  }
+}
+
+// ProcessMSSForSlot: hàm chung tách logic MSS cho 1 slot/timeframe
+// sym            : symbol (Symbol())
+// tf             : timeframe để check (HighTF/MiddleTF/LowTF)
+// slot           : index 0=HTF,1=MTF,2=LTF
+// enabled        : nếu false thì không làm gì
+// requireFVG     : có cần FVG (true/false) truyền vào DetectMSSOnSlot
+// minBreakPips.. : các tham số truyền xuống DetectMSSOnSlot (mặc định hợp lý)
+void ProcessMSSForSlot(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled,
+                       bool requireFVG = false,
+                       double minBreakPips = 10.0,
+                       int minConsec = 2,
+                       int lookbackBarsForSweep = 50,
+                       int fvgLookback = 200)
+{
+  if(!enabled) return;
+
+  // Nếu là MiddleTF và bạn muốn dùng FVG cache, cập nhật cache trước
+  if(tf == MiddleTF)
+    EnsureFVGUpToDate(sym, MiddleTF, fvgLookback);
+
+  // Gọi DetectMSSOnSlot với tham số truyền vào
+  MSSInfo info = DetectMSSOnSlot(sym, tf, slot, minBreakPips, minConsec, lookbackBarsForSweep, fvgLookback, requireFVG);
+
+  if(info.found)
+  {
+    // Vẽ MSS & sweep
+    DrawMss(sym, tf, info, slot);
+
+    // TODO: thêm logic order/alert nếu bạn muốn
+    // Ví dụ: SendNotification / Alert / PlaceOrder...
+  }
+}
+
 void OnTick()
 {
   string sym = Symbol();
 
-  // Cập nhật swings cho cả 2 timeframe vào slot tương ứng
-  UpdateSwings(sym, HighTF,   0, htfSwingRange);
-  UpdateSwings(sym, MiddleTF, 1, mtfSwingRange);
-  UpdateSwings(sym, LowTF,    2, ltfSwingRange);
+  // --- 1) Kiểm tra có bar đóng mới (nhưng chưa update swings) ---
+  bool newHTFCandleClosed = IsNewClosedBar(sym, HighTF, 0);
+  bool newMTFCandleClosed = IsNewClosedBar(sym, MiddleTF, 1);
+  bool newLTFCandleClosed = IsNewClosedBar(sym, LowTF, 2);
 
-  // Vẽ marker cho từng timeframe (prefix sẽ thêm "MTF_" cho middle)
+  // Nếu MTF có bar đóng mới, cập nhật cache FVG trước khi detect (Detect có thể require FVG)
+  if(newMTFCandleClosed)
+    EnsureFVGUpToDate(sym, MiddleTF, 200);
+
+  // --- 2) Chạy MSS detection TRƯỚC khi update swings (dùng swings hiện tại - tức swing "cũ") ---
+  // HTF
+  ProcessMSSForSlot(sym, HighTF, 0, DetectMSS_HTF,
+                    /*requireFVG=*/ false,
+                    /*minBreakPips=*/ 10.0,
+                    /*minConsec=*/ 2,
+                    /*lookback=*/ 50,
+                    /*fvgLookback=*/ 200);
+
+  //MTF
+  ProcessMSSForSlot(sym, MiddleTF, 1, DetectMSS_MTF,
+                    /*requireFVG=*/ true,
+                    /*minBreakPips=*/ 10.0,
+                    /*minConsec=*/ 2,
+                    /*lookback=*/ 50,
+                    /*fvgLookback=*/ 200);
+
+  // LTF
+  ProcessMSSForSlot(sym, LowTF, 2, DetectMSS_LTF,
+                    /*requireFVG=*/ true,
+                    /*minBreakPips=*/ 8.0,
+                    /*minConsec=*/ 2,
+                    /*lookback=*/ 30,
+                    /*fvgLookback=*/ 100);
+
+  // --- 3) Bây giờ mới update swings & trend cho những TF có bar đóng mới ---
+  if(newHTFCandleClosed)
+  {
+    UpdateSwings(sym, HighTF, 0, htfSwingRange);
+    UpdateTrendForSlot(0, HighTF, sym);
+    if(PrintToExperts) PrintFormat("New closed HTF detected at %s", TimeToString(lastClosedBarTime[0], TIME_DATE|TIME_MINUTES));
+  }
+
+  if(newMTFCandleClosed)
+  {
+    UpdateSwings(sym, MiddleTF, 1, mtfSwingRange);
+    UpdateTrendForSlot(1, MiddleTF, sym);
+    // ensure FVG cache up-to-date (already done above if newMTFCandleClosed)
+    if(PrintToExperts) PrintFormat("New closed MTF detected at %s", TimeToString(lastClosedBarTime[1], TIME_DATE|TIME_MINUTES));
+  }
+
+  if(newLTFCandleClosed)
+  {
+    UpdateSwings(sym, LowTF, 2, ltfSwingRange);
+    UpdateTrendForSlot(2, LowTF, sym);
+    if(PrintToExperts) PrintFormat("New closed LTF detected at %s", TimeToString(lastClosedBarTime[2], TIME_DATE|TIME_MINUTES));
+  }
+
+  // --- 4) Vẽ (chỉ khi cần) ---
   if(ShowSwingMarkers)
   {
     DrawSwingsOnChart(HighTF);
-    DrawSwingsOnChart(MiddleTF);
-    DrawSwingsOnChart(LowTF);
+    // DrawSwingsOnChart(MiddleTF);
+    // DrawSwingsOnChart(LowTF);
+    DrawFVG(sym, MiddleTF, true);
   }
 
-
-  // Xác định FVG của MiddleTF
-  int found = FindFVG(sym, MiddleTF, 200);
-  PrintFormat("Found %d FVG on %s", found, EnumToString(MiddleTF));
-  DrawFVG(sym, MiddleTF, true); // vẽ FVG, start từ bar C
-
-  // Tính trend từ swings
-  int htfTrend = CalculateTrendFromSwings(sym, HighTF);
-  int mtfTrend = CalculateTrendFromSwings(sym, MiddleTF);
-  int ltfTrend = CalculateTrendFromSwings(sym, LowTF);
-
-  if(PrintToExperts)
-  {
-    PrintFormat("[%s] HighTF=%s -> %s", TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES), EnumToString(HighTF), TrendToString(htfTrend));
-
-    // In thêm thông tin 2 htf swings gần nhất
-    if(SwingHighCountTF[0]>=1) PrintFormat("HTF SwingH[0]=%.5f at %s", SwingHighPriceTF[0][0], TimeToString(SwingHighTimeTF[0][0], TIME_DATE|TIME_MINUTES));
-    if(SwingHighCountTF[0]>=2) PrintFormat("HTF SwingH[1]=%.5f at %s", SwingHighPriceTF[0][1], TimeToString(SwingHighTimeTF[0][1], TIME_DATE|TIME_MINUTES));
-    if(SwingLowCountTF[0]>=1)  PrintFormat("HTF SwingL[0]=%.5f at %s", SwingLowPriceTF[0][0],  TimeToString(SwingLowTimeTF[0][0], TIME_DATE|TIME_MINUTES));
-    if(SwingLowCountTF[0]>=2)  PrintFormat("HTF SwingL[1]=%.5f at %s", SwingLowPriceTF[0][1],  TimeToString(SwingLowTimeTF[0][1], TIME_DATE|TIME_MINUTES));
-
-    // In thông tin middle timeframe swings
-    if(SwingHighCountTF[1]>=1) PrintFormat("MTF_SwingH[0]=%.5f at %s", SwingHighPriceTF[1][0], TimeToString(SwingHighTimeTF[1][0], TIME_DATE|TIME_MINUTES));
-    if(SwingHighCountTF[1]>=2) PrintFormat("MTF_SwingH[1]=%.5f at %s", SwingHighPriceTF[1][1], TimeToString(SwingHighTimeTF[1][1], TIME_DATE|TIME_MINUTES));
-    if(SwingLowCountTF[1]>=1)  PrintFormat("MTF_SwingL[0]=%.5f at %s", SwingLowPriceTF[1][0], TimeToString(SwingLowTimeTF[1][0], TIME_DATE|TIME_MINUTES));
-    if(SwingLowCountTF[1]>=2)  PrintFormat("MTF_SwingL[1]=%.5f at %s", SwingLowPriceTF[1][1], TimeToString(SwingLowTimeTF[1][1], TIME_DATE|TIME_MINUTES));
-
-    // In thông tin low timeframe swings
-    if(SwingHighCountTF[2]>=1) PrintFormat("LTF_SwingH[0]=%.5f at %s", SwingHighPriceTF[2][0], TimeToString(SwingHighTimeTF[2][0], TIME_DATE|TIME_MINUTES));
-    if(SwingHighCountTF[2]>=2) PrintFormat("LTF_SwingH[1]=%.5f at %s", SwingHighPriceTF[2][1], TimeToString(SwingHighTimeTF[2][1], TIME_DATE|TIME_MINUTES));
-    if(SwingLowCountTF[2]>=1)  PrintFormat("LTF_SwingL[0]=%.5f at %s", SwingLowPriceTF[2][0], TimeToString(SwingLowTimeTF[2][0], TIME_DATE|TIME_MINUTES));
-    if(SwingLowCountTF[2]>=2)  PrintFormat("LTF_SwingL[1]=%.5f at %s", SwingLowPriceTF[2][1], TimeToString(SwingLowTimeTF[2][1], TIME_DATE|TIME_MINUTES));
-
-  }
-
-  UpdateLabel("LBL_HTF", HighTF, htfTrend);
-  UpdateLabel("LBL_MTF", MiddleTF, mtfTrend);
-  UpdateLabel("LBL_LTF", LowTF, ltfTrend);
-
-  // Nơi để thêm logic entry/exit dựa trên trend
+  // --- 5) Update label ---
+  UpdateLabel("LBL_HTF", HighTF, TrendTF[0]);
+  UpdateLabel("LBL_MTF", MiddleTF, TrendTF[1]);
+  UpdateLabel("LBL_LTF", LowTF, TrendTF[2]);
 }
-
-//+------------------------------------------------------------------+
-// Ghi chú:
-// - Tôi đã triển khai logic xác định SwingHigh/SwingLow dùng GIÁ ĐÓNG (close)
-//   theo đúng yêu cầu: 1 đỉnh khi giá đóng của cây đó lớn hơn giá đóng của
-//   X cây nến trước và X cây nến sau.
-// - SwingKeep = 2 nên EA lưu 2 đỉnh và 2 đáy gần nhất; index 0 là gần nhất.
-// - Trend xác định: Uptrend nếu SwingHigh[0] > SwingHigh[1] && SwingLow[0] > SwingLow[1].
-//   Downtrend nếu SwingHigh[0] < SwingHigh[1] && SwingLow[0] < SwingLow[1].
-// - Nếu phần mô tả Downtrend của bạn có sai sót (như biểu thức bị lẫn) tôi
-//   đã hiểu và áp dụng dạng đối ngược logic Uptrend ở trên.
-// - Label vẫn giữ nguyên như bạn yêu cầu.
-//+------------------------------------------------------------------+
