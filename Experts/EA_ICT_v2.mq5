@@ -14,9 +14,9 @@ input bool DetectMSS_LTF = false;
 
 // Cấu hình Swing
 input int           htfSwingRange = 1;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 10;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 10;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           SwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
+input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Cấu hình vẽ Swing trên chart
 input bool   ShowSwingMarkers = true;      // Hiển thị các marker swing trên chart
@@ -391,7 +391,6 @@ MSSInfo DetectMSSOnSlot(
    return result;
 }
 
-// Kiểm tra 1 bar tại index i có phải SwingHigh không (dùng giá đóng cửa theo yêu cầu)
 // Kiểm tra 1 bar tại index i có phải SwingHigh không (xét râu - High)
 bool IsSwingHigh(string symbol, ENUM_TIMEFRAMES timeframe, int candleIndex, int swingRange)
 {
@@ -453,9 +452,7 @@ bool IsSwingLow(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
   return true;
 }
 
-// Cập nhật mảng SwingHighPrice/Time và SwingLowPrice/Time (giữ SwingKeep phần tử gần nhất)
-// UpdateSwings vào slot (0 = HighTF, 1 = MiddleTF)
-// Cập nhật mảng SwingHighPrice/Time và SwingLowPrice/Time (giữ SwingKeep phần tử gần nhất)
+// Cập nhật mảng SwingHighPrice/Time và SwingLowPrice/Time (giữ MaxSwingKeep phần tử gần nhất)
 // UpdateSwings vào slot (0 = HighTF, 1 = MiddleTF)
 void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingRange)
 {
@@ -473,51 +470,49 @@ void UpdateSwings(string symbol, ENUM_TIMEFRAMES timeframe, int slot, int SwingR
   for(int i = iStart; i <= iEnd; i++)
   {
     // nếu đã đủ cả 2 loại thì dừng
-    if(SwingHighCountTF[slot] >= SwingKeep && SwingLowCountTF[slot] >= SwingKeep) break;
+    if(SwingHighCountTF[slot] >= MaxSwingKeep && SwingLowCountTF[slot] >= MaxSwingKeep) break;
 
     // Kiểm tra SwingHigh bằng hàm tiện ích
-    if(SwingHighCountTF[slot] < SwingKeep)
+    if(SwingHighCountTF[slot] < MaxSwingKeep)
     {
       bool isH = IsSwingHigh(symbol, timeframe, i, SwingRange);
       if(isH)
       {
-        double ci = iHigh(symbol, timeframe, i);
+        double candleI = iHigh(symbol, timeframe, i);
         datetime ti = iTime(symbol, timeframe, i);
         if(SwingHighCountTF[slot] == 0)
         {
-          SwingHighPriceTF[slot][0] = ci;
+          SwingHighPriceTF[slot][0] = candleI;
           SwingHighTimeTF[slot][0]  = ti;
         }
         else
         {
-          SwingHighPriceTF[slot][1] = ci;
+          SwingHighPriceTF[slot][1] = candleI;
           SwingHighTimeTF[slot][1]  = ti;
         }
         SwingHighCountTF[slot]++;
-        if(PrintToExperts) PrintFormat("UpdateSwings slot=%d Found SwingHigh #%d tf=%s price=%.5f", slot, SwingHighCountTF[slot], EnumToString(timeframe), ci);
       }
     }
 
     // Kiểm tra SwingLow bằng hàm tiện ích
-    if(SwingLowCountTF[slot] < SwingKeep)
+    if(SwingLowCountTF[slot] < MaxSwingKeep)
     {
       bool isL = IsSwingLow(symbol, timeframe, i, SwingRange);
       if(isL)
       {
-        double ci2 = iLow(symbol, timeframe, i);
+        double candleI = iLow(symbol, timeframe, i);
         datetime ti2 = iTime(symbol, timeframe, i);
         if(SwingLowCountTF[slot] == 0)
         {
-          SwingLowPriceTF[slot][0] = ci2;
+          SwingLowPriceTF[slot][0] = candleI;
           SwingLowTimeTF[slot][0]  = ti2;
         }
         else
         {
-          SwingLowPriceTF[slot][1] = ci2;
+          SwingLowPriceTF[slot][1] = candleI;
           SwingLowTimeTF[slot][1]  = ti2;
         }
         SwingLowCountTF[slot]++;
-        if(PrintToExperts) PrintFormat("UpdateSwings slot=%d Found SwingLow #%d tf=%s price=%.5f", slot, SwingLowCountTF[slot], EnumToString(timeframe), ci2);
       }
     }
   }
@@ -564,7 +559,7 @@ void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
    datetime bar_secs = (datetime)PeriodSeconds(timeframe);
 
    // Vẽ Swing High
-   int maxH = (SwingHighCountTF[slot] < SwingKeep) ? SwingHighCountTF[slot] : SwingKeep;
+   int maxH = (SwingHighCountTF[slot] < MaxSwingKeep) ? SwingHighCountTF[slot] : MaxSwingKeep;
    for(int h = 0; h < maxH; h++)
    {
       string obj = prefix + "H_" + IntegerToString(h); // e.g. "HTF_SW_mid_H_0"
@@ -588,7 +583,7 @@ void DrawSwingsOnChart(ENUM_TIMEFRAMES timeframe)
    }
 
    // Vẽ Swing Low
-   int maxL = (SwingLowCountTF[slot] < SwingKeep) ? SwingLowCountTF[slot] : SwingKeep;
+   int maxL = (SwingLowCountTF[slot] < MaxSwingKeep) ? SwingLowCountTF[slot] : MaxSwingKeep;
    for(int l = 0; l < maxL; l++)
    {
       string obj = prefix + "L_" + IntegerToString(l);
