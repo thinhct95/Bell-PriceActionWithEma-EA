@@ -7,6 +7,26 @@
 #property version   "2.00"
 #property strict
 
+// Bật/tắt MSS detection cho từng TF
+input bool DetectMSS_HTF = true;
+input bool DetectMSS_MTF = true;
+input bool DetectMSS_LTF = false;
+
+// Cấu hình Swing
+input int           htfSwingRange = 1;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           mtfSwingRange = 10;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 10;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           SwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
+
+// Cấu hình vẽ Swing trên chart
+input bool   ShowSwingMarkers = true;      // Hiển thị các marker swing trên chart
+input string SwingObjPrefix   = "Swing_"; // Tiền tố tên object (dễ xóa/điều chỉnh)
+input int    SwingMarkerFontSize    = 10;        // Kích thước font cho label
+
+input int FVGLookback = 200;   // Số nến lookback khi tính FVG (dùng ở EnsureFVGUpToDate)
+
+input bool   PrintToExperts = true;    // In log ra Expert
+
 // --- lưu trend đã tính cho mỗi slot ---
 // slot 0 = HTF, 1 = MTF, 2 = LTF
 int TrendTF[3]; // 1 = up, -1 = down, 0 = sideway / unknown
@@ -14,20 +34,6 @@ int TrendTF[3]; // 1 = up, -1 = down, 0 = sideway / unknown
 input ENUM_TIMEFRAMES HighTF = PERIOD_D1;    // Khung thời gian cao
 input ENUM_TIMEFRAMES MiddleTF = PERIOD_H1;  // Khung thời gian trung bình (dùng để tìm FVG)
 input ENUM_TIMEFRAMES LowTF = PERIOD_M5;    // Khung thời gian thấp (Tìm điểm vào lệnh)
-
-input bool          PrintToExperts = true;    // In log ra Expert
-
-// Cấu hình Swing
-input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-
-input int           SwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
-
-// Cấu hình vẽ Swing trên chart
-input bool   ShowSwingMarkers = true;      // Hiển thị các marker swing trên chart
-input string SwingObjPrefix   = "Swing_"; // Tiền tố tên object (dễ xóa/điều chỉnh)
-input int    SwingMarkerFontSize    = 10;        // Kích thước font cho label
 
 // --- multi-TF swing storage (slots) ---
 // slot 0 = HighTF, slot 1 = MiddleTF, slot 2 = LowTF
@@ -57,11 +63,6 @@ datetime lastClosedBarTime[3] = {0,0,0};
 
 // cache last FVG compute time (bar C or bar index 1 time used to detect change)
 datetime lastFVGBarTime = 0;
-
-// Bật/tắt MSS detection cho từng TF
-input bool DetectMSS_HTF = false;
-input bool DetectMSS_MTF = false;
-input bool DetectMSS_LTF = true;
 
 // struct dùng để trả thông tin khi phát hiện MSS
 struct MSSInfo {
@@ -392,15 +393,15 @@ MSSInfo DetectMSSOnSlot(
 
 // Kiểm tra 1 bar tại index i có phải SwingHigh không (dùng giá đóng cửa theo yêu cầu)
 // Kiểm tra 1 bar tại index i có phải SwingHigh không (xét râu - High)
-bool IsSwingHigh(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
+bool IsSwingHigh(string symbol, ENUM_TIMEFRAMES timeframe, int candleIndex, int swingRange)
 {
-  double hi = iHigh(symbol, timeframe, i);
+  double hi = iHigh(symbol, timeframe, candleIndex);
   if(hi == 0.0) return false;
 
   // So sánh với X nến trước (index giảm)
-  for(int j = 1; j <= X; j++)
+  for(int i = 1; i <= swingRange; i++)
   {
-    int idxPrev = i - j;
+    int idxPrev = candleIndex - i;
     if(idxPrev < 0) return false; // không đủ dữ liệu
     double hprev = iHigh(symbol, timeframe, idxPrev);
     if(hprev == 0.0) return false; // dữ liệu thiếu
@@ -409,9 +410,9 @@ bool IsSwingHigh(string symbol, ENUM_TIMEFRAMES timeframe, int i, int X)
   }
 
   // So sánh với X nến sau (index tăng)
-  for(int k = 1; k <= X; k++)
+  for(int k = 1; k <= swingRange; k++)
   {
-    int idxNext = i + k;
+    int idxNext = candleIndex + k;
     // nếu idxNext vượt quá bars available -> không có dữ liệu đủ -> return false
     double hnext = iHigh(symbol, timeframe, idxNext);
     if(hnext == 0.0) return false;
@@ -1283,33 +1284,6 @@ void UpdateLabel(string labelName, ENUM_TIMEFRAMES timeframe, int trend)
     }
 }
 
-int OnInit()
-{
-  // Khởi tạo 3 label cho 3 timeframe
-  UpdateLabel("LBL_HTF", HighTF, 0);
-  UpdateLabel("LBL_MTF", MiddleTF, 0);
-  UpdateLabel("LBL_LTF", LowTF, 0);
-
-  return(INIT_SUCCEEDED);
-}
-
-void OnDeinit(const int reason)
-{
-  // Xoá 3 label
-  if(ObjectFind(0, "LBL_HTF") >= 0) ObjectDelete(0, "LBL_HTF");
-  if(ObjectFind(0, "LBL_MTF") >= 0) ObjectDelete(0, "LBL_MTF");
-  if(ObjectFind(0, "LBL_LTF") >= 0) ObjectDelete(0, "LBL_LTF");
-
-  // Xóa tất cả object dùng tiền tố SwingObjPrefix (bao gồm htf_/mtf_/ltf_ và FVG)
-  int tot = ObjectsTotal(0);
-  for(int i = tot - 1; i >= 0; i--)
-  {
-    string nm = ObjectName(0, i);
-    if(StringFind(nm, SwingObjPrefix, 0) == 0)
-      ObjectDelete(0, nm);
-  }
-}
-
 // Trả true nếu bar đóng mới xuất hiện (dựa vào iTime(...,1))
 bool IsNewClosedBar(string symbol, ENUM_TIMEFRAMES tf, int slot)
 {
@@ -1338,11 +1312,6 @@ void EnsureFVGUpToDate(string symbol, ENUM_TIMEFRAMES tf, int lookback)
   }
 }
 
-// ProcessMSSForSlot: hàm chung tách logic MSS cho 1 slot/timeframe
-// sym            : symbol (Symbol())
-// tf             : timeframe để check (HighTF/MiddleTF/LowTF)
-// slot           : index 0=HTF,1=MTF,2=LTF
-// enabled        : nếu false thì không làm gì
 // requireFVG     : có cần FVG (true/false) truyền vào DetectMSSOnSlot
 // minBreakPips.. : các tham số truyền xuống DetectMSSOnSlot (mặc định hợp lý)
 void ProcessMSSForSlot(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled,
@@ -1353,10 +1322,6 @@ void ProcessMSSForSlot(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled,
                        int fvgLookback = 200)
 {
   if(!enabled) return;
-
-  // Nếu là MiddleTF và bạn muốn dùng FVG cache, cập nhật cache trước
-  if(tf == MiddleTF)
-    EnsureFVGUpToDate(sym, MiddleTF, fvgLookback);
 
   // Gọi DetectMSSOnSlot với tham số truyền vào
   MSSInfo info = DetectMSSOnSlot(sym, tf, slot, minBreakPips, minConsec, lookbackBarsForSweep, fvgLookback, requireFVG);
@@ -1371,78 +1336,66 @@ void ProcessMSSForSlot(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled,
   }
 }
 
+void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool detectMSS,
+                                     int swingRange, bool requireFVG,
+                                     double minBreakPips, int minConsec,
+                                     int lookbackBarsForSweep, int fvgLookback)
+{
+  UpdateSwings(sym, tf, slot, swingRange);
+  UpdateTrendForSlot(slot, tf, sym);
+  if(tf == MiddleTF) EnsureFVGUpToDate(sym, MiddleTF, fvgLookback);
+  ProcessMSSForSlot(sym, tf, slot, detectMSS, requireFVG, minBreakPips, minConsec, lookbackBarsForSweep, fvgLookback);
+
+  if(ShowSwingMarkers)
+  {
+    DrawSwingsOnChart(tf);
+    if(tf == MiddleTF)
+      DrawFVG(sym, MiddleTF, true);
+  }
+
+  UpdateLabel((tf == HighTF) ? "LBL_HTF" : (tf == MiddleTF) ? "LBL_MTF" : "LBL_LTF", tf, TrendTF[slot]);
+}
+
 void OnTick()
 {
   string sym = Symbol();
 
-  // --- 1) Kiểm tra có bar đóng mới (nhưng chưa update swings) ---
-  bool newHTFCandleClosed = IsNewClosedBar(sym, HighTF, 0);
-  bool newMTFCandleClosed = IsNewClosedBar(sym, MiddleTF, 1);
-  bool newLTFCandleClosed = IsNewClosedBar(sym, LowTF, 2);
-
-  // Nếu MTF có bar đóng mới, cập nhật cache FVG trước khi detect (Detect có thể require FVG)
-  if(newMTFCandleClosed)
-    EnsureFVGUpToDate(sym, MiddleTF, 200);
-
-  // --- 2) Chạy MSS detection TRƯỚC khi update swings (dùng swings hiện tại - tức swing "cũ") ---
-  // HTF
-  ProcessMSSForSlot(sym, HighTF, 0, DetectMSS_HTF,
-                    /*requireFVG=*/ false,
-                    /*minBreakPips=*/ 10.0,
-                    /*minConsec=*/ 2,
-                    /*lookback=*/ 50,
-                    /*fvgLookback=*/ 200);
-
-  //MTF
-  ProcessMSSForSlot(sym, MiddleTF, 1, DetectMSS_MTF,
-                    /*requireFVG=*/ true,
-                    /*minBreakPips=*/ 10.0,
-                    /*minConsec=*/ 2,
-                    /*lookback=*/ 50,
-                    /*fvgLookback=*/ 200);
-
-  // LTF
-  ProcessMSSForSlot(sym, LowTF, 2, DetectMSS_LTF,
-                    /*requireFVG=*/ true,
-                    /*minBreakPips=*/ 8.0,
-                    /*minConsec=*/ 2,
-                    /*lookback=*/ 30,
-                    /*fvgLookback=*/ 100);
-
-  // --- 3) Bây giờ mới update swings & trend cho những TF có bar đóng mới ---
-  if(newHTFCandleClosed)
-  {
-    UpdateSwings(sym, HighTF, 0, htfSwingRange);
-    UpdateTrendForSlot(0, HighTF, sym);
-    if(PrintToExperts) PrintFormat("New closed HTF detected at %s", TimeToString(lastClosedBarTime[0], TIME_DATE|TIME_MINUTES));
+  if(IsNewClosedBar(sym, HighTF, 0)) {
+    HandleLogicForTimeframe(sym, HighTF, 0, DetectMSS_HTF, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
   }
 
-  if(newMTFCandleClosed)
-  {
-    UpdateSwings(sym, MiddleTF, 1, mtfSwingRange);
-    UpdateTrendForSlot(1, MiddleTF, sym);
-    // ensure FVG cache up-to-date (already done above if newMTFCandleClosed)
-    if(PrintToExperts) PrintFormat("New closed MTF detected at %s", TimeToString(lastClosedBarTime[1], TIME_DATE|TIME_MINUTES));
+  if(IsNewClosedBar(sym, MiddleTF, 1)) {
+    HandleLogicForTimeframe(sym, MiddleTF, 1, DetectMSS_MTF, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
   }
 
-  if(newLTFCandleClosed)
-  {
-    UpdateSwings(sym, LowTF, 2, ltfSwingRange);
-    UpdateTrendForSlot(2, LowTF, sym);
-    if(PrintToExperts) PrintFormat("New closed LTF detected at %s", TimeToString(lastClosedBarTime[2], TIME_DATE|TIME_MINUTES));
+  if(IsNewClosedBar(sym, LowTF, 2)) {
+    HandleLogicForTimeframe(sym, LowTF, 2, DetectMSS_LTF, ltfSwingRange, false, 10.0, 2, 50, FVGLookback);
   }
+}
 
-  // --- 4) Vẽ (chỉ khi cần) ---
-  if(ShowSwingMarkers)
+int OnInit()
+{
+  string sym = Symbol();
+  HandleLogicForTimeframe(sym, HighTF, 0, false, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
+  HandleLogicForTimeframe(sym, MiddleTF, 1, false, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
+  HandleLogicForTimeframe(sym, LowTF, 2, false, ltfSwingRange, false, 10.0, 2, 50, FVGLookback);
+
+  return(INIT_SUCCEEDED);
+}
+
+void OnDeinit(const int reason)
+{
+  // Xoá 3 label
+  if(ObjectFind(0, "LBL_HTF") >= 0) ObjectDelete(0, "LBL_HTF");
+  if(ObjectFind(0, "LBL_MTF") >= 0) ObjectDelete(0, "LBL_MTF");
+  if(ObjectFind(0, "LBL_LTF") >= 0) ObjectDelete(0, "LBL_LTF");
+
+  // Xóa tất cả object dùng tiền tố SwingObjPrefix (bao gồm htf_/mtf_/ltf_ và FVG)
+  int tot = ObjectsTotal(0);
+  for(int i = tot - 1; i >= 0; i--)
   {
-    DrawSwingsOnChart(HighTF);
-    // DrawSwingsOnChart(MiddleTF);
-    // DrawSwingsOnChart(LowTF);
-    DrawFVG(sym, MiddleTF, true);
+    string nm = ObjectName(0, i);
+    if(StringFind(nm, SwingObjPrefix, 0) == 0)
+      ObjectDelete(0, nm);
   }
-
-  // --- 5) Update label ---
-  UpdateLabel("LBL_HTF", HighTF, TrendTF[0]);
-  UpdateLabel("LBL_MTF", MiddleTF, TrendTF[1]);
-  UpdateLabel("LBL_LTF", LowTF, TrendTF[2]);
 }
