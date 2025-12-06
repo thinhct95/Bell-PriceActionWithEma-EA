@@ -14,8 +14,8 @@ input bool DetectMSS_LTF = true;
 
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Cấu hình vẽ Swing trên chart
@@ -87,6 +87,7 @@ struct MSSInfo {
 struct BOSInfo
 {
   bool    found;
+  bool    isReal;
   int     direction;           // 1 = up, -1 = down
   datetime break_time;         // time của bar xác nhận (bar đóng)
   double  break_price;         // close của bar xác nhận
@@ -154,17 +155,12 @@ void StoreNewBOS(int slot, const BOSInfo &bos)
     BOS_Count[slot] = 2;
   }
 
-  if(PrintToExperts)
-    PrintFormat("StoreNewBOS(fix): slot=%d -> stored new at index0 direction=%d broken_price=%.5f time=%s count=%d",
-                slot, bos.direction, bos.broken_sw_price, TimeToString(bos.broken_sw_time, TIME_DATE|TIME_MINUTES), BOS_Count[slot]);
-
   // Vẽ lại tất cả BOS cho slot (DrawAllBOSForSlot sẽ tạo lại objects và ghi BOS_Names)
   DrawAllBOSForSlot(slot);
 }
 
 // Vẽ tất cả BOS đã lưu cho 1 slot (0=HTF,1=MTF,2=LTF)
-// Nếu BOS_Count[slot] == 0 thì không vẽ gì.
-// Lưu ý: DrawBOS sẽ quản lý tên object cho từng storeIndex (0/1).
+// SỬA: không xóa theo prefix chung nữa, chỉ xóa các composite names đã lưu trong BOS_Names
 void DrawAllBOSForSlot(int slot)
 {
   if(!ShowSwingMarkers) return;
@@ -172,25 +168,54 @@ void DrawAllBOSForSlot(int slot)
   if(cnt <= 0) return;
   string sym = Symbol();
 
-  // --- NEW: xóa mọi object BOS thuộc slot này trước khi vẽ lại để tránh tích lũy ---
-  string bosPrefix = SwingObjPrefix + "BOS_" + IntegerToString(slot) + "_";
-  int totalObjs = ObjectsTotal(0);
-  for(int i = totalObjs - 1; i >= 0; i--)
+  // --- SAFE CLEANUP: xóa composite object cũ mà chúng ta từng lưu tên trong BOS_Names ---
+  for(int j = 0; j < 2; j++)
   {
-    string nm = ObjectName(0, i);
-    if(StringFind(nm, bosPrefix, 0) == 0)
-      ObjectDelete(0, nm);
+    if(StringLen(BOS_Names[slot][j]) > 0)
+    {
+      // DeleteCompositeBOS sẽ kiểm tra tồn tại từng object con trước khi xóa
+      DeleteCompositeBOS(BOS_Names[slot][j]);
+      BOS_Names[slot][j] = "";        // clear saved composite name so DrawBOS will recreate
+      BOS_HaveZone[slot][j] = false;
+      if(PrintToExperts) PrintFormat("DrawAllBOSForSlot: slot=%d cleared old composite index=%d", slot, j);
+    }
   }
 
   // draw older first (index1) then newer (index0)
+  // Note: DrawBOS sẽ set BOS_Names[slot][storeIndex] after drawing, so we pass storeIndex to persist names
   if(cnt == 2)
   {
-    if(BOSStore[slot][1].found) DrawBOS(sym, slot, BOSStore[slot][1], 1);
-    if(BOSStore[slot][0].found) DrawBOS(sym, slot, BOSStore[slot][0], 0);
+    if(BOSStore[slot][1].found)
+    {
+      DrawBOS(sym, slot, BOSStore[slot][1], 1);
+      // If DrawBOS for some reason didn't set BOS_Names (e.g. missing data), ensure we don't leave inconsistent state
+      if(StringLen(BOS_Names[slot][1]) == 0)
+      {
+        // attempt fallback: create minimal line to mark BOS to avoid total disappearance
+        BOS_Names[slot][1] = ""; // keep empty; optional: log
+        if(PrintToExperts) PrintFormat("DrawAllBOSForSlot: slot=%d index1 drawn but composite name empty", slot);
+      }
+    }
+
+    if(BOSStore[slot][0].found)
+    {
+      DrawBOS(sym, slot, BOSStore[slot][0], 0);
+      if(StringLen(BOS_Names[slot][0]) == 0)
+      {
+        if(PrintToExperts) PrintFormat("DrawAllBOSForSlot: slot=%d index0 drawn but composite name empty", slot);
+      }
+    }
   }
   else // cnt == 1
   {
-    if(BOSStore[slot][0].found) DrawBOS(sym, slot, BOSStore[slot][0], 0);
+    if(BOSStore[slot][0].found)
+    {
+      DrawBOS(sym, slot, BOSStore[slot][0], 0);
+      if(StringLen(BOS_Names[slot][0]) == 0)
+      {
+        if(PrintToExperts) PrintFormat("DrawAllBOSForSlot: slot=%d single drawn but composite name empty", slot);
+      }
+    }
   }
 }
 
@@ -235,6 +260,7 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
   out.broken_sw_time = 0;
   out.confirm_bar_index = -1;
   out.consec_closes = 0;
+  out.isReal = false; // default
 
   // Cần ít nhất 1 swing high hoặc low (ở slot)
   double sh0 = (SwingHighCountTF[slot] >= 1) ? SwingHighPriceTF[slot][0] : 0.0;
@@ -247,16 +273,12 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
   double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
-  // index của bar gần nhất thuộc timeframe: iBarShift bằng time => sử dụng iBarShift(TimeOf reference)
-  // Tuy nhiên ta scan bars newer (index 0 = current unclosed, 1 = last closed). 
-  // Thường ta kiểm closed bars: index >=1
   int barsAvailable = iBars(symbol, timeframe);
   if(barsAvailable < 2) return out;
 
-  // --- BULLISH BOS: price close > sh0 + threshold ---
+  // --- BULLISH BOS: first try REAL (close > sh0 + threshold) ---
   if(sh0 != 0.0)
   {
-    // scan last lookForwardBars closed bars (index 1..lookForwardBars)
     for(int idx = 1; idx <= MathMin(lookForwardBars, barsAvailable - 1); idx++)
     {
       double c = iClose(symbol, timeframe, idx);
@@ -264,17 +286,16 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
       double h = iHigh(symbol, timeframe, idx);
       datetime t = iTime(symbol, timeframe, idx);
       if(c == 0 || h == 0) continue;
-      // require close strictly greater than sh0 + minBreakPoints
+
+      // REAL: require close strictly greater than sh0 + minBreakPoints
       if(c > sh0 + minBreakPoints)
       {
-        // check consec closes starting from this idx going newer (idx, idx-1, ...)
         int consec = 0;
         for(int k = idx; k >= 1 && k >= idx - (consecRequired - 1); k--)
         {
           double ck = iClose(symbol, timeframe, k);
           double ok = iOpen(symbol, timeframe, k);
           if(ck == 0) break;
-          // if require body check then close must be bullish (ck > ok)
           if(useBodyCheck)
           {
             if(ck > ok && ck > sh0 + minBreakPoints) consec++;
@@ -296,13 +317,42 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
           out.broken_sw_time = SwingHighTimeTF[slot][0];
           out.confirm_bar_index = idx;
           out.consec_closes = consec;
+          out.isReal = true;
           return out;
         }
       }
     }
+
+    // If no REAL bullish BOS found, check for FAKE bullish BOS:
+    // condition: high > sh0 + threshold (wick exceeded), but close <= sh0 + threshold
+    for(int idx = 1; idx <= MathMin(lookForwardBars, barsAvailable - 1); idx++)
+    {
+      double c = iClose(symbol, timeframe, idx);
+      double h = iHigh(symbol, timeframe, idx);
+      datetime t = iTime(symbol, timeframe, idx);
+      if(h == 0) continue;
+
+      if(h > sh0 + minBreakPoints && c <= sh0 + minBreakPoints)
+      {
+        // classify as fake BOS
+        out.found = true;
+        out.direction = 1;
+        out.break_time = t;
+        out.break_price = c;
+        out.broken_sw_price = sh0;
+        out.broken_sw_time = SwingHighTimeTF[slot][0];
+        out.confirm_bar_index = idx;
+        out.consec_closes = 0;
+        out.isReal = false;
+        if(PrintToExperts)
+          PrintFormat("DetectBOSOnSlot: slot=%d FAKE BULL detected idx=%d time=%s high=%.5f close=%.5f sh0=%.5f",
+                      slot, idx, TimeToString(t, TIME_DATE|TIME_MINUTES), h, c, sh0);
+        return out;
+      }
+    }
   }
 
-  // --- BEARISH BOS: price close < sl0 - threshold ---
+  // --- BEARISH BOS: first try REAL (close < sl0 - threshold) ---
   if(sl0 != 0.0)
   {
     for(int idx = 1; idx <= MathMin(lookForwardBars, barsAvailable - 1); idx++)
@@ -312,6 +362,7 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
       double l = iLow(symbol, timeframe, idx);
       datetime t = iTime(symbol, timeframe, idx);
       if(c == 0 || l == 0) continue;
+
       if(c < sl0 - minBreakPoints)
       {
         int consec = 0;
@@ -341,8 +392,37 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
           out.broken_sw_time = SwingLowTimeTF[slot][0];
           out.confirm_bar_index = idx;
           out.consec_closes = consec;
+          out.isReal = true;
           return out;
         }
+      }
+    }
+
+    // If no REAL bearish BOS found, check for FAKE bearish BOS:
+    // condition: low < sl0 - threshold (wick exceeded downward), but close >= sl0 - threshold
+    for(int idx = 1; idx <= MathMin(lookForwardBars, barsAvailable - 1); idx++)
+    {
+      double c = iClose(symbol, timeframe, idx);
+      double l = iLow(symbol, timeframe, idx);
+      datetime t = iTime(symbol, timeframe, idx);
+      if(l == 0) continue;
+
+      if(l < sl0 - minBreakPoints && c >= sl0 - minBreakPoints)
+      {
+        // classify as fake BOS
+        out.found = true;
+        out.direction = -1;
+        out.break_time = t;
+        out.break_price = c;
+        out.broken_sw_price = sl0;
+        out.broken_sw_time = SwingLowTimeTF[slot][0];
+        out.confirm_bar_index = idx;
+        out.consec_closes = 0;
+        out.isReal = false;
+        if(PrintToExperts)
+          PrintFormat("DetectBOSOnSlot: slot=%d FAKE BEAR detected idx=%d time=%s low=%.5f close=%.5f sl0=%.5f",
+                      slot, idx, TimeToString(t, TIME_DATE|TIME_MINUTES), l, c, sl0);
+        return out;
       }
     }
   }
@@ -350,6 +430,8 @@ BOSInfo DetectBOSOnSlot(string symbol, ENUM_TIMEFRAMES timeframe, int slot,
   return out;
 }
 
+// DrawBOS: vẽ 1 BOS (không shift/xóa store) — parameters: symbol, slot, bos info, storeIndex (0/1)
+// Nếu bạn gọi DrawBOS với storeIndex = -1 thì hàm sẽ chỉ tạo objects tạm (không lưu tên).
 // DrawBOS: vẽ 1 BOS (không shift/xóa store) — parameters: symbol, slot, bos info, storeIndex (0/1)
 // Nếu bạn gọi DrawBOS với storeIndex = -1 thì hàm sẽ chỉ tạo objects tạm (không lưu tên).
 void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
@@ -396,14 +478,9 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
   if(t_h_end == t_start) t_h_end = (datetime)((long)t_start + (long)bar_secs);
 
   // --- TẠO TÊN UNIQUE: bao gồm slot + storeIndex + thời điểm để tránh trùng ---
-  // nếu storeIndex == -1 thì dùng -1 trong tên để vẫn unique cho temp draws
   int idxPart = (storeIndex >= 0) ? storeIndex : -1;
-  
-  // use broken_sw_time (BOSInfo field) as stable stamp; fallback to t_start
   int timeStampInt = (info.broken_sw_time != 0) ? (int)info.broken_sw_time : (int)t_start;
   string stamp = StringFormat("%d_%d_%d", slot, idxPart, timeStampInt);
-
-
 
   string nm_line = basePrefix + "HLINE_" + stamp;
   string nm_arrow = basePrefix + "ARW_" + stamp;
@@ -416,7 +493,6 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
   {
     if(StringLen(BOS_Names[slot][storeIndex]) > 0)
     {
-      // kiểm tra tồn tại của các object con
       string parts[];
       int n = StringSplit(BOS_Names[slot][storeIndex], '|', parts);
       bool all_exist = true;
@@ -428,7 +504,6 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
 
       if(all_exist)
       {
-        // đã vẽ trước đó, không cần vẽ lại
         if(PrintToExperts) PrintFormat("DrawBOS: slot=%d storeIndex=%d -> already drawn, skip redraw", slot, storeIndex);
         return;
       }
@@ -443,12 +518,14 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
     }
   }
 
-  // Create line
+  // Create horizontal line (trend object used as line)
   if(!ObjectCreate(0, nm_line, OBJ_TREND, 0, t_start, p_h, t_h_end, p_h))
     PrintFormat("DrawBOS: Cannot create %s", nm_line);
   else
   {
-    ObjectSetInteger(0, nm_line, OBJPROP_COLOR, (info.direction==1)?clrLime:clrRed);
+    // line color: real use green/red, fake use yellow
+    int lineColor = info.isReal ? ((info.direction==1)?clrLime:clrRed) : clrYellow;
+    ObjectSetInteger(0, nm_line, OBJPROP_COLOR, lineColor);
     ObjectSetInteger(0, nm_line, OBJPROP_WIDTH, 2);
     ObjectSetInteger(0, nm_line, OBJPROP_STYLE, STYLE_SOLID);
     ObjectSetInteger(0, nm_line, OBJPROP_RAY_RIGHT, false);
@@ -456,25 +533,28 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
     ObjectSetInteger(0, nm_line, OBJPROP_BACK, true);
   }
 
-  // Arrow
+  // Arrow (or fallback text arrow) at t_h_end,p_h
   if(ObjectCreate(0, nm_arrow, OBJ_ARROW, 0, t_h_end, p_h))
   {
     int code = (info.direction==1) ? 233 : 234;
     #ifdef __MQL5__
       ObjectSetInteger(0, nm_arrow, OBJPROP_ARROWCODE, code);
     #endif
-    ObjectSetInteger(0, nm_arrow, OBJPROP_COLOR, (info.direction==1)?clrLime:clrRed);
+    int arrowColor = info.isReal ? ((info.direction==1)?clrLime:clrRed) : clrYellow;
+    ObjectSetInteger(0, nm_arrow, OBJPROP_COLOR, arrowColor);
     ObjectSetInteger(0, nm_arrow, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, nm_arrow, OBJPROP_BACK, true);
   }
   else
   {
+    // fallback to text arrow if arrow object cannot be created
     string nm_fallback = basePrefix + "ARW_T_" + stamp;
     if(ObjectCreate(0, nm_fallback, OBJ_TEXT, 0, t_h_end, p_h))
     {
       string arrowTxt = (info.direction==1) ? "▲" : "▼";
       ObjectSetString(0, nm_fallback, OBJPROP_TEXT, arrowTxt);
-      ObjectSetInteger(0, nm_fallback, OBJPROP_COLOR, (info.direction==1)?clrLime:clrRed);
+      int arrowColor = info.isReal ? ((info.direction==1)?clrLime:clrRed) : clrYellow;
+      ObjectSetInteger(0, nm_fallback, OBJPROP_COLOR, arrowColor);
       ObjectSetInteger(0, nm_fallback, OBJPROP_FONTSIZE, SwingMarkerFontSize+2);
       ObjectSetInteger(0, nm_fallback, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, nm_fallback, OBJPROP_BACK, true);
@@ -485,12 +565,16 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
   double y_offset = SymbolInfoDouble(symbol, SYMBOL_POINT) * 4.0;
   double label_price = (info.direction==1) ? (p_h + y_offset) : (p_h - y_offset);
 
+  // Label text and color depending on real/fake
+  string labelText = info.isReal ? "BOS" : "FAKE";
+  int labelColor = info.isReal ? ((info.direction==1)?clrLime:clrRed) : clrYellow;
+
   if(!ObjectCreate(0, nm_txt, OBJ_TEXT, 0, t_h_end, label_price))
     PrintFormat("DrawBOS: Cannot create %s", nm_txt);
   else
   {
-    ObjectSetString(0, nm_txt, OBJPROP_TEXT, "BOS");
-    ObjectSetInteger(0, nm_txt, OBJPROP_COLOR, (info.direction==1)?clrLime:clrRed);
+    ObjectSetString(0, nm_txt, OBJPROP_TEXT, labelText);
+    ObjectSetInteger(0, nm_txt, OBJPROP_COLOR, labelColor);
     ObjectSetInteger(0, nm_txt, OBJPROP_FONTSIZE, SwingMarkerFontSize + 1);
     ObjectSetInteger(0, nm_txt, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, nm_txt, OBJPROP_BACK, true);
@@ -500,7 +584,6 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
   string compositeName = nm_line + "|" + nm_arrow + "|" + nm_txt;
   if(storeIndex >= 0)
   {
-    // nếu trước đó có tên ở vị trí này -> xóa (tránh leak) -- nhưng đã xử lý ở trên
     if(StringLen(BOS_Names[slot][storeIndex]) > 0) DeleteCompositeBOS(BOS_Names[slot][storeIndex]);
 
     BOS_Names[slot][storeIndex] = compositeName;
@@ -508,7 +591,7 @@ void DrawBOS(string symbol, int slot, const BOSInfo &info, int storeIndex = -1)
   }
 
   if(PrintToExperts)
-    PrintFormat("DrawBOS: slot=%d drew BOS at storeIndex=%d names=(%s)", slot, storeIndex, compositeName);
+    PrintFormat("DrawBOS: slot=%d drew BOS at storeIndex=%d kind=%s names=(%s)", slot, storeIndex, (info.isReal ? "REAL":"FAKE"), compositeName);
 }
 
 // xóa compositeName dạng "lineName|arrowName|labelName"
@@ -947,6 +1030,9 @@ void DrawMss(string symbol, ENUM_TIMEFRAMES tf, const MSSInfo &mss, int slot)
             ObjectDelete(0, nm);
     }
 
+    // Thời lượng bar (giây) để dùng khi cần
+    datetime bar_secs = (datetime)PeriodSeconds(tf);
+
     // VẼ LABEL SWEEP tại chính xác sweep_time và sweep_price (không offset)
     if(mss.sweep_time != 0 && mss.sweep_price != 0.0)
     {
@@ -986,6 +1072,72 @@ void DrawMss(string symbol, ENUM_TIMEFRAMES tf, const MSSInfo &mss, int slot)
             PrintFormat("DrawMss: Cannot create %s", lblMss);
         }
     }
+
+    // --------- NEW: draw horizontal guide line from swept swing to sweep candle ----------
+    // Use swept_swing_time & swept_swing_price (from MSSInfo). If missing, try fallback to broken_swing_time/price or sweep_time.
+    datetime t_swing = mss.swept_swing_time;
+    double   p_swing = mss.swept_swing_price;
+
+    // fallback if missing
+    if(t_swing == 0 || p_swing == 0.0)
+    {
+        // try broken swing
+        if(mss.broken_swing_time != 0 && mss.broken_swing_price != 0.0)
+        {
+            t_swing = mss.broken_swing_time;
+            p_swing = mss.broken_swing_price;
+        }
+        else if(mss.sweep_time != 0 && mss.sweep_price != 0.0)
+        {
+            // last resort: draw small mark at sweep time & price
+            t_swing = mss.sweep_time - bar_secs; // place a little earlier
+            p_swing = mss.sweep_price;
+        }
+    }
+
+    // Only draw if we've got valid time & price
+    if(t_swing != 0 && p_swing != 0.0 && mss.sweep_time != 0)
+    {
+        // name with slot stamp to ensure uniqueness
+        string lineName = basePrefix + "GUIDE_" + IntegerToString((int)mss.sweep_time);
+
+        // We want a horizontal visual guide at the swing price from swing time -> sweep time.
+        // Use OBJ_TREND with two points: (t_swing, p_swing) -> (mss.sweep_time, p_swing)
+        if(!ObjectCreate(0, lineName, OBJ_TREND, 0, t_swing, p_swing, mss.sweep_time, p_swing))
+        {
+            PrintFormat("DrawMss: Cannot create guide line %s", lineName);
+        }
+        else
+        {
+            ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrMagenta);
+            ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
+            ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
+            ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+        }
+
+        // Optional: small label at the sweep_time to show swing price value
+        string valLabel = basePrefix + "GUIDE_VAL_" + IntegerToString((int)mss.sweep_time);
+        if(!ObjectCreate(0, valLabel, OBJ_TEXT, 0, mss.sweep_time, p_swing))
+        {
+            // ignore if cannot create
+        }
+        else
+        {
+            string txt = DoubleToString(p_swing, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
+            ObjectSetString(0, valLabel, OBJPROP_TEXT, txt);
+            ObjectSetInteger(0, valLabel, OBJPROP_COLOR, clrMagenta);
+            ObjectSetInteger(0, valLabel, OBJPROP_FONTSIZE, SwingMarkerFontSize - 1);
+            ObjectSetInteger(0, valLabel, OBJPROP_BACK, true);
+            ObjectSetInteger(0, valLabel, OBJPROP_SELECTABLE, false);
+        }
+    }
+
+    if(PrintToExperts)
+      PrintFormat("DrawMss: slot=%d drew MSS visuals (sweep_time=%s sweep_price=%.5f swept_swing_time=%s swept_swing_price=%.5f)",
+                  slot, TimeToString(mss.sweep_time, TIME_DATE|TIME_MINUTES), mss.sweep_price,
+                  TimeToString(mss.swept_swing_time, TIME_DATE|TIME_MINUTES), mss.swept_swing_price);
 }
 
 // Hàm tiện ích chuyển giá trị xu hướng thành chuỗi
