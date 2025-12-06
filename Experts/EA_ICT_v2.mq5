@@ -7,6 +7,21 @@
 #property version   "2.00"
 #property strict
 
+// Struct pending entry (single slot)
+struct PendingEntry
+{
+  bool    active;            // đang có pending entry
+  int     direction;         // 1 = buy (bull), -1 = sell (bear)
+  double  price;             // entry price (edge của LTF internal FVG)
+  int     fvgIndex;          // index của MTF FVG (watched) hoặc -1 nếu none
+  string  compositeName;     // tên object composite vẽ (line|label)
+  datetime created_time;     // thời điểm tạo
+  int     source_slot;       // slot nơi phát hiện MSS (HTF/MTF/LTF)
+};
+
+// global pending entry variable
+PendingEntry pendingEntry;
+
 // --- Watch MSS mode (user requested) ---
 bool watchMSSMode = false;      // mặc định false
 int  watchedFVGIndex = -1;      // index trong FVG_* arrays (khi watchMSSMode==true)
@@ -1918,6 +1933,195 @@ void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool dete
   UpdateLabel((tf == HighTF) ? "LBL_HTF" : (tf == MiddleTF) ? "LBL_MTF" : "LBL_LTF", tf, TrendTF[slot]);
 }
 
+// Clear & reset pending entry (xóa visuals nếu có)
+void ClearPendingEntry()
+{
+  if(!pendingEntry.active && StringLen(pendingEntry.compositeName)==0) 
+  {
+    // nothing to clear
+    return;
+  }
+
+  // nếu compositeName có dạng "line|label" -> xóa từng phần
+  if(StringLen(pendingEntry.compositeName) > 0)
+  {
+    string parts[];
+    int n = StringSplit(pendingEntry.compositeName, '|', parts);
+    for(int i=0;i<n;i++)
+    {
+      string nm = parts[i];
+      if(StringLen(nm) > 0 && ObjectFind(0, nm) >= 0) ObjectDelete(0, nm);
+    }
+  }
+
+  // reset struct
+  pendingEntry.active = false;
+  pendingEntry.direction = 0;
+  pendingEntry.price = 0.0;
+  pendingEntry.fvgIndex = -1;
+  pendingEntry.compositeName = "";
+  pendingEntry.created_time = 0;
+  pendingEntry.source_slot = -1;
+
+  if(PrintToExperts) Print("ClearPendingEntry: pending cleared");
+}
+
+// Draw pending entry visuals and save composite name inside struct
+void DrawPendingEntryVisuals(string symbol)
+{
+  Print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@");
+  if(!pendingEntry.active) return;
+  if(pendingEntry.price == 0.0) return;
+
+  // Compose unique stamp to avoid duplicate names
+  int timeStamp = (int)TimeCurrent();
+  string base = SwingObjPrefix + "PEND_";
+  string lineName = base + "LINE_" + IntegerToString(timeStamp);
+  string lblName  = base + "LBL_"  + IntegerToString(timeStamp);
+
+  // Safety: if any pre-existing composite saved, clear it first
+  if(StringLen(pendingEntry.compositeName) > 0) 
+  {
+    string partsOld[];
+    int no = StringSplit(pendingEntry.compositeName, '|', partsOld);
+    for(int j=0;j<no;j++) if(StringLen(partsOld[j])>0 && ObjectFind(0, partsOld[j])>=0) ObjectDelete(0, partsOld[j]);
+    pendingEntry.compositeName = "";
+  }
+
+  datetime t0 = iTime(symbol, LowTF, 0);
+  datetime barSecs = (datetime)PeriodSeconds(LowTF);
+  datetime start_time = (t0 != 0) ? (datetime)((long)t0 + (long)barSecs) : (datetime)TimeCurrent();
+
+  // Create horizontal line at entry price (short ray to right by one bar width)
+  if(!ObjectCreate(0, lineName, OBJ_TREND, 0, TimeCurrent(), pendingEntry.price, start_time, pendingEntry.price))
+  {
+    PrintFormat("DrawPendingEntryVisuals: cannot create %s", lineName);
+  }
+  else
+  {
+    int col = (pendingEntry.direction == 1) ? clrLime : clrRed;
+    ObjectSetInteger(0, lineName, OBJPROP_COLOR, col);
+    ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
+    ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DASH);
+    ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+  }
+
+  // Create label slightly offset from line
+  double yoffset = SymbolInfoDouble(symbol, SYMBOL_POINT) * 6.0;
+  double label_price = (pendingEntry.direction == 1) ? (pendingEntry.price + yoffset) : (pendingEntry.price - yoffset);
+  if(!ObjectCreate(0, lblName, OBJ_TEXT, 0, TimeCurrent(), label_price))
+  {
+    PrintFormat("DrawPendingEntryVisuals: cannot create %s", lblName);
+  }
+  else
+  {
+    string txt = (pendingEntry.direction == 1) ? "PEND BUY" : "PEND SELL";
+    ObjectSetString(0, lblName, OBJPROP_TEXT, txt);
+    ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, SwingMarkerFontSize);
+    ObjectSetInteger(0, lblName, OBJPROP_COLOR, (pendingEntry.direction==1)?clrLime:clrRed);
+    ObjectSetInteger(0, lblName, OBJPROP_BACK, true);
+    ObjectSetInteger(0, lblName, OBJPROP_SELECTABLE, false);
+  }
+
+  // Save composite
+  pendingEntry.compositeName = lineName + "|" + lblName;
+
+  if(PrintToExperts)
+    PrintFormat("DrawPendingEntryVisuals: drawn pending dir=%d price=%.5f composite=(%s)", pendingEntry.direction, pendingEntry.price, pendingEntry.compositeName);
+}
+
+// Set up pending entry when MSS confirmed and direction matches watched FVG
+// - mss: MSSInfo found
+// - slot: slot where MSS was detected
+void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
+{
+  string sym = Symbol();
+
+  // defensive checks
+  if(!mss.found)
+  {
+    if(PrintToExperts) Print("SetUpPendingEntryForMSS: mss.found == false -> skip");
+    return;
+  }
+  if(mss.sweep_time == 0 || mss.break_time == 0 || mss.sweep_time >= mss.break_time)
+  {
+    if(PrintToExperts) Print("SetUpPendingEntryForMSS: invalid times -> skip");
+    return;
+  }
+
+  // We'll search for an internal LTF FVG whose timeC is strictly between sweep_time and break_time
+  double lfgtop[]; double lfgbottom[];
+  datetime lfgA[]; datetime lfgC[];
+  int lfgtype[];
+
+  int cnt = FindInternalFVG(sym, LowTF, FVGLookback, lfgtop, lfgbottom, lfgA, lfgC, lfgtype);
+  if(cnt <= 0)
+  {
+    if(PrintToExperts) Print("SetUpPendingEntryForMSS: no LTF FVG found");
+    return;
+  }
+
+  // bounds in price between sweep and break
+  double pmin = MathMin(mss.sweep_price, mss.break_price);
+  double pmax = MathMax(mss.sweep_price, mss.break_price);
+
+  double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+
+  int chosenIdx = -1;
+  // choose first LTF FVG that has timeC strictly between sweep_time and break_time
+  // and whose zone lies within price-range [pmin,pmax] (allow small tol)
+  for(int i=0;i<cnt;i++)
+  {
+    datetime tc = lfgC[i];
+    if(tc <= mss.sweep_time || tc >= mss.break_time) continue;
+
+    double top = lfgtop[i];
+    double bottom = lfgbottom[i];
+    // ensure zone price interval intersects [pmin,pmax] and preferably lies inside
+    if(bottom + tol >= pmin && top - tol <= pmax)
+    {
+      chosenIdx = i;
+      break;
+    }
+  }
+
+  if(chosenIdx == -1)
+  {
+    if(PrintToExperts) PrintFormat("SetUpPendingEntryForMSS: no suitable LTF FVG found between times (sweep=%s break=%s)", 
+                                   TimeToString(mss.sweep_time, TIME_DATE|TIME_MINUTES), TimeToString(mss.break_time, TIME_DATE|TIME_MINUTES));
+    return;
+  }
+
+  // Build pending entry: use LTF internal FVG edge as entry
+  double entPrice = 0.0;
+  int fvgDir = lfgtype[chosenIdx]; // 1=bull, -1=bear
+  if(fvgDir == 1) // bullish LTF FVG: buy at bottom edge
+    entPrice = lfgbottom[chosenIdx];
+  else // bearish LTF FVG: sell at top edge
+    entPrice = lfgtop[chosenIdx];
+
+  // clear any old pending visuals
+  ClearPendingEntry();
+
+  // populate struct
+  pendingEntry.active = true;
+  pendingEntry.direction = (mss.direction == 1) ? 1 : -1; // MSS direction should match FVG direction
+  pendingEntry.price = entPrice;
+  pendingEntry.fvgIndex = watchedFVGIndex; // optional: which MTF FVG triggered watch
+  pendingEntry.created_time = TimeCurrent();
+  pendingEntry.compositeName = "";
+  pendingEntry.source_slot = slot;
+
+  // draw visuals and keep composite name
+  DrawPendingEntryVisuals(sym);
+
+  if(PrintToExperts)
+    PrintFormat("SetUpPendingEntryForMSS: pending created dir=%d price=%.5f LTF_FVG_idx=%d MTF_FVG_idx=%d",
+                pendingEntry.direction, pendingEntry.price, chosenIdx, pendingEntry.fvgIndex);
+}
+
 void OnTick()
 {
   string sym = Symbol();
@@ -1932,7 +2136,9 @@ void OnTick()
 
   if(IsNewClosedBar(sym, LowTF, 2)) {
     HandleLogicForTimeframe(sym, LowTF, 2, DetectMSS_LTF, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
-    CheckWatchMSSInvalidation(sym);
+    if (watchMSSMode) {
+      CheckWatchMSSInvalidation(sym);
+    }
   }
 
   UpdateMTFFVGTouched(sym);
