@@ -7,6 +7,16 @@
 #property version   "2.00"
 #property strict
 
+// --- Watch MSS mode (user requested) ---
+bool watchMSSMode = false;      // mặc định false
+int  watchedFVGIndex = -1;      // index trong FVG_* arrays (khi watchMSSMode==true)
+int  watchedFVGDir = 0;         // 1 = bullish FVG, -1 = bearish FVG
+
+// --- Mảng trạng thái: MTF FVG đã bị chạm bởi LTF hay chưa ---
+bool     MTF_FVG_Touched[];        // true = MTF FVG k đã bị LTF chạm
+datetime MTF_FVG_TouchTime[];     // thời điểm bar LTF đầu tiên chạm zone (datetime)
+double   MTF_FVG_TouchPrice[];    // giá chạm đại diện (low khi bullish, high khi bearish)
+
 // Bật/tắt MSS detection cho từng TF
 input bool DetectMSS_HTF = false;
 input bool DetectMSS_MTF = false;
@@ -14,7 +24,7 @@ input bool DetectMSS_LTF = true;
 
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
@@ -69,7 +79,7 @@ struct MSSInfo {
   bool  found;                 // true nếu tìm thấy MSS
   int   direction;             //  1 = down->up (bull MSS), -1 = up->down (bear MSS)
   datetime sweep_time;         // thời điểm bar "sweep" (bar quét thanh khoản)
-  double sweep_price;          // giá (râu) bị sweep (low cho bull, high cho bear)
+  double sweep_price;          // giá swing gốc bị phá
   // --- thêm: swing gốc đã bị swept (time/price) ---
   datetime swept_swing_time;   // time của swing bar trước khi bị sweep (ví dụ l0/h0 tại thời điểm detect)
   double   swept_swing_price;  // giá swing gốc
@@ -80,7 +90,7 @@ struct MSSInfo {
 
   // --- thêm: swing gốc bị broken (time/price) ---
   datetime broken_swing_time;  // time của swing bar bị phá (ví dụ sh0/sl0 tại thời điểm detect)
-  double   broken_swing_price; // giá swing gốc bị phá
+  double   low_sweap_price; // giá đóng nến của bos
 };
 
 // Kết quả BOS
@@ -108,6 +118,169 @@ BOSInfo BOSStore[3][2];      // BOSStore[slot][index] : index 0 = older, 1 = new
 string  BOS_Names[3][2];     // tên objects (composite) cho mỗi store entry
 int     BOS_Count[3] = {0,0,0}; // số BOS hiện có cho mỗi slot (0..2)
 bool    BOS_HaveZone[3][2];  // flag có zone hay không
+
+// -----------------------------------------------------------------
+// - Dùng mảng global FVG_top/FVG_bottom/FVG_timeC/FVG_type
+// - Quét từng FVG và kiểm tra trên LowTF xem có bar nào *sau* FVG_timeC
+//   chạm zone không. Nếu có -> đánh dấu touched + lưu thời gian/giá
+// - Gọi hàm này sau khi EnsureFVGUpToDate() được gọi
+// -----------------------------------------------------------------
+void UpdateMTFFVGTouched(string symbol)
+{
+  // ensure global FVG arrays exist
+  if(FVG_count <= 0) 
+  {
+    // ensure arrays are empty if none
+    ArrayFree(MTF_FVG_Touched); ArrayFree(MTF_FVG_TouchTime); ArrayFree(MTF_FVG_TouchPrice);
+    return;
+  }
+
+  // ensure arrays sized to FVG_count
+  int oldSize = ArraySize(MTF_FVG_Touched);
+  if(oldSize != FVG_count)
+  {
+    ArrayResize(MTF_FVG_Touched, FVG_count);
+    ArrayResize(MTF_FVG_TouchTime, FVG_count);
+    ArrayResize(MTF_FVG_TouchPrice, FVG_count);
+    // init new slots false/0
+    for(int i=0;i<FVG_count;i++)
+    {
+      if(oldSize <= 0 || i >= oldSize)
+      {
+        MTF_FVG_Touched[i] = false;
+        MTF_FVG_TouchTime[i] = 0;
+        MTF_FVG_TouchPrice[i] = 0.0;
+      }
+    }
+  }
+
+  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+
+  // scan each MTF FVG
+  for(int k = 0; k < FVG_count; k++)
+  {
+    // if already touched, skip (keeps first-touch)
+    if(MTF_FVG_Touched[k]) continue;
+
+    datetime mtfC = FVG_timeC[k];
+    if(mtfC == 0) continue;
+
+    double top = FVG_top[k];
+    double bottom = FVG_bottom[k];
+    int dir = FVG_type[k]; // 1=bull, -1=bear
+
+    // find index of mtfC on LowTF
+    int idxC_on_LTF = iBarShift(symbol, LowTF, mtfC, false);
+    if(idxC_on_LTF == -1) idxC_on_LTF = 0;
+
+    bool touched = false;
+    datetime touch_time = 0;
+    double touch_price = 0.0;
+
+    // scan forward on LowTF (bars newer than mtfC): idx = idxC_on_LTF-1 ... 0
+    int barsAvail = iBars(symbol, LowTF);
+    for(int idx = idxC_on_LTF - 1; idx >= 0; idx--)
+    {
+      double hh = iHigh(symbol, LowTF, idx);
+      double ll = iLow(symbol, LowTF, idx);
+      if(hh == 0 || ll == 0) continue;
+
+      // --- NEW: touch only on specific edge depending on FVG direction ---
+      if(dir == 1) // bullish FVG -> touch only when price reaches the UPPER edge (top)
+      {
+        // if the bar's high reaches or exceeds the top (allow small tol)
+        if(hh >= top - tol)
+        {
+          touched = true;
+          touch_time = iTime(symbol, LowTF, idx);
+          // representative price: use the exact edge price (top)
+          touch_price = top;
+          break;
+        }
+      }
+      else // dir == -1 -> bearish FVG -> touch only when price reaches the LOWER edge (bottom)
+      {
+        // if the bar's low reaches or goes below the bottom (allow small tol)
+        if(ll <= bottom + tol)
+        {
+          touched = true;
+          touch_time = iTime(symbol, LowTF, idx);
+          // representative price: use the exact edge price (bottom)
+          touch_price = bottom;
+          break;
+        }
+      }
+    }
+
+    if(touched)
+    {
+      MTF_FVG_Touched[k] = true;
+      MTF_FVG_TouchTime[k] = touch_time;
+      MTF_FVG_TouchPrice[k] = touch_price;
+      if(PrintToExperts)
+        PrintFormat("UpdateMTFFVGTouched: MTF FVG idx=%d dir=%d touched at %s price=%.5f", k, dir, TimeToString(touch_time, TIME_DATE|TIME_MINUTES), touch_price);
+
+      // --- NEW: enable watchMSSMode when any MTF FVG is first touched ---
+      if(!watchMSSMode)
+      {
+        watchMSSMode = true;
+        watchedFVGIndex = k;
+        watchedFVGDir   = dir;
+        if(PrintToExperts)
+          PrintFormat("watchMSSMode ENABLED for FVG idx=%d dir=%d", watchedFVGIndex, watchedFVGDir);
+      }
+    }
+  } // end for each FVG
+}
+
+// Kiểm tra điều kiện vô hiệu hoá watchMSSMode:
+// 1) last closed candle trên LowTF đóng dưới cạnh dưới của bullish FVG
+// 2) last closed candle trên LowTF đóng trên cạnh trên của bearish FVG
+void CheckWatchMSSInvalidation(string symbol)
+{
+  if(!watchMSSMode || watchedFVGIndex < 0 || watchedFVGIndex >= FVG_count) return;
+
+  // Lấy last closed close trên LowTF (index 1)
+  double lastClose = iClose(symbol, LowTF, 1);
+  if(lastClose == 0.0) return;
+
+  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+
+  int idx = watchedFVGIndex;
+  int dir = watchedFVGDir;
+
+  // bảo đảm FVG arrays còn hợp lệ
+  if(idx < 0 || idx >= FVG_count) return;
+
+  double top = FVG_top[idx];
+  double bottom = FVG_bottom[idx];
+
+  // Nếu bullish FVG (dir == 1): invalid khi đóng dưới bottom
+  if(dir == 1)
+  {
+    if(lastClose < bottom - tol)
+    {
+      if(PrintToExperts) PrintFormat("CheckWatchMSSInvalidation: bullish FVG idx=%d invalidated by close=%.5f < bottom=%.5f", idx, lastClose, bottom);
+      // clear
+      watchMSSMode = false;
+      watchedFVGIndex = -1;
+      watchedFVGDir = 0;
+    }
+  }
+  else if(dir == -1) // bearish: invalid khi đóng trên top
+  {
+    if(lastClose > top + tol)
+    {
+      if(PrintToExperts) PrintFormat("CheckWatchMSSInvalidation: bearish FVG idx=%d invalidated by close=%.5f > top=%.5f", idx, lastClose, top);
+      // clear
+      watchMSSMode = false;
+      watchedFVGIndex = -1;
+      watchedFVGDir = 0;
+    }
+  }
+}
 
 void StoreNewBOS(int slot, const BOSInfo &bos)
 {
@@ -1082,10 +1255,10 @@ void DrawMss(string symbol, ENUM_TIMEFRAMES tf, const MSSInfo &mss, int slot)
     if(t_swing == 0 || p_swing == 0.0)
     {
         // try broken swing
-        if(mss.broken_swing_time != 0 && mss.broken_swing_price != 0.0)
+        if(mss.broken_swing_time != 0 && mss.low_sweap_price != 0.0)
         {
             t_swing = mss.broken_swing_time;
-            p_swing = mss.broken_swing_price;
+            p_swing = mss.low_sweap_price;
         }
         else if(mss.sweep_time != 0 && mss.sweep_price != 0.0)
         {
@@ -1659,6 +1832,7 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
     double tol = pip * 0.1; // tolerance nhỏ
     double sweep_price = older.broken_sw_price; // **important**
     double break_price = newer.broken_sw_price;  // **important**
+    double low_sweap_price = sweep_price;
 
     if(sweep_price == 0.0 || break_price == 0.0)
     {
@@ -1695,7 +1869,7 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
     mss.swept_swing_time = older.broken_sw_time;
     mss.swept_swing_price = older.broken_sw_price;
     mss.broken_swing_time = newer.broken_sw_time;
-    mss.broken_swing_price = newer.broken_sw_price;
+    mss.low_sweap_price = low_sweap_price;
     mss.key_level = newer.broken_sw_price;
 
     if(PrintToExperts)
@@ -1703,6 +1877,21 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
                   slot, mss.direction, mss.sweep_price, mss.break_price,
                   TimeToString(older.break_time, TIME_DATE|TIME_MINUTES),
                   TimeToString(newer.break_time, TIME_DATE|TIME_MINUTES));
+
+    // Giá vừa chạm MTF FVG (vùng vào lệnh tiềm năng)
+    if(watchMSSMode && watchedFVGIndex >= 0)
+    {
+      // Nếu MSS direction trùng với FVG direction -> MSS thuận chiều
+      if(mss.found && mss.direction == watchedFVGDir)
+      {
+        if(PrintToExperts) PrintFormat("DetectMSSOnTimeframe: MSS direction %d matches watchedFVGDir %d -> disabling watchMSSMode", mss.direction, watchedFVGDir);
+        watchMSSMode = false;
+        watchedFVGIndex = -1;
+        watchedFVGDir = 0;
+
+        SetUpPendingEntryForMSS(mss, slot);
+      }
+    }
 
     DrawMss(sym, tf, mss, slot);
 }
@@ -1743,7 +1932,10 @@ void OnTick()
 
   if(IsNewClosedBar(sym, LowTF, 2)) {
     HandleLogicForTimeframe(sym, LowTF, 2, DetectMSS_LTF, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
+    CheckWatchMSSInvalidation(sym);
   }
+
+  UpdateMTFFVGTouched(sym);
 }
 
 int OnInit()
