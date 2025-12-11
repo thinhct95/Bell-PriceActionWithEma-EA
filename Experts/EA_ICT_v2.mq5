@@ -10,6 +10,9 @@
 // --- Only Entry logs (user requested) ---
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
+// --- Cấu hình Risk:Reward ---
+input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
+
 // Struct pending entry (single slot)
 struct PendingEntry
 {
@@ -20,6 +23,8 @@ struct PendingEntry
   string  compositeName;     // tên object composite vẽ (line|label)
   datetime created_time;     // thời điểm tạo
   int     source_slot;       // slot nơi phát hiện MSS (HTF/MTF/LTF)
+  double  sl_price;        // giá SL (dựa trên swing gần nhất)
+  double  tp_price;        // giá TP (dựa trên swing gần nhất)
 };
 
 // global pending entry variable
@@ -78,13 +83,22 @@ int    SwingLowCountTF[3];
 input int ProvisionalBreakPips = 5; // số pips để coi là phá sớm (change-as-you-like)
 input int ProvisionalConsecCloses = 1; // số nến đóng liên tiếp vượt level để xác nhận provisional (thường 1 hoặc 2)
 
-// FVG results (global)
-double FVG_top[];        // giá trên của zone (lớn hơn)
-double FVG_bottom[];     // giá dưới của zone (nhỏ hơn)
-datetime FVG_timeA[];    // time của bar A (older)
-datetime FVG_timeC[];    // time của bar C (newer)
-int    FVG_type[];       //  1 = bullish, -1 = bearish
-int    FVG_count = 0;
+// --- FVG struct & storage (replace old separate arrays) ---
+struct FVG
+{
+  int      type;        //  1 = bullish (gap below price), -1 = bearish (gap above price)
+  double   topPrice;         // top edge (higher price)
+  double   bottomPrice;      // bottom edge (lower price)
+  datetime timebarA;       // time of bar A (older)
+  datetime timebarC;       // time of bar C (newer)
+  bool     touched;     // whether LTF touched this MTF FVG yet (first-touch)
+  datetime touchTime;   // time of first touch (on LowTF)
+  double   touchPrice;  // representative touch price (edge)
+};
+
+FVG FVGs[];
+int   FVG_count = 0;  // number of FVGs found (kept for compatibility)
+
 
 // last closed bar time per slot (index 0=HighTF,1=MiddleTF,2=LowTF)
 datetime lastClosedBarTime[3] = {0,0,0};
@@ -137,56 +151,25 @@ string  BOS_Names[3][2];     // tên objects (composite) cho mỗi store entry
 int     BOS_Count[3] = {0,0,0}; // số BOS hiện có cho mỗi slot (0..2)
 bool    BOS_HaveZone[3][2];  // flag có zone hay không
 
-// -----------------------------------------------------------------
-// - Dùng mảng global FVG_top/FVG_bottom/FVG_timeC/FVG_type
-// - Quét từng FVG và kiểm tra trên LowTF xem có bar nào *sau* FVG_timeC
-//   chạm zone không. Nếu có -> đánh dấu touched + lưu thời gian/giá
-// - Gọi hàm này sau khi EnsureFVGUpToDate() được gọi
-// -----------------------------------------------------------------
 void UpdateMTFFVGTouched(string symbol)
 {
-  // ensure global FVG arrays exist
-  if(FVG_count <= 0)
-  {
-    // ensure arrays are empty if none
-    ArrayFree(MTF_FVG_Touched); ArrayFree(MTF_FVG_TouchTime); ArrayFree(MTF_FVG_TouchPrice);
-    return;
-  }
-
-  // ensure arrays sized to FVG_count
-  int oldSize = ArraySize(MTF_FVG_Touched);
-  if(oldSize != FVG_count)
-  {
-    ArrayResize(MTF_FVG_Touched, FVG_count);
-    ArrayResize(MTF_FVG_TouchTime, FVG_count);
-    ArrayResize(MTF_FVG_TouchPrice, FVG_count);
-    // init new slots false/0
-    for(int i=0;i<FVG_count;i++)
-    {
-      if(oldSize <= 0 || i >= oldSize)
-      {
-        MTF_FVG_Touched[i] = false;
-        MTF_FVG_TouchTime[i] = 0;
-        MTF_FVG_TouchPrice[i] = 0.0;
-      }
-    }
-  }
+  if(FVG_count <= 0) return;
 
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
   double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
-  // scan each MTF FVG
+  // scan each stored FVG
   for(int k = 0; k < FVG_count; k++)
   {
     // if already touched, skip (keeps first-touch)
-    if(MTF_FVG_Touched[k]) continue;
+    if(FVGs[k].touched) continue;
 
-    datetime mtfC = FVG_timeC[k];
+    datetime mtfC = FVGs[k].timebarC;
     if(mtfC == 0) continue;
 
-    double top = FVG_top[k];
-    double bottom = FVG_bottom[k];
-    int dir = FVG_type[k]; // 1=bull, -1=bear
+    double top = FVGs[k].topPrice;
+    double bottom = FVGs[k].bottomPrice;
+    int dir = FVGs[k].type; // 1=bull, -1=bear
 
     // find index of mtfC on LowTF
     int idxC_on_LTF = iBarShift(symbol, LowTF, mtfC, false);
@@ -204,27 +187,22 @@ void UpdateMTFFVGTouched(string symbol)
       double ll = iLow(symbol, LowTF, idx);
       if(hh == 0 || ll == 0) continue;
 
-      // --- touch only on specific edge depending on FVG direction ---
-      if(dir == 1) // bullish FVG -> touch only when price reaches the UPPER edge (top)
+      if(dir == 1) // bullish FVG -> touch when LTF high >= top
       {
-        // if the bar's high reaches or exceeds the top (allow small tol)
         if(hh >= top - tol)
         {
           touched = true;
           touch_time = iTime(symbol, LowTF, idx);
-          // representative price: use the exact edge price (top)
-          touch_price = top;
+          touch_price = top; // representative edge price
           break;
         }
       }
-      else // dir == -1 -> bearish FVG -> touch only when price reaches the LOWER edge (bottom)
+      else // dir == -1 -> bearish FVG -> touch when LTF low <= bottom
       {
-        // if the bar's low reaches or goes below the bottom (allow small tol)
         if(ll <= bottom + tol)
         {
           touched = true;
           touch_time = iTime(symbol, LowTF, idx);
-          // representative price: use the exact edge price (bottom)
           touch_price = bottom;
           break;
         }
@@ -233,13 +211,14 @@ void UpdateMTFFVGTouched(string symbol)
 
     if(touched)
     {
-      MTF_FVG_Touched[k] = true;
-      MTF_FVG_TouchTime[k] = touch_time;
-      MTF_FVG_TouchPrice[k] = touch_price;
-      if(PrintEntryLog)
-        PrintFormat("MTF FVG touched: idx=%d dir=%d at %s price=%.5f", k, dir, TimeToString(touch_time, TIME_DATE|TIME_MINUTES), touch_price);
+      FVGs[k].touched = true;
+      FVGs[k].touchTime = touch_time;
+      FVGs[k].touchPrice = touch_price;
 
-      // --- enable watchMSSMode when any MTF FVG is first touched ---
+      if(PrintEntryLog)
+        PrintFormat("MTF FVG touched (struct): idx=%d dir=%d at %s price=%.5f", k, dir, TimeToString(touch_time, TIME_DATE|TIME_MINUTES), touch_price);
+
+      // enable watchMSSMode when any MTF FVG is first touched
       if(!watchMSSMode)
       {
         watchMSSMode = true;
@@ -249,7 +228,7 @@ void UpdateMTFFVGTouched(string symbol)
           PrintFormat("watchMSSMode ENABLED for FVG idx=%d dir=%d", watchedFVGIndex, watchedFVGDir);
       }
     }
-  } // end for each FVG
+  }
 }
 
 // Kiểm tra điều kiện vô hiệu hoá watchMSSMode:
@@ -272,8 +251,8 @@ void CheckWatchMSSInvalidation(string symbol)
   // bảo đảm FVG arrays còn hợp lệ
   if(idx < 0 || idx >= FVG_count) return;
 
-  double top = FVG_top[idx];
-  double bottom = FVG_bottom[idx];
+  double top = FVGs[idx].topPrice;
+  double bottom = FVGs[idx].bottomPrice;
 
   // Nếu bullish FVG (dir == 1): invalid khi đóng dưới bottom
   if(dir == 1)
@@ -1306,12 +1285,10 @@ void UpdateTrendForSlot(int slot, ENUM_TIMEFRAMES timeframe, string symbol)
   TrendTF[slot] = newTrend;
 }
 
-//+------------------------------------------------------------------+
-//| FindFVG - tìm Fair Value Gaps trên timeframe cho symbol         |
-//+------------------------------------------------------------------+
 int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
 {
-  ArrayFree(FVG_top); ArrayFree(FVG_bottom); ArrayFree(FVG_timeA); ArrayFree(FVG_timeC); ArrayFree(FVG_type);
+  // clear old array
+  ArrayFree(FVGs);
   FVG_count = 0;
 
   int total = iBars(symbol, timeframe);
@@ -1326,7 +1303,6 @@ int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
   for(int i = 1; i <= maxScan; i++)
   {
     int idxA = i + 2;
-    int idxB = i + 1;
     int idxC = i;
 
     if(idxA > total - 1) break;
@@ -1338,6 +1314,7 @@ int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
 
     if(highA == 0 || lowA == 0 || highC == 0 || lowC == 0) continue;
 
+    // bullish FVG (lowC > highA)
     if(lowC > highA + tol)
     {
       double top = lowC;
@@ -1345,26 +1322,25 @@ int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
       bool dup = false;
       for(int k = 0; k < FVG_count; k++)
       {
-        if(MathAbs(FVG_top[k] - top) <= tol && MathAbs(FVG_bottom[k] - bottom) <= tol) { dup = true; break; }
+        if(MathAbs(FVGs[k].topPrice - top) <= tol && MathAbs(FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
       }
       if(!dup)
       {
-        ArrayResize(FVG_top, FVG_count+1);
-        ArrayResize(FVG_bottom, FVG_count+1);
-        ArrayResize(FVG_timeA, FVG_count+1);
-        ArrayResize(FVG_timeC, FVG_count+1);
-        ArrayResize(FVG_type, FVG_count+1);
-
-        FVG_top[FVG_count] = top;
-        FVG_bottom[FVG_count] = bottom;
-        FVG_timeA[FVG_count] = iTime(symbol, timeframe, idxA);
-        FVG_timeC[FVG_count] = iTime(symbol, timeframe, idxC);
-        FVG_type[FVG_count] = 1;
+        ArrayResize(FVGs, FVG_count+1);
+        FVGs[FVG_count].type      = 1;
+        FVGs[FVG_count].topPrice       = top;
+        FVGs[FVG_count].bottomPrice    = bottom;
+        FVGs[FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
+        FVGs[FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
+        FVGs[FVG_count].touched   = false;
+        FVGs[FVG_count].touchTime = 0;
+        FVGs[FVG_count].touchPrice= 0.0;
         FVG_count++;
       }
       continue;
     }
 
+    // bearish FVG (highC < lowA)
     if(highC < lowA - tol)
     {
       double top = lowA;
@@ -1372,21 +1348,19 @@ int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
       bool dup = false;
       for(int k = 0; k < FVG_count; k++)
       {
-        if(MathAbs(FVG_top[k] - top) <= tol && MathAbs(FVG_bottom[k] - bottom) <= tol) { dup = true; break; }
+        if(MathAbs(FVGs[k].topPrice - top) <= tol && MathAbs(FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
       }
       if(!dup)
       {
-        ArrayResize(FVG_top, FVG_count+1);
-        ArrayResize(FVG_bottom, FVG_count+1);
-        ArrayResize(FVG_timeA, FVG_count+1);
-        ArrayResize(FVG_timeC, FVG_count+1);
-        ArrayResize(FVG_type, FVG_count+1);
-
-        FVG_top[FVG_count] = top;
-        FVG_bottom[FVG_count] = bottom;
-        FVG_timeA[FVG_count] = iTime(symbol, timeframe, idxA);
-        FVG_timeC[FVG_count] = iTime(symbol, timeframe, idxC);
-        FVG_type[FVG_count] = -1;
+        ArrayResize(FVGs, FVG_count+1);
+        FVGs[FVG_count].type      = -1;
+        FVGs[FVG_count].topPrice       = top;
+        FVGs[FVG_count].bottomPrice    = bottom;
+        FVGs[FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
+        FVGs[FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
+        FVGs[FVG_count].touched   = false;
+        FVGs[FVG_count].touchTime = 0;
+        FVGs[FVG_count].touchPrice= 0.0;
         FVG_count++;
       }
     }
@@ -1401,9 +1375,6 @@ uint MakeARGB(int a, uint clr)
   return ((uint)a << 24) | (clr & 0x00FFFFFF);
 }
 
-//+------------------------------------------------------------------+
-//| DrawFVG: vẽ tất cả FVG đã tìm được cho symbol & timeframe        |
-//+------------------------------------------------------------------+
 void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true)
 {
   if(!ShowSwingMarkers) return;
@@ -1426,10 +1397,10 @@ void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true
 
   for(int k = 0; k < FVG_count; k++)
   {
-    double top = FVG_top[k];
-    double bottom = FVG_bottom[k];
-    datetime timeC = FVG_timeC[k];
-    datetime timeA = FVG_timeA[k];
+    double top = FVGs[k].topPrice;
+    double bottom = FVGs[k].bottomPrice;
+    datetime timeC = FVGs[k].timebarC;
+    datetime timeA = FVGs[k].timebarA;
 
     datetime start_time = startFromCBar ? timeC : timeA;
 
@@ -1477,7 +1448,7 @@ void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true
     uint border_alpha = 0;
 
     uint color_fill;
-    if(FVG_type[k] == 1) color_fill = MakeARGB((int)fill_alpha, clrDodgerBlue);
+    if(FVGs[k].type == 1) color_fill = MakeARGB((int)fill_alpha, clrDodgerBlue);
     else color_fill = MakeARGB((int)fill_alpha, clrCrimson);
 
     uint col_border = MakeARGB((int)border_alpha, clrBlack);
@@ -1545,7 +1516,6 @@ bool IsNewClosedBar(string symbol, ENUM_TIMEFRAMES tf, int slot)
   return false;
 }
 
-// Tính FVG cho MiddleTF chỉ khi bar C (hoặc bar 1) thay đổi
 void EnsureFVGUpToDate(string symbol, ENUM_TIMEFRAMES tf, int lookback)
 {
   if(tf != MiddleTF) return;
@@ -1711,57 +1681,126 @@ void DrawPendingEntryVisuals(string symbol)
   if(!pendingEntry.active) return;
   if(pendingEntry.price == 0.0) return;
 
-  int timeStamp = (int)TimeCurrent();
-  string base = SwingObjPrefix + "PEND_";
-  string lineName = base + "LINE_" + IntegerToString(timeStamp);
-  string lblName  = base + "LBL_"  + IntegerToString(timeStamp);
-
+  // xóa objects cũ nếu có
   if(StringLen(pendingEntry.compositeName) > 0)
   {
     string partsOld[];
     int no = StringSplit(pendingEntry.compositeName, '|', partsOld);
-    for(int j=0;j<no;j++) if(StringLen(partsOld[j])>0 && ObjectFind(0, partsOld[j])>=0) ObjectDelete(0, partsOld[j]);
+    for(int j=0;j<no;j++)
+    {
+      if(StringLen(partsOld[j])>0 && ObjectFind(0, partsOld[j])>=0)
+        ObjectDelete(0, partsOld[j]);
+    }
     pendingEntry.compositeName = "";
   }
 
+  // chuẩn bị tên unique dựa trên thời gian
+  int timeStamp = (int)TimeCurrent();
+  string base = SwingObjPrefix + "PEND_";
+  string lineEntry = base + "LINE_E_" + IntegerToString(timeStamp);
+  string lblEntry  = base + "LBL_E_"  + IntegerToString(timeStamp);
+  string lineSL    = base + "LINE_SL_" + IntegerToString(timeStamp);
+  string lblSL     = base + "LBL_SL_"  + IntegerToString(timeStamp);
+  string lineTP    = base + "LINE_TP_" + IntegerToString(timeStamp);
+  string lblTP     = base + "LBL_TP_"  + IntegerToString(timeStamp);
+
+  // time để vẽ xu hướng ngang: vẽ từ now -> next bar time
   datetime t0 = iTime(symbol, LowTF, 0);
   datetime barSecs = (datetime)PeriodSeconds(LowTF);
   datetime start_time = (t0 != 0) ? (datetime)((long)t0 + (long)barSecs) : (datetime)TimeCurrent();
 
-  if(!ObjectCreate(0, lineName, OBJ_TREND, 0, TimeCurrent(), pendingEntry.price, start_time, pendingEntry.price))
-  {
-    // silent
-  }
-  else
+  // ENTRY line
+  if(ObjectCreate(0, lineEntry, OBJ_TREND, 0, TimeCurrent(), pendingEntry.price, start_time, pendingEntry.price))
   {
     int col = (pendingEntry.direction == 1) ? clrLime : clrRed;
-    ObjectSetInteger(0, lineName, OBJPROP_COLOR, col);
-    ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
-    ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DASH);
-    ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
-    ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
+    ObjectSetInteger(0, lineEntry, OBJPROP_COLOR, col);
+    ObjectSetInteger(0, lineEntry, OBJPROP_WIDTH, 2);
+    ObjectSetInteger(0, lineEntry, OBJPROP_STYLE, STYLE_DASH);
+    ObjectSetInteger(0, lineEntry, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, lineEntry, OBJPROP_BACK, true);
   }
 
+  // ENTRY label
   double yoffset = SymbolInfoDouble(symbol, SYMBOL_POINT) * 6.0;
-  double label_price = (pendingEntry.direction == 1) ? (pendingEntry.price + yoffset) : (pendingEntry.price - yoffset);
-  if(!ObjectCreate(0, lblName, OBJ_TEXT, 0, TimeCurrent(), label_price))
+  int digs = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  double entryLabelPrice = (pendingEntry.direction == 1) ? (pendingEntry.price + yoffset) : (pendingEntry.price - yoffset);
+  if(ObjectCreate(0, lblEntry, OBJ_TEXT, 0, TimeCurrent(), entryLabelPrice))
   {
-    // silent
+    string txtE = "PEND " + ((pendingEntry.direction==1) ? "BUY" : "SELL") + " " + DoubleToString(pendingEntry.price, digs);
+    ObjectSetString(0, lblEntry, OBJPROP_TEXT, txtE);
+    ObjectSetInteger(0, lblEntry, OBJPROP_FONTSIZE, SwingMarkerFontSize);
+    ObjectSetInteger(0, lblEntry, OBJPROP_COLOR, (pendingEntry.direction==1)?clrLime:clrRed);
+    ObjectSetInteger(0, lblEntry, OBJPROP_BACK, true);
+    ObjectSetInteger(0, lblEntry, OBJPROP_SELECTABLE, false);
+  }
+
+  // SL line + label (nếu có)
+  if(pendingEntry.sl_price != 0.0)
+  {
+    if(ObjectCreate(0, lineSL, OBJ_TREND, 0, TimeCurrent(), pendingEntry.sl_price, start_time, pendingEntry.sl_price))
+    {
+      ObjectSetInteger(0, lineSL, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, lineSL, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, lineSL, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, lineSL, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, lineSL, OBJPROP_BACK, true);
+    }
+
+    double slLabelPrice = (pendingEntry.sl_price - yoffset);
+    if(ObjectCreate(0, lblSL, OBJ_TEXT, 0, TimeCurrent(), slLabelPrice))
+    {
+      string txtSL = "SL " + DoubleToString(pendingEntry.sl_price, digs);
+      ObjectSetString(0, lblSL, OBJPROP_TEXT, txtSL);
+      ObjectSetInteger(0, lblSL, OBJPROP_FONTSIZE, SwingMarkerFontSize - 1);
+      ObjectSetInteger(0, lblSL, OBJPROP_COLOR, clrRed);
+      ObjectSetInteger(0, lblSL, OBJPROP_BACK, true);
+      ObjectSetInteger(0, lblSL, OBJPROP_SELECTABLE, false);
+    }
   }
   else
   {
-    string txt = (pendingEntry.direction == 1) ? "PEND BUY" : "PEND SELL";
-    ObjectSetString(0, lblName, OBJPROP_TEXT, txt);
-    ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, SwingMarkerFontSize);
-    ObjectSetInteger(0, lblName, OBJPROP_COLOR, (pendingEntry.direction==1)?clrLime:clrRed);
-    ObjectSetInteger(0, lblName, OBJPROP_BACK, true);
-    ObjectSetInteger(0, lblName, OBJPROP_SELECTABLE, false);
+    // clear names so composite keeps consistent ordering
+    lineSL = ""; lblSL = "";
   }
 
-  pendingEntry.compositeName = lineName + "|" + lblName;
+  // TP line + label (nếu có)
+  if(pendingEntry.tp_price != 0.0)
+  {
+    if(ObjectCreate(0, lineTP, OBJ_TREND, 0, TimeCurrent(), pendingEntry.tp_price, start_time, pendingEntry.tp_price))
+    {
+      ObjectSetInteger(0, lineTP, OBJPROP_COLOR, clrLime);
+      ObjectSetInteger(0, lineTP, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, lineTP, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, lineTP, OBJPROP_SELECTABLE, false);
+      ObjectSetInteger(0, lineTP, OBJPROP_BACK, true);
+    }
+
+    double tpLabelPrice = (pendingEntry.tp_price + yoffset);
+    if(ObjectCreate(0, lblTP, OBJ_TEXT, 0, TimeCurrent(), tpLabelPrice))
+    {
+      string txtTP = "TP " + DoubleToString(pendingEntry.tp_price, digs);
+      ObjectSetString(0, lblTP, OBJPROP_TEXT, txtTP);
+      ObjectSetInteger(0, lblTP, OBJPROP_FONTSIZE, SwingMarkerFontSize - 1);
+      ObjectSetInteger(0, lblTP, OBJPROP_COLOR, clrLime);
+      ObjectSetInteger(0, lblTP, OBJPROP_BACK, true);
+      ObjectSetInteger(0, lblTP, OBJPROP_SELECTABLE, false);
+    }
+  }
+  else
+  {
+    lineTP = ""; lblTP = "";
+  }
+
+  // Lưu compositeName theo thứ tự: entryLine|entryLbl|slLine|slLbl|tpLine|tpLbl
+  // các phần rỗng sẽ bị loại khi xóa
+  string comp = lineEntry + "|" + lblEntry + "|" + lineSL + "|" + lblSL + "|" + lineTP + "|" + lblTP;
+  pendingEntry.compositeName = comp;
 
   if(PrintEntryLog)
-    PrintFormat("PendingEntry VISUAL DRAWN: dir=%d price=%.5f composite=(%s)", pendingEntry.direction, pendingEntry.price, pendingEntry.compositeName);
+  {
+    PrintFormat("PendingEntry VISUAL DRAWN: dir=%d entry=%.5f sl=%.5f tp=%.5f composite=(%s)",
+                pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price, pendingEntry.compositeName);
+  }
 }
 
 // Set up pending entry when MSS confirmed and direction matches watched FVG
@@ -1769,6 +1808,9 @@ void DrawPendingEntryVisuals(string symbol)
 // - slot: slot where MSS was detected
 void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
 {
+
+  PrintFormat("@@@@@@ mss: found=%d dir=%d sweep_time=%d sweep_price=%.5f break_time=%d break_price=%.5f",
+              mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_price, (int)mss.break_time, mss.break_price);
   string sym = Symbol();
 
   if(!mss.found) return;
@@ -1820,11 +1862,43 @@ void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
   pendingEntry.created_time = TimeCurrent();
   pendingEntry.compositeName = "";
   pendingEntry.source_slot = slot;
+  // SL được lấy từ MSS (hoặc bạn có thể thay đổi nếu muốn buffer)
+  pendingEntry.sl_price = mss.sweep_price;
+
+  // --- TÍNH TP theo RiskRewardRatio (TP = entry ± RiskRewardRatio * |entry - SL|) ---
+  double entry = entPrice;
+  double sl = pendingEntry.sl_price;
+  double tp = 0.0;
+
+  if(sl == 0.0)
+  {
+    pendingEntry.tp_price = 0.0;
+    if(PrintEntryLog) PrintFormat("PendingEntry TP NOT SET because SL==0 (entry=%.5f)", entry);
+  }
+  else
+  {
+    double diff = MathAbs(entry - sl);
+    if(diff <= 0.0)
+    {
+      pendingEntry.tp_price = 0.0;
+      if(PrintEntryLog) PrintFormat("PendingEntry TP NOT SET because diff==0 (entry=%.5f sl=%.5f)", entry, sl);
+    }
+    else
+    {
+      // dùng biến RiskRewardRatio để tính TP
+      tp = (pendingEntry.direction == 1) ? (entry + RiskRewardRatio * diff)
+                                        : (entry - RiskRewardRatio * diff);
+
+      // làm tròn theo digits của symbol
+      int digs = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+      pendingEntry.tp_price = NormalizeDouble(tp, digs);
+
+      if(PrintEntryLog)
+        PrintFormat("PendingEntry CREATED: dir=%d entry=%.5f sl=%.5f tp=%.5f (R:R=%.2f)", pendingEntry.direction, entry, sl, pendingEntry.tp_price, RiskRewardRatio);
+    }
+  }
 
   DrawPendingEntryVisuals(sym);
-
-  if(PrintEntryLog)
-    PrintFormat("PendingEntry CREATED: dir=%d price=%.5f LTF_FVG_idx=%d MTF_FVG_idx=%d", pendingEntry.direction, pendingEntry.price, chosenIdx, pendingEntry.fvgIndex);
 }
 
 void OnTick()
