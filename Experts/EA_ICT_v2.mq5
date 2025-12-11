@@ -31,9 +31,9 @@ struct PendingEntry
 PendingEntry pendingEntry;
 
 // --- Watch MSS mode (user requested) ---
-bool watchMSSMode = false;      // mặc định false
-int  watchedFVGIndex = -1;      // index trong FVG_* arrays (khi watchMSSMode==true)
-int  watchedFVGDir = 0;         // 1 = bullish FVG, -1 = bearish FVG
+bool watchingMSSMode = false;      // mặc định false
+int  watchingFVGIndex = -1;      // index trong FVG_* arrays (khi watchingMSSMode==true)
+int  watchingFVGDir = 0;         // 1 = bullish FVG, -1 = bearish FVG
 
 // --- Mảng trạng thái: MTF FVG đã bị chạm bởi LTF hay chưa ---
 bool     MTF_FVG_Touched[];        // true = MTF FVG k đã bị LTF chạm
@@ -48,7 +48,7 @@ input bool DetectMSS_LTF = true;
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 5;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Cấu hình vẽ Swing trên chart
@@ -159,23 +159,23 @@ void UpdateMTFFVGTouched(string symbol)
   double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
   // scan each stored FVG
-  for(int k = 0; k < FVG_count; k++)
+  for(int fvgIndex = 0; fvgIndex < FVG_count; fvgIndex++)
   {
-    // if already touched, skip (keeps first-touch)
-    if(FVGs[k].touched) continue;
+    // nếu đã touched trước đó -> bỏ qua luôn (không in gì cả)
+    if(FVGs[fvgIndex].touched) continue;
 
-    datetime mtfC = FVGs[k].timebarC;
+    datetime mtfC = FVGs[fvgIndex].timebarC;
     if(mtfC == 0) continue;
 
-    double top = FVGs[k].topPrice;
-    double bottom = FVGs[k].bottomPrice;
-    int dir = FVGs[k].type; // 1=bull, -1=bear
+    double top = FVGs[fvgIndex].topPrice;
+    double bottom = FVGs[fvgIndex].bottomPrice;
+    int dir = FVGs[fvgIndex].type; // 1=bull, -1=bear
 
     // find index of mtfC on LowTF
     int idxC_on_LTF = iBarShift(symbol, LowTF, mtfC, false);
     if(idxC_on_LTF == -1) idxC_on_LTF = 0;
 
-    bool touched = false;
+    bool touchedNow = false;
     datetime touch_time = 0;
     double touch_price = 0.0;
 
@@ -191,7 +191,7 @@ void UpdateMTFFVGTouched(string symbol)
       {
         if(hh >= top - tol)
         {
-          touched = true;
+          touchedNow = true;
           touch_time = iTime(symbol, LowTF, idx);
           touch_price = top; // representative edge price
           break;
@@ -201,7 +201,7 @@ void UpdateMTFFVGTouched(string symbol)
       {
         if(ll <= bottom + tol)
         {
-          touched = true;
+          touchedNow = true;
           touch_time = iTime(symbol, LowTF, idx);
           touch_price = bottom;
           break;
@@ -209,34 +209,32 @@ void UpdateMTFFVGTouched(string symbol)
       }
     }
 
-    if(touched)
+    if(touchedNow)
     {
-      FVGs[k].touched = true;
-      FVGs[k].touchTime = touch_time;
-      FVGs[k].touchPrice = touch_price;
+      // chỉ set + print khi trước đó chưa touched (điều kiện đã đảm bảo vì ta continue ở trên nếu touched==true)
+      FVGs[fvgIndex].touched = true;
+      FVGs[fvgIndex].touchTime = touch_time;
+      FVGs[fvgIndex].touchPrice = touch_price;
 
-      if(PrintEntryLog)
-        PrintFormat("MTF FVG touched (struct): idx=%d dir=%d at %s price=%.5f", k, dir, TimeToString(touch_time, TIME_DATE|TIME_MINUTES), touch_price);
-
-      // enable watchMSSMode when any MTF FVG is first touched
-      if(!watchMSSMode)
+      // enable watchingMSSMode when any MTF FVG is first touched
+      if(!watchingMSSMode)
       {
-        watchMSSMode = true;
-        watchedFVGIndex = k;
-        watchedFVGDir   = dir;
+        watchingMSSMode = true;
+        watchingFVGIndex = fvgIndex;
+        watchingFVGDir   = dir;
         if(PrintEntryLog)
-          PrintFormat("watchMSSMode ENABLED for FVG idx=%d dir=%d", watchedFVGIndex, watchedFVGDir);
+          PrintFormat("watchingMSSMode ENABLED for FVG idx=%d dir=%d", watchingFVGIndex, watchingFVGDir);
       }
     }
   }
 }
 
-// Kiểm tra điều kiện vô hiệu hoá watchMSSMode:
+// Kiểm tra điều kiện vô hiệu hoá watchingMSSMode:
 // 1) last closed candle trên LowTF đóng dưới cạnh dưới của bullish FVG
 // 2) last closed candle trên LowTF đóng trên cạnh trên của bearish FVG
 void CheckWatchMSSInvalidation(string symbol)
 {
-  if(!watchMSSMode || watchedFVGIndex < 0 || watchedFVGIndex >= FVG_count) return;
+  if(!watchingMSSMode || watchingFVGIndex < 0 || watchingFVGIndex >= FVG_count) return;
 
   // Lấy last closed close trên LowTF (index 1)
   double lastClose = iClose(symbol, LowTF, 1);
@@ -245,8 +243,8 @@ void CheckWatchMSSInvalidation(string symbol)
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
   double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
-  int idx = watchedFVGIndex;
-  int dir = watchedFVGDir;
+  int idx = watchingFVGIndex;
+  int dir = watchingFVGDir;
 
   // bảo đảm FVG arrays còn hợp lệ
   if(idx < 0 || idx >= FVG_count) return;
@@ -259,22 +257,22 @@ void CheckWatchMSSInvalidation(string symbol)
   {
     if(lastClose < bottom - tol)
     {
-      if(PrintEntryLog) PrintFormat("watchMSSMode DISABLED: bullish FVG idx=%d invalidated by close=%.5f < bottom=%.5f", idx, lastClose, bottom);
+      if(PrintEntryLog) PrintFormat("watchingMSSMode DISABLED: bullish FVG idx=%d invalidated by close=%.5f < bottom=%.5f", idx, lastClose, bottom);
       // clear
-      watchMSSMode = false;
-      watchedFVGIndex = -1;
-      watchedFVGDir = 0;
+      watchingMSSMode = false;
+      watchingFVGIndex = -1;
+      watchingFVGDir = 0;
     }
   }
   else if(dir == -1) // bearish: invalid khi đóng trên top
   {
     if(lastClose > top + tol)
     {
-      if(PrintEntryLog) PrintFormat("watchMSSMode DISABLED: bearish FVG idx=%d invalidated by close=%.5f > top=%.5f", idx, lastClose, top);
+      if(PrintEntryLog) PrintFormat("watchingMSSMode DISABLED: bearish FVG idx=%d invalidated by close=%.5f > top=%.5f", idx, lastClose, top);
       // clear
-      watchMSSMode = false;
-      watchedFVGIndex = -1;
-      watchedFVGDir = 0;
+      watchingMSSMode = false;
+      watchingFVGIndex = -1;
+      watchingFVGDir = 0;
     }
   }
 }
@@ -760,47 +758,91 @@ double GetPipSize(string symbol)
   return point;
 }
 
-// ---------- FindInternalFVG ----------
+// Tìm FVG nội bộ (3-candle gap: A = i+2, B = i+1, C = i)
+//
+// Điều kiện FVG:
+//   • Bullish: low(C) > high(A)
+//   • Bearish: high(C) < low(A)
+//
+// Trả về:
+//   out_top[]    – cạnh trên của FVG
+//   out_bottom[] – cạnh dưới của FVG
+//   out_timeA[]  – thời gian bar A
+//   out_timeC[]  – thời gian bar C
+//   out_type[]   – 1 = bullish, -1 = bearish
+//
+// Lý do dùng total - 3:
+//   Vì index A = i+2 → cần đảm bảo i+2 <= total-1
+//   → i <= total - 3
+//
+// --------------------------------------------------------------
 int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
                     double &out_top[], double &out_bottom[],
                     datetime &out_timeA[], datetime &out_timeC[], int &out_type[])
 {
-   ArrayFree(out_top); ArrayFree(out_bottom); ArrayFree(out_timeA); ArrayFree(out_timeC); ArrayFree(out_type);
-   int found = 0;
+   // clear output arrays
+   ArrayFree(out_top); 
+   ArrayFree(out_bottom); 
+   ArrayFree(out_timeA); 
+   ArrayFree(out_timeC); 
+   ArrayFree(out_type);
 
+   int found = 0;
    int total = iBars(symbol, timeframe);
+
+   // cần tối thiểu 5 nến để tránh lỗi/truy cập thiếu (an toàn)
    if(total < 5) return 0;
 
+   // maxScan = nhỏ nhất giữa lookback và total - 3 (đảm bảo idxA không vượt array)
    int maxScan = MathMin(lookback, total - 3);
    if(maxScan <= 0) return 0;
 
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
+   // ----------------------------------------------------------
+   // Loop qua từng cấu trúc A–B–C (C = i, B = i+1, A = i+2)
+   // ----------------------------------------------------------
    for(int i = 1; i <= maxScan; i++)
    {
       int idxA = i + 2;
-      int idxB = i + 1;
+      int idxB = i + 1; // thực ra không cần B trong phép tính nhưng vẫn để đúng mô hình
       int idxC = i;
 
-      if(idxA > total - 1) break;
+      // kiểm tra A không vượt tổng số bar
+      if(idxA > total - 1)
+         break;
 
+      // lấy giá 3 nến A và C
       double highA = iHigh(symbol, timeframe, idxA);
       double lowA  = iLow(symbol, timeframe, idxA);
       double highC = iHigh(symbol, timeframe, idxC);
       double lowC  = iLow(symbol, timeframe, idxC);
 
-      if(highA == 0 || lowA == 0 || highC == 0 || lowC == 0) continue;
+      if(highA == 0 || lowA == 0 || highC == 0 || lowC == 0)
+         continue;
 
+      // ------------------------------------------------------
+      // ❶ Kiểm tra Bullish Internal FVG
+      //    low(C) > high(A)
+      // ------------------------------------------------------
       if(lowC > highA + tol)
       {
          double top = lowC;
          double bottom = highA;
+
+         // kiểm tra tránh duplicate FVG
          bool dup = false;
          for(int k = 0; k < found; k++)
          {
-            if(MathAbs(out_top[k] - top) <= tol && MathAbs(out_bottom[k] - bottom) <= tol) { dup = true; break; }
+            if(MathAbs(out_top[k] - top) <= tol &&
+               MathAbs(out_bottom[k] - bottom) <= tol)
+            {
+               dup = true;
+               break;
+            }
          }
+
          if(!dup)
          {
             ArrayResize(out_top, found+1);
@@ -813,21 +855,34 @@ int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
             out_bottom[found] = bottom;
             out_timeA[found]  = iTime(symbol, timeframe, idxA);
             out_timeC[found]  = iTime(symbol, timeframe, idxC);
-            out_type[found]   = 1;
+            out_type[found]   = 1;   // bullish
+
             found++;
          }
+
          continue;
       }
 
+      // ------------------------------------------------------
+      // ❷ Kiểm tra Bearish Internal FVG
+      //    high(C) < low(A)
+      // ------------------------------------------------------
       if(highC < lowA - tol)
       {
          double top = lowA;
          double bottom = highC;
+
          bool dup = false;
          for(int k = 0; k < found; k++)
          {
-            if(MathAbs(out_top[k] - top) <= tol && MathAbs(out_bottom[k] - bottom) <= tol) { dup = true; break; }
+            if(MathAbs(out_top[k] - top) <= tol &&
+               MathAbs(out_bottom[k] - bottom) <= tol)
+            {
+               dup = true;
+               break;
+            }
          }
+
          if(!dup)
          {
             ArrayResize(out_top, found+1);
@@ -840,7 +895,8 @@ int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
             out_bottom[found] = bottom;
             out_timeA[found]  = iTime(symbol, timeframe, idxA);
             out_timeC[found]  = iTime(symbol, timeframe, idxC);
-            out_type[found]   = -1;
+            out_type[found]   = -1;  // bearish
+
             found++;
          }
       }
@@ -1528,7 +1584,58 @@ void EnsureFVGUpToDate(string symbol, ENUM_TIMEFRAMES tf, int lookback)
   }
 }
 
-// ---------- DetectMSSOnTimeframe (fixed) ----------
+// VẼ các internal FVG trên timeframe tf nếu timeC nằm giữa sweep_time và break_time
+void DrawInternalFVGMatches(string sym, ENUM_TIMEFRAMES tf, datetime sweep_time, datetime break_time, double pmin, double pmax, int lookback)
+{
+  // lấy tất cả internal FVG trên tf
+  double tops[]; double bottoms[]; datetime timeA[]; datetime timeC[]; int types[];
+  int cnt = FindInternalFVG(sym, tf, lookback, tops, bottoms, timeA, timeC, types);
+  if(cnt <= 0) return;
+
+  double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+  datetime bar_secs = (datetime)PeriodSeconds(tf);
+
+  for(int i=0; i<cnt; i++)
+  {
+    datetime tc = timeC[i];
+    if(tc <= sweep_time || tc >= break_time) continue; // đảm bảo timeC strictly giữa sweep & break
+
+    double top = tops[i];
+    double bottom = bottoms[i];
+
+    // kiểm tra overlap phần giá (nếu hoàn toàn ngoài cửa sổ pmin..pmax thì bỏ)
+    if(bottom > pmax + tol || top < pmin - tol) continue;
+
+    // tạo tên object duy nhất dựa trên timeC và index
+    string nm = SwingObjPrefix + "INTFVG_" + IntegerToString(types[i]) + "_" + IntegerToString(i) + "_" + IntegerToString((int)tc);
+
+    // Nếu đã tồn tại thì bỏ qua (tránh duplicate)
+    if(ObjectFind(0, nm) >= 0) continue;
+
+    // start từ bar A tới bar C + 1 bar để hiển thị rõ (tùy bạn có thể dùng timeA[i] hoặc timeC[i])
+    datetime start_time = timeA[i];
+    datetime end_time   = (datetime)((long)tc + (long)bar_secs); // show zone tới C bar end
+
+    // Tạo rectangle
+    if(!ObjectCreate(0, nm, OBJ_RECTANGLE, 0, start_time, top, end_time, bottom))
+      continue;
+
+    // set style similar DrawFVG
+    uint fill_alpha = 80;
+    uint color_fill = (types[i] == 1) ? MakeARGB((int)fill_alpha, clrDodgerBlue) : MakeARGB((int)fill_alpha, clrCrimson);
+    uint col_border = MakeARGB(0, clrBlack);
+
+    ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, nm, OBJPROP_HIDDEN, false);
+    ObjectSetInteger(0, nm, OBJPROP_BACK, true);
+    ObjectSetInteger(0, nm, OBJPROP_WIDTH, 1);
+    ObjectSetInteger(0, nm, OBJPROP_STYLE, STYLE_SOLID);
+    // fill color
+    ObjectSetInteger(0, nm, OBJPROP_COLOR, (int)color_fill); // MQL may reuse OBJPROP_COLOR for fill here like in DrawFVG
+  }
+}
+
 void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled,
                        bool requireFVG,
                        double minBreakPips,
@@ -1556,8 +1663,13 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
     if(!older.found || !newer.found) return;
     if(older.direction == newer.direction) return;
 
+    // Lấy sweep/break price sớm (phải có trước khi dùng pmin/pmax)
+    double sweep_price = older.broken_sw_price;
+    double break_price = newer.broken_sw_price;
+
     if(requireFVG)
     {
+      // nếu TF là MiddleTF thì đảm bảo danh sách MTF FVG mới nhất
       if(tf == MiddleTF) EnsureFVGUpToDate(sym, tf, fvgLookback);
 
       datetime sweep_time = older.break_time;
@@ -1568,19 +1680,31 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
           return;
       }
 
+      // price window: cần sweep_price/break_price phải đã có
+      if(sweep_price == 0.0 || break_price == 0.0) return;
+      double pmin = MathMin(sweep_price, break_price);
+      double pmax = MathMax(sweep_price, break_price);
+
+      // Kiểm tra tồn tại FVG trên MTF (giữ logic cũ)
       bool ok = false;
       if(newer.direction == 1)
           ok = HasBullFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
       else
           ok = HasBearFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
 
-      if(!ok) return;
+      if(!ok)
+      {
+        // nếu requireFVG yêu cầu MTF FVG bắt buộc thì abort
+        return;
+      }
+
+      // --- VẼ các internal FVG trên LTF nằm giữa sweep_time & break_time ---
+      DrawInternalFVGMatches(sym, LowTF, sweep_time, break_time, pmin, pmax, FVGLookback);
     }
 
+    // tiếp tục các kiểm tra MSS như trước
     double pip = GetPipSize(sym);
     double tol = pip * 0.1;
-    double sweep_price = older.broken_sw_price;
-    double break_price = newer.broken_sw_price;
     double low_sweap_price = sweep_price;
 
     if(sweep_price == 0.0 || break_price == 0.0) return;
@@ -1608,16 +1732,16 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
     mss.key_level = newer.broken_sw_price;
 
     // Nếu đang watch và MSS direction trùng với FVG direction -> xử lý pending
-    if(watchMSSMode && watchedFVGIndex >= 0)
+    if(watchingMSSMode && watchingFVGIndex >= 0)
     {
-      if(mss.found && mss.direction == watchedFVGDir)
+      if(mss.found && mss.direction == watchingFVGDir)
       {
         if(PrintEntryLog) PrintFormat("MSS matched watched FVG dir=%d -> creating pending", mss.direction);
-        watchMSSMode = false;
-        watchedFVGIndex = -1;
-        watchedFVGDir = 0;
+        watchingMSSMode = false;
+        watchingFVGIndex = -1;
+        watchingFVGDir = 0;
 
-        SetUpPendingEntryForMSS(mss, slot);
+        // SetUpPendingEntryForMSS(mss, slot);
       }
     }
 
@@ -1694,8 +1818,12 @@ void DrawPendingEntryVisuals(string symbol)
     pendingEntry.compositeName = "";
   }
 
-  // chuẩn bị tên unique dựa trên thời gian
-  int timeStamp = (int)TimeCurrent();
+  // use created_time as anchor (fallback to TimeCurrent if not set)
+  datetime created = pendingEntry.created_time;
+  if(created == 0) created = TimeCurrent();
+
+  // chuẩn bị tên unique dựa trên created_time (ổn định khi redraw)
+  int timeStamp = (int)created;
   string base = SwingObjPrefix + "PEND_";
   string lineEntry = base + "LINE_E_" + IntegerToString(timeStamp);
   string lblEntry  = base + "LBL_E_"  + IntegerToString(timeStamp);
@@ -1704,13 +1832,13 @@ void DrawPendingEntryVisuals(string symbol)
   string lineTP    = base + "LINE_TP_" + IntegerToString(timeStamp);
   string lblTP     = base + "LBL_TP_"  + IntegerToString(timeStamp);
 
-  // time để vẽ xu hướng ngang: vẽ từ now -> next bar time
-  datetime t0 = iTime(symbol, LowTF, 0);
+  // time để vẽ tia ngang: bắt đầu tại created, tia hướng sang phải => sử dụng OBJPROP_RAY_RIGHT
   datetime barSecs = (datetime)PeriodSeconds(LowTF);
-  datetime start_time = (t0 != 0) ? (datetime)((long)t0 + (long)barSecs) : (datetime)TimeCurrent();
+  datetime left_time = created;
+  datetime right_time = (datetime)((long)created + (long)barSecs); // điểm phụ (không quan trọng vì ray_right=true)
 
-  // ENTRY line
-  if(ObjectCreate(0, lineEntry, OBJ_TREND, 0, TimeCurrent(), pendingEntry.price, start_time, pendingEntry.price))
+  // ENTRY line (trend object as horizontal ray)
+  if(ObjectCreate(0, lineEntry, OBJ_TREND, 0, left_time, pendingEntry.price, right_time, pendingEntry.price))
   {
     int col = (pendingEntry.direction == 1) ? clrLime : clrRed;
     ObjectSetInteger(0, lineEntry, OBJPROP_COLOR, col);
@@ -1718,13 +1846,15 @@ void DrawPendingEntryVisuals(string symbol)
     ObjectSetInteger(0, lineEntry, OBJPROP_STYLE, STYLE_DASH);
     ObjectSetInteger(0, lineEntry, OBJPROP_SELECTABLE, false);
     ObjectSetInteger(0, lineEntry, OBJPROP_BACK, true);
+    ObjectSetInteger(0, lineEntry, OBJPROP_RAY_RIGHT, true);   // <-- make it a ray to the right
+    ObjectSetInteger(0, lineEntry, OBJPROP_RAY_LEFT, false);
   }
 
-  // ENTRY label
+  // ENTRY label (đặt tại created_time để hiện đúng khi pending tạo)
   double yoffset = SymbolInfoDouble(symbol, SYMBOL_POINT) * 6.0;
   int digs = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
   double entryLabelPrice = (pendingEntry.direction == 1) ? (pendingEntry.price + yoffset) : (pendingEntry.price - yoffset);
-  if(ObjectCreate(0, lblEntry, OBJ_TEXT, 0, TimeCurrent(), entryLabelPrice))
+  if(ObjectCreate(0, lblEntry, OBJ_TEXT, 0, left_time, entryLabelPrice))
   {
     string txtE = "PEND " + ((pendingEntry.direction==1) ? "BUY" : "SELL") + " " + DoubleToString(pendingEntry.price, digs);
     ObjectSetString(0, lblEntry, OBJPROP_TEXT, txtE);
@@ -1737,17 +1867,19 @@ void DrawPendingEntryVisuals(string symbol)
   // SL line + label (nếu có)
   if(pendingEntry.sl_price != 0.0)
   {
-    if(ObjectCreate(0, lineSL, OBJ_TREND, 0, TimeCurrent(), pendingEntry.sl_price, start_time, pendingEntry.sl_price))
+    if(ObjectCreate(0, lineSL, OBJ_TREND, 0, left_time, pendingEntry.sl_price, right_time, pendingEntry.sl_price))
     {
       ObjectSetInteger(0, lineSL, OBJPROP_COLOR, clrRed);
       ObjectSetInteger(0, lineSL, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, lineSL, OBJPROP_STYLE, STYLE_DOT);
       ObjectSetInteger(0, lineSL, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, lineSL, OBJPROP_BACK, true);
+      ObjectSetInteger(0, lineSL, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, lineSL, OBJPROP_RAY_LEFT, false);
     }
 
     double slLabelPrice = (pendingEntry.sl_price - yoffset);
-    if(ObjectCreate(0, lblSL, OBJ_TEXT, 0, TimeCurrent(), slLabelPrice))
+    if(ObjectCreate(0, lblSL, OBJ_TEXT, 0, left_time, slLabelPrice))
     {
       string txtSL = "SL " + DoubleToString(pendingEntry.sl_price, digs);
       ObjectSetString(0, lblSL, OBJPROP_TEXT, txtSL);
@@ -1766,17 +1898,19 @@ void DrawPendingEntryVisuals(string symbol)
   // TP line + label (nếu có)
   if(pendingEntry.tp_price != 0.0)
   {
-    if(ObjectCreate(0, lineTP, OBJ_TREND, 0, TimeCurrent(), pendingEntry.tp_price, start_time, pendingEntry.tp_price))
+    if(ObjectCreate(0, lineTP, OBJ_TREND, 0, left_time, pendingEntry.tp_price, right_time, pendingEntry.tp_price))
     {
       ObjectSetInteger(0, lineTP, OBJPROP_COLOR, clrLime);
       ObjectSetInteger(0, lineTP, OBJPROP_WIDTH, 1);
       ObjectSetInteger(0, lineTP, OBJPROP_STYLE, STYLE_DOT);
       ObjectSetInteger(0, lineTP, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, lineTP, OBJPROP_BACK, true);
+      ObjectSetInteger(0, lineTP, OBJPROP_RAY_RIGHT, true);
+      ObjectSetInteger(0, lineTP, OBJPROP_RAY_LEFT, false);
     }
 
     double tpLabelPrice = (pendingEntry.tp_price + yoffset);
-    if(ObjectCreate(0, lblTP, OBJ_TEXT, 0, TimeCurrent(), tpLabelPrice))
+    if(ObjectCreate(0, lblTP, OBJ_TEXT, 0, left_time, tpLabelPrice))
     {
       string txtTP = "TP " + DoubleToString(pendingEntry.tp_price, digs);
       ObjectSetString(0, lblTP, OBJPROP_TEXT, txtTP);
@@ -1792,13 +1926,13 @@ void DrawPendingEntryVisuals(string symbol)
   }
 
   // Lưu compositeName theo thứ tự: entryLine|entryLbl|slLine|slLbl|tpLine|tpLbl
-  // các phần rỗng sẽ bị loại khi xóa
   string comp = lineEntry + "|" + lblEntry + "|" + lineSL + "|" + lblSL + "|" + lineTP + "|" + lblTP;
   pendingEntry.compositeName = comp;
 
   if(PrintEntryLog)
   {
-    PrintFormat("PendingEntry VISUAL DRAWN: dir=%d entry=%.5f sl=%.5f tp=%.5f composite=(%s)",
+    PrintFormat("PendingEntry VISUAL DRAWN: created=%s dir=%d entry=%.5f sl=%.5f tp=%.5f composite=(%s)",
+                TimeToString(created, TIME_DATE|TIME_MINUTES),
                 pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price, pendingEntry.compositeName);
   }
 }
@@ -1808,44 +1942,90 @@ void DrawPendingEntryVisuals(string symbol)
 // - slot: slot where MSS was detected
 void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
 {
-
-  PrintFormat("@@@@@@ mss: found=%d dir=%d sweep_time=%d sweep_price=%.5f break_time=%d break_price=%.5f",
-              mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_price, (int)mss.break_time, mss.break_price);
   string sym = Symbol();
 
-  if(!mss.found) return;
-  if(mss.sweep_time == 0 || mss.break_time == 0 || mss.sweep_time >= mss.break_time) return;
+  if(PrintEntryLog)
+    PrintFormat("==> SetUpPendingEntryForMSS START: mss.found=%d dir=%d sweep_time=%d sweep_price=%.10f break_time=%d break_price=%.10f",
+                mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_price, (int)mss.break_time, mss.break_price);
+
+  if(!mss.found)
+  {
+    if(PrintEntryLog) Print("-> abort: mss.found == false");
+    return;
+  }
+  if(mss.sweep_time == 0 || mss.break_time == 0 || mss.sweep_time >= mss.break_time)
+  {
+    if(PrintEntryLog) PrintFormat("-> abort: invalid times (sweep_time=%d break_time=%d)", (int)mss.sweep_time, (int)mss.break_time);
+    return;
+  }
 
   double lfgtop[]; double lfgbottom[];
   datetime lfgA[]; datetime lfgC[];
   int lfgtype[];
 
   int cnt = FindInternalFVG(sym, LowTF, FVGLookback, lfgtop, lfgbottom, lfgA, lfgC, lfgtype);
-  if(cnt <= 0) return;
+  if(PrintEntryLog) PrintFormat("-> FindInternalFVG returned cnt=%d (FVGLookback=%d)", cnt, FVGLookback);
+
+  if(cnt <= 0)
+  {
+    if(PrintEntryLog) Print("-> abort: no internal LTF FVG found");
+    return;
+  }
+
+  // Log all FVGs found for debug
+  double point = SymbolInfoDouble(sym, SYMBOL_POINT);
+  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+  for(int i=0; i<cnt; i++)
+  {
+    string timestrA = TimeToString(lfgA[i], TIME_DATE|TIME_MINUTES);
+    string timestrC = TimeToString(lfgC[i], TIME_DATE|TIME_MINUTES);
+    if(PrintEntryLog)
+      PrintFormat("   FVG[%d]: type=%d top=%.10f bottom=%.10f timeA=%s timeC=%s", i, lfgtype[i], lfgtop[i], lfgbottom[i], timestrA, timestrC);
+  }
 
   double pmin = MathMin(mss.sweep_price, mss.break_price);
   double pmax = MathMax(mss.sweep_price, mss.break_price);
-
-  double point = SymbolInfoDouble(sym, SYMBOL_POINT);
-  double tol = (point > 0.0) ? point * 0.5 : 0.0;
+  if(PrintEntryLog) PrintFormat("-> Price window between sweep & break: pmin=%.10f pmax=%.10f tol=%.10g", pmin, pmax, tol);
 
   int chosenIdx = -1;
-  for(int i=0;i<cnt;i++)
+  for(int i=0; i<cnt; i++)
   {
     datetime tc = lfgC[i];
-    if(tc <= mss.sweep_time || tc >= mss.break_time) continue;
+    // ensure candidate FVG C bar is strictly between sweep_time and break_time
+    if(tc <= mss.sweep_time)
+    {
+      if(PrintEntryLog) PrintFormat("   skip FVG[%d] because timeC(%s) <= sweep_time(%s)", i, TimeToString(tc, TIME_DATE|TIME_MINUTES), TimeToString(mss.sweep_time, TIME_DATE|TIME_MINUTES));
+      continue;
+    }
+    if(tc >= mss.break_time)
+    {
+      if(PrintEntryLog) PrintFormat("   skip FVG[%d] because timeC(%s) >= break_time(%s)", i, TimeToString(tc, TIME_DATE|TIME_MINUTES), TimeToString(mss.break_time, TIME_DATE|TIME_MINUTES));
+      continue;
+    }
 
     double top = lfgtop[i];
     double bottom = lfgbottom[i];
+
+    // check overlap: bottom..top overlap with sweep..break price window
     if(bottom + tol >= pmin && top - tol <= pmax)
     {
       chosenIdx = i;
+      if(PrintEntryLog) PrintFormat("-> chosen FVG index=%d (type=%d top=%.10f bottom=%.10f)", chosenIdx, lfgtype[i], top, bottom);
       break;
+    }
+    else
+    {
+      if(PrintEntryLog) PrintFormat("   FVG[%d] does not overlap window: bottom+tol=%.10f top-tol=%.10f (need bottom+tol >= pmin && top-tol <= pmax)", i, bottom+tol, top-tol);
     }
   }
 
-  if(chosenIdx == -1) return;
+  if(chosenIdx == -1)
+  {
+    if(PrintEntryLog) Print("-> abort: no matching LTF internal FVG found between sweep and break (chosenIdx == -1)");
+    return;
+  }
 
+  // Determine entry price from chosen FVG
   double entPrice = 0.0;
   int fvgDir = lfgtype[chosenIdx];
   if(fvgDir == 1)
@@ -1853,52 +2033,98 @@ void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
   else
     entPrice = lfgtop[chosenIdx];
 
+  // Normalize entry to symbol digits
+  int digs = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+  double entPriceNorm = NormalizeDouble(entPrice, digs);
+
+  if(PrintEntryLog)
+  {
+    PrintFormat("-> entry raw=%.10f normalized=%.10f digits=%d fvgDir=%d", entPrice, entPriceNorm, digs, fvgDir);
+  }
+
+  // Clear previous pending
   ClearPendingEntry();
 
+  // Fill pendingEntry fields
   pendingEntry.active = true;
   pendingEntry.direction = (mss.direction == 1) ? 1 : -1;
-  pendingEntry.price = entPrice;
-  pendingEntry.fvgIndex = watchedFVGIndex;
+  pendingEntry.price = entPriceNorm;
+  pendingEntry.fvgIndex = chosenIdx;
   pendingEntry.created_time = TimeCurrent();
   pendingEntry.compositeName = "";
   pendingEntry.source_slot = slot;
-  // SL được lấy từ MSS (hoặc bạn có thể thay đổi nếu muốn buffer)
+
+  // Use MSS sweep price as SL (as before)
   pendingEntry.sl_price = mss.sweep_price;
 
-  // --- TÍNH TP theo RiskRewardRatio (TP = entry ± RiskRewardRatio * |entry - SL|) ---
-  double entry = entPrice;
+  // compute TP using RiskRewardRatio
+  double entry = pendingEntry.price;
   double sl = pendingEntry.sl_price;
-  double tp = 0.0;
+  pendingEntry.tp_price = 0.0;
 
   if(sl == 0.0)
   {
-    pendingEntry.tp_price = 0.0;
-    if(PrintEntryLog) PrintFormat("PendingEntry TP NOT SET because SL==0 (entry=%.5f)", entry);
+    if(PrintEntryLog) PrintFormat("-> warning: SL==0. TP not set (entry=%.10f)", entry);
   }
   else
   {
     double diff = MathAbs(entry - sl);
     if(diff <= 0.0)
     {
-      pendingEntry.tp_price = 0.0;
-      if(PrintEntryLog) PrintFormat("PendingEntry TP NOT SET because diff==0 (entry=%.5f sl=%.5f)", entry, sl);
+      if(PrintEntryLog) PrintFormat("-> warning: diff==0 (entry=%.10f sl=%.10f) TP not set", entry, sl);
     }
     else
     {
-      // dùng biến RiskRewardRatio để tính TP
-      tp = (pendingEntry.direction == 1) ? (entry + RiskRewardRatio * diff)
-                                        : (entry - RiskRewardRatio * diff);
-
-      // làm tròn theo digits của symbol
-      int digs = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+      double tp = (pendingEntry.direction == 1) ? (entry + RiskRewardRatio * diff)
+                                                : (entry - RiskRewardRatio * diff);
       pendingEntry.tp_price = NormalizeDouble(tp, digs);
-
       if(PrintEntryLog)
-        PrintFormat("PendingEntry CREATED: dir=%d entry=%.5f sl=%.5f tp=%.5f (R:R=%.2f)", pendingEntry.direction, entry, sl, pendingEntry.tp_price, RiskRewardRatio);
+        PrintFormat("-> computed TP: entry=%.10f sl=%.10f diff=%.10f R:R=%.2f tp=%.10f", entry, sl, diff, RiskRewardRatio, pendingEntry.tp_price);
     }
   }
 
+  if(PrintEntryLog) PrintFormat("-> PendingEntry populated: dir=%d entry=%.10f sl=%.10f tp=%.10f fvgIndex=%d created=%s",
+                                pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price, pendingEntry.fvgIndex, TimeToString(pendingEntry.created_time, TIME_DATE|TIME_SECONDS));
+
+  // Draw visuals
   DrawPendingEntryVisuals(sym);
+
+  // After drawing, log compositeName and check each object exists
+  if(StringLen(pendingEntry.compositeName) > 0)
+  {
+    if(PrintEntryLog) PrintFormat("-> DrawPendingEntryVisuals set compositeName=(%s)", pendingEntry.compositeName);
+
+    string parts[];
+    int n = StringSplit(pendingEntry.compositeName, '|', parts);
+    for(int i=0; i<n; i++)
+    {
+      string nm = parts[i];
+      if(StringLen(nm) == 0)
+      {
+        if(PrintEntryLog) PrintFormat("   part[%d] is empty", i);
+        continue;
+      }
+      int found = ObjectFind(0, nm);
+      if(found >= 0)
+        PrintFormat("   OBJECT FOUND: part[%d] name='%s' ObjectFind returned=%d", i, nm, found);
+      else
+        PrintFormat("   OBJECT MISSING: part[%d] name='%s' ObjectFind returned=%d", i, nm, found);
+    }
+  }
+  else
+  {
+    if(PrintEntryLog) Print("-> WARNING: pendingEntry.compositeName is empty AFTER DrawPendingEntryVisuals()");
+    // As extra debug, attempt to reconstruct expected entry object names using created_time
+    int timeStamp = (int)pendingEntry.created_time;
+    string base = SwingObjPrefix + "PEND_";
+    string expect_line = base + "LINE_E_" + IntegerToString(timeStamp);
+    string expect_lbl = base + "LBL_E_" + IntegerToString(timeStamp);
+    int found_line = ObjectFind(0, expect_line);
+    int found_lbl  = ObjectFind(0, expect_lbl);
+    if(PrintEntryLog) PrintFormat("-> Reconstructed expected names: %s(found=%d), %s(found=%d)", expect_line, found_line, expect_lbl, found_lbl);
+  }
+
+  if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS END");
 }
 
 void OnTick()
@@ -1915,7 +2141,7 @@ void OnTick()
 
   if(IsNewClosedBar(sym, LowTF, 2)) {
     HandleLogicForTimeframe(sym, LowTF, 2, DetectMSS_LTF, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
-    if (watchMSSMode) {
+    if (watchingMSSMode) {
       CheckWatchMSSInvalidation(sym);
     }
   }
