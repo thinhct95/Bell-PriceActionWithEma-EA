@@ -1599,7 +1599,7 @@ void DrawInternalFVGMatches(string sym, ENUM_TIMEFRAMES tf, datetime sweep_time,
   for(int i=0; i<cnt; i++)
   {
     datetime tc = timeC[i];
-    if(tc <= sweep_time || tc >= break_time) continue; // đảm bảo timeC strictly giữa sweep & break
+    if(tc < sweep_time || tc > break_time) continue; // đảm bảo timeC strictly giữa sweep & break
 
     double top = tops[i];
     double bottom = bottoms[i];
@@ -1623,7 +1623,7 @@ void DrawInternalFVGMatches(string sym, ENUM_TIMEFRAMES tf, datetime sweep_time,
 
     // set style similar DrawFVG
     uint fill_alpha = 80;
-    uint color_fill = (types[i] == 1) ? MakeARGB((int)fill_alpha, clrDodgerBlue) : MakeARGB((int)fill_alpha, clrCrimson);
+    uint color_fill = (types[i] == 1) ? MakeARGB((int)fill_alpha, C'229,255,30') : MakeARGB((int)fill_alpha, clrCrimson);
     uint col_border = MakeARGB(0, clrBlack);
 
     ObjectSetInteger(0, nm, OBJPROP_SELECTABLE, false);
