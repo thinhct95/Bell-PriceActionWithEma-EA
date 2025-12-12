@@ -12,7 +12,7 @@ bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entr
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
 // --- Cấu hình Risk:Reward ---
-input double RiskRewardRatio = 5.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
+input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
 
 // Struct pending entry (single slot)
 struct PendingEntry
