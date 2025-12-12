@@ -10,8 +10,9 @@
 // --- Only Entry logs (user requested) ---
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
+input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
 // --- Cấu hình Risk:Reward ---
-input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
+input double RiskRewardRatio = 5.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
 
 // Struct pending entry (single slot)
 struct PendingEntry
@@ -25,6 +26,8 @@ struct PendingEntry
   int     source_slot;       // slot nơi phát hiện MSS (HTF/MTF/LTF)
   double  sl_price;        // giá SL (dựa trên swing gần nhất)
   double  tp_price;        // giá TP (dựa trên swing gần nhất)
+  double  lotSize;          // kích thước lot tính toán
+  ulong   orderTicket;     // ticket lệnh đã mở (0 = chưa mở)
 };
 
 // global pending entry variable
@@ -806,7 +809,7 @@ int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
    for(int i = 1; i <= maxScan; i++)
    {
       int idxA = i + 2;
-      int idxB = i + 1; // thực ra không cần B trong phép tính nhưng vẫn để đúng mô hình
+      int idxB = i + 1;
       int idxC = i;
 
       // kiểm tra A không vượt tổng số bar
@@ -1741,7 +1744,7 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
         watchingFVGIndex = -1;
         watchingFVGDir = 0;
 
-        // SetUpPendingEntryForMSS(mss, slot);
+        SetUpPendingEntryForMSS(mss, slot);
       }
     }
 
@@ -1937,15 +1940,194 @@ void DrawPendingEntryVisuals(string symbol)
   }
 }
 
-// Set up pending entry when MSS confirmed and direction matches watched FVG
+// CalculateLotSizeForRisk:
+// - symbol: symbol
+// - entryPrice, slPrice: điểm entry và sl (giá thực tế)
+// - riskPercent: ví dụ 1.0 cho 1% equity
+// Trả về lotsize phù hợp (đã được clamp theo min/max/step)
+double CalculateLotSizeForRisk(string symbol, double entryPrice, double slPrice, double riskPercent)
+{
+  double pipValue = GetPipSize(symbol); // 1 pip in price units
+  double distance = MathAbs(entryPrice - slPrice); // in price units
+  if(distance <= 0.0) return 0.0;
+
+  // Use account equity as base
+  double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  if(equity <= 0.0) equity = AccountInfoDouble(ACCOUNT_BALANCE);
+  if(equity <= 0.0) return 0.0;
+
+  double riskAmount = equity * (riskPercent / 100.0);
+
+  // Obtain tick size/value info from symbol
+  double tick_size = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
+  double tick_value = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+
+  // Defensive fallback: if tick_size/tick_value unavailable, try point-based approximation
+  double valuePerPointPerLot = 0.0;
+  if(tick_size > 0.0 && tick_value > 0.0)
+  {
+    valuePerPointPerLot = tick_value / tick_size;
+  }
+  else
+  {
+    // approximate: use point and contract size
+    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+    // assume valuePerPointPerLot ~ 10 (very rough) -> but better to abort
+    // safer: abort by returning 0 if we don't have reliable tick info
+    return 0.0;
+  }
+
+  // value risk per lot = distance (price units) * valuePerPointPerLot
+  double valueRiskPerLot = distance * valuePerPointPerLot;
+  if(valueRiskPerLot <= 0.0) return 0.0;
+
+  double lots = riskAmount / valueRiskPerLot;
+
+  // clamp to symbol lot limits and step
+  double minLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+  double maxLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MAX);
+  double stepLot = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+
+  if(minLot <= 0.0 || stepLot <= 0.0)
+  {
+    // fallback defaults if broker info missing
+    minLot = 0.01;
+    stepLot = 0.01;
+    maxLot = 100.0;
+  }
+
+  // Normalize lots to nearest step
+  double stepInv = MathRound(lots / stepLot);
+  double lotsNorm = stepInv * stepLot;
+
+  // ensure within min/max
+  if(lotsNorm < minLot) lotsNorm = minLot;
+  if(lotsNorm > maxLot) lotsNorm = maxLot;
+
+  // final safety: round to allowed decimals (step determines decimals)
+  int stepDigits = 0;
+  {
+    double tmp = stepLot;
+    while(tmp < 1.0 && stepDigits < 8)
+    {
+      tmp *= 10.0;
+      stepDigits++;
+    }
+  }
+  lotsNorm = NormalizeDouble(lotsNorm, stepDigits);
+
+  return lotsNorm;
+}
+
+// PlacePendingOrderFromPendingEntry:
+// - Gọi DrawPendingEntryVisuals để vẽ entry/sl/tp
+// - Gửi pending order (BUY_LIMIT nếu pendingEntry.direction==1, SELL_LIMIT nếu -1)
+// - Lưu ticket vào pendingEntry.order_ticket nếu thành công
+// - Trả về true nếu order đặt thành công, false nếu lỗi
+bool PlacePendingOrderFromPendingEntry()
+{
+  string sym = Symbol();
+
+  if(!pendingEntry.active)
+  {
+    if(PrintEntryLog) Print("PlacePendingOrderFromPendingEntry: abort - pendingEntry.active == false");
+    return false;
+  }
+
+  if(pendingEntry.price <= 0.0 || pendingEntry.lotSize <= 0.0)
+  {
+    if(PrintEntryLog) PrintFormat("PlacePendingOrderFromPendingEntry: abort - invalid price/lotsize (price=%.10f lots=%.4f)", pendingEntry.price, pendingEntry.lotSize);
+    return false;
+  }
+
+  // 1) Vẽ visuals trước (đảm bảo compositeName cập nhật)
+  DrawPendingEntryVisuals(sym);
+
+  // 2) Chuẩn bị trade request
+  MqlTradeRequest request;
+  MqlTradeResult  result;
+  ZeroMemory(request);
+  ZeroMemory(result);
+
+  request.action   = TRADE_ACTION_PENDING; // đặt lệnh pending
+  request.symbol   = sym;
+  request.volume   = pendingEntry.lotSize;
+  request.deviation= 10; // acceptable slippage in points (bạn chỉnh nếu muốn)
+  request.magic    = 123456; // chỉnh magic number nếu bạn dùng khác
+  request.comment  = "PEND_BY_MSS_OB";
+
+  // normalize prices
+  int digs = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+  double price = NormalizeDouble(pendingEntry.price, digs);
+  double sl    = (pendingEntry.sl_price != 0.0) ? NormalizeDouble(pendingEntry.sl_price, digs) : 0.0;
+  double tp    = (pendingEntry.tp_price != 0.0) ? NormalizeDouble(pendingEntry.tp_price, digs) : 0.0;
+
+  if(pendingEntry.direction == 1)
+  {
+    request.type = ORDER_TYPE_BUY_LIMIT;
+    request.price = price;
+  }
+  else
+  {
+    request.type = ORDER_TYPE_SELL_LIMIT;
+    request.price = price;
+  }
+
+  // set stoploss/takeprofit as absolute prices
+  request.sl = sl;
+  request.tp = tp;
+
+  // optional: set expiration (0 = good till canceled)
+  request.expiration = 0;
+
+  // 3) Send request
+  if(!OrderSend(request, result))
+  {
+    // OrderSend failed to execute (interface error)
+    if(PrintEntryLog) PrintFormat("PlacePendingOrderFromPendingEntry: OrderSend() returned false. result.retcode=%d retcode_external=%d", result.retcode, result.retcode_external);
+    return false;
+  }
+
+  // 4) Check result.retcode for success codes (10009 etc.)
+  // Success for pending order is typically TRADE_RETCODE_DONE (10008) or TRADE_RETCODE_DONE_REMAINDER etc.
+  if(result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED || result.retcode == 10006 || result.retcode == 10008 || result.retcode == 10009)
+  {
+    // store ticket
+    pendingEntry.orderTicket = result.order;
+    if(PrintEntryLog) PrintFormat("PlacePendingOrderFromPendingEntry: SUCCESS ticket=%I64u (retcode=%d) entry=%.10f sl=%.10f tp=%.10f lots=%.4f",
+                                  pendingEntry.orderTicket, result.retcode, price, sl, tp, pendingEntry.lotSize);
+    return true;
+  }
+  else
+  {
+    // failure; log reason
+    if(PrintEntryLog)
+    {
+      PrintFormat("PlacePendingOrderFromPendingEntry: FAILED retcode=%d retval=%d result_comment=%s",
+                  result.retcode, result.retcode, result.comment);
+    }
+    return false;
+  }
+}
+
+// SetUpPendingEntryForMSS: new implementation using OrderBlock (last opposite-color candle before break)
 // - mss: MSSInfo found
-// - slot: slot where MSS was detected
+// - slot: slot where MSS detected
+// Logic:
+// 1) Find OrderBlock (OB) = first opposite-color candle when scanning backward from mss.break_time (exclusive).
+//    - bullish MSS (mss.direction == 1): find first bearish candle (close < open) when scanning backward from break_time
+//    - bearish MSS (mss.direction == -1): find first bullish candle (close > open) when scanning backward from break_time
+// 2) Entry = OB edge (high for bearish candle (bullish OB), low for bullish candle (bearish OB))
+// 3) SL = Entry +/- 300 pips (bullish: SL = entry - 300 pips; bearish: SL = entry + 300 pips)
+// 4) TP computed using RiskRewardRatio as before (TP = entry ± R:R*|entry-sl|)
+// 5) Calculate lotsize such that risk = 1% equity (use CalculateLotSizeForRisk)
+// 6) Store into pendingEntry and draw visuals
 void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
 {
   string sym = Symbol();
 
   if(PrintEntryLog)
-    PrintFormat("==> SetUpPendingEntryForMSS START: mss.found=%d dir=%d sweep_time=%d sweep_price=%.10f break_time=%d break_price=%.10f",
+    PrintFormat("==> SetUpPendingEntryForMSS (NEW) START: mss.found=%d dir=%d sweep_time=%d sweep_price=%.10f break_time=%d break_price=%.10f",
                 mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_price, (int)mss.break_time, mss.break_price);
 
   if(!mss.found)
@@ -1953,178 +2135,153 @@ void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
     if(PrintEntryLog) Print("-> abort: mss.found == false");
     return;
   }
-  if(mss.sweep_time == 0 || mss.break_time == 0 || mss.sweep_time >= mss.break_time)
+  if(mss.break_time == 0)
   {
-    if(PrintEntryLog) PrintFormat("-> abort: invalid times (sweep_time=%d break_time=%d)", (int)mss.sweep_time, (int)mss.break_time);
+    if(PrintEntryLog) Print("-> abort: invalid break_time");
     return;
   }
 
-  double lfgtop[]; double lfgbottom[];
-  datetime lfgA[]; datetime lfgC[];
-  int lfgtype[];
+  // 1) Find OrderBlock (scan backward on LowTF from break_time - 1 bar)
+  int idxStart = iBarShift(sym, LowTF, mss.break_time, false);
+  if(idxStart == -1) idxStart = 0;
 
-  int cnt = FindInternalFVG(sym, LowTF, FVGLookback, lfgtop, lfgbottom, lfgA, lfgC, lfgtype);
-  if(PrintEntryLog) PrintFormat("-> FindInternalFVG returned cnt=%d (FVGLookback=%d)", cnt, FVGLookback);
+  int foundIdx = -1;
+  double obEdgePrice = 0.0; // entry price (edge)
+  int obDirection = 0; // 1 = bullish candle (close>open), -1 = bearish candle (close<open)
 
-  if(cnt <= 0)
+  // Start scanning previous bars strictly before break_time -> start at idxStart (bar whose time == break_time) then go idxStart+1 ??? 
+  // iBarShift returns index (0 = current), bar with time==break_time likely index > 0. We want bars older than break_time so begin idx = idxStart (if that bar equals break_time) then idx = idxStart
+  // Safer: we want bars with time < break_time, so shift to idx = idxStart (if that index's time == break_time then idx++), but iBarShift(...,false) returns exact index.
+  // We'll start scanning from idx = idxStart (which should point to the bar with time==break_time) and step forward (older) idx+1, idx+2...
+  int scanIdx = idxStart;
+  // move one bar older to ensure strictly before break_time
+  scanIdx = scanIdx + 1;
+
+  int maxScan = 50; // cap scanning to avoid infinite loops (you can adjust)
+  int scanned = 0;
+  for(int idx = scanIdx; idx < iBars(sym, LowTF) && scanned < maxScan; idx++, scanned++)
   {
-    if(PrintEntryLog) Print("-> abort: no internal LTF FVG found");
+    double o = iOpen(sym, LowTF, idx);
+    double c = iClose(sym, LowTF, idx);
+    if(o == 0.0 || c == 0.0) continue;
+
+    if(mss.direction == 1)
+    {
+      // bullish MSS: find first bearish candle going backward => candle where close < open (bearish)
+      if(c < o)
+      {
+        foundIdx = idx;
+        obDirection = -1;
+        obEdgePrice = iHigh(sym, LowTF, idx); // use high of that bearish candle as OB edge
+        break;
+      }
+    }
+    else if(mss.direction == -1)
+    {
+      // bearish MSS: find first bullish candle (close > open)
+      if(c > o)
+      {
+        foundIdx = idx;
+        obDirection = 1;
+        obEdgePrice = iLow(sym, LowTF, idx); // use low of that bullish candle as OB edge
+        break;
+      }
+    }
+  }
+
+  if(foundIdx == -1)
+  {
+    if(PrintEntryLog) Print("-> abort: no suitable OrderBlock (opposite-color candle) found before break_time on LowTF");
     return;
   }
 
-  // Log all FVGs found for debug
-  double point = SymbolInfoDouble(sym, SYMBOL_POINT);
-  double tol = (point > 0.0) ? point * 0.5 : 0.0;
-  for(int i=0; i<cnt; i++)
-  {
-    string timestrA = TimeToString(lfgA[i], TIME_DATE|TIME_MINUTES);
-    string timestrC = TimeToString(lfgC[i], TIME_DATE|TIME_MINUTES);
-    if(PrintEntryLog)
-      PrintFormat("   FVG[%d]: type=%d top=%.10f bottom=%.10f timeA=%s timeC=%s", i, lfgtype[i], lfgtop[i], lfgbottom[i], timestrA, timestrC);
-  }
-
-  double pmin = MathMin(mss.sweep_price, mss.break_price);
-  double pmax = MathMax(mss.sweep_price, mss.break_price);
-  if(PrintEntryLog) PrintFormat("-> Price window between sweep & break: pmin=%.10f pmax=%.10f tol=%.10g", pmin, pmax, tol);
-
-  int chosenIdx = -1;
-  for(int i=0; i<cnt; i++)
-  {
-    datetime tc = lfgC[i];
-    // ensure candidate FVG C bar is strictly between sweep_time and break_time
-    if(tc <= mss.sweep_time)
-    {
-      if(PrintEntryLog) PrintFormat("   skip FVG[%d] because timeC(%s) <= sweep_time(%s)", i, TimeToString(tc, TIME_DATE|TIME_MINUTES), TimeToString(mss.sweep_time, TIME_DATE|TIME_MINUTES));
-      continue;
-    }
-    if(tc >= mss.break_time)
-    {
-      if(PrintEntryLog) PrintFormat("   skip FVG[%d] because timeC(%s) >= break_time(%s)", i, TimeToString(tc, TIME_DATE|TIME_MINUTES), TimeToString(mss.break_time, TIME_DATE|TIME_MINUTES));
-      continue;
-    }
-
-    double top = lfgtop[i];
-    double bottom = lfgbottom[i];
-
-    // check overlap: bottom..top overlap with sweep..break price window
-    if(bottom + tol >= pmin && top - tol <= pmax)
-    {
-      chosenIdx = i;
-      if(PrintEntryLog) PrintFormat("-> chosen FVG index=%d (type=%d top=%.10f bottom=%.10f)", chosenIdx, lfgtype[i], top, bottom);
-      break;
-    }
-    else
-    {
-      if(PrintEntryLog) PrintFormat("   FVG[%d] does not overlap window: bottom+tol=%.10f top-tol=%.10f (need bottom+tol >= pmin && top-tol <= pmax)", i, bottom+tol, top-tol);
-    }
-  }
-
-  if(chosenIdx == -1)
-  {
-    if(PrintEntryLog) Print("-> abort: no matching LTF internal FVG found between sweep and break (chosenIdx == -1)");
-    return;
-  }
-
-  // Determine entry price from chosen FVG
-  double entPrice = 0.0;
-  int fvgDir = lfgtype[chosenIdx];
-  if(fvgDir == 1)
-    entPrice = lfgbottom[chosenIdx];
-  else
-    entPrice = lfgtop[chosenIdx];
-
-  // Normalize entry to symbol digits
+  // Normalize entry price to symbol digits
   int digs = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-  double entPriceNorm = NormalizeDouble(entPrice, digs);
+  double entryPrice = NormalizeDouble(obEdgePrice, digs);
 
   if(PrintEntryLog)
+    PrintFormat("-> Found OB at index=%d time=%s dir=%d edge=%.10f (normalized=%.10f)",
+                foundIdx, TimeToString(iTime(sym, LowTF, foundIdx), TIME_DATE|TIME_MINUTES), obDirection, obEdgePrice, entryPrice);
+
+  // 2) Set SL = entry +/- 300 pips
+  double pip = GetPipSize(sym);
+  double sl;
+  double slDistancePoints = 300.0 * pip;
+  if(mss.direction == 1)
   {
-    PrintFormat("-> entry raw=%.10f normalized=%.10f digits=%d fvgDir=%d", entPrice, entPriceNorm, digs, fvgDir);
+    // bullish MSS -> we will BUY at entry=OB(high) -> SL below OB
+    sl = entryPrice - slDistancePoints;
+  }
+  else
+  {
+    // bearish MSS -> SELL at entry=OB(low) -> SL above OB
+    sl = entryPrice + slDistancePoints;
+  }
+  sl = NormalizeDouble(sl, digs);
+
+  // 3) Compute TP using RiskRewardRatio (existing input)
+  double tp = 0.0;
+  double diff = MathAbs(entryPrice - sl);
+  if(diff > 0.0)
+  {
+    if(mss.direction == 1)
+      tp = entryPrice + RiskRewardRatio * diff;
+    else
+      tp = entryPrice - RiskRewardRatio * diff;
+    tp = NormalizeDouble(tp, digs);
+  }
+  else
+  {
+    if(PrintEntryLog) Print("-> abort: computed diff==0 between entry and SL");
+    return;
   }
 
-  // Clear previous pending
+  // 4) Calculate lotsize based on 1% equity risk (hard-coded 1% per your request)
+  double lots = CalculateLotSizeForRisk(sym, entryPrice, sl, 1.0); // 1% equity
+  if(lots <= 0.0)
+  {
+    if(PrintEntryLog) Print("-> abort: CalculateLotSizeForRisk returned 0.0 (cannot determine lotsize)");
+    return;
+  }
+
+  // 5) Clear previous pending and populate new pendingEntry
   ClearPendingEntry();
 
-  // Fill pendingEntry fields
   pendingEntry.active = true;
   pendingEntry.direction = (mss.direction == 1) ? 1 : -1;
-  pendingEntry.price = entPriceNorm;
-  pendingEntry.fvgIndex = chosenIdx;
+  pendingEntry.price = entryPrice;
+  pendingEntry.fvgIndex = -1; // not using FVG for this method
   pendingEntry.created_time = TimeCurrent();
   pendingEntry.compositeName = "";
   pendingEntry.source_slot = slot;
+  pendingEntry.sl_price = sl;
+  pendingEntry.tp_price = tp;
+  pendingEntry.lotSize = lots;
+  pendingEntry.orderTicket = 0;
 
-  // Use MSS sweep price as SL (as before)
-  pendingEntry.sl_price = mss.sweep_price;
+    // attempt to place pending order immediately
+  if(PrintEntryLog) Print("Attempting to place pending order from pendingEntry...");
+  bool ok = PlacePendingOrderFromPendingEntry();
+  if(!ok)
+    Print("Failed to place pending order (check broker settings, tick/tickvalue availability, volume limits).");
 
-  // compute TP using RiskRewardRatio
-  double entry = pendingEntry.price;
-  double sl = pendingEntry.sl_price;
-  pendingEntry.tp_price = 0.0;
 
-  if(sl == 0.0)
+  if(PrintEntryLog)
   {
-    if(PrintEntryLog) PrintFormat("-> warning: SL==0. TP not set (entry=%.10f)", entry);
+    PrintFormat("-> PendingEntry populated (OB method): dir=%d entry=%.10f sl=%.10f tp=%.10f lots=%.4f created=%s",
+                pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price,
+                pendingEntry.lotSize, TimeToString(pendingEntry.created_time, TIME_DATE|TIME_SECONDS));
   }
-  else
+
+  if(PrintEntryLog)
   {
-    double diff = MathAbs(entry - sl);
-    if(diff <= 0.0)
-    {
-      if(PrintEntryLog) PrintFormat("-> warning: diff==0 (entry=%.10f sl=%.10f) TP not set", entry, sl);
-    }
+    if(StringLen(pendingEntry.compositeName) > 0)
+      PrintFormat("-> compositeName after draw: (%s)", pendingEntry.compositeName);
     else
-    {
-      double tp = (pendingEntry.direction == 1) ? (entry + RiskRewardRatio * diff)
-                                                : (entry - RiskRewardRatio * diff);
-      pendingEntry.tp_price = NormalizeDouble(tp, digs);
-      if(PrintEntryLog)
-        PrintFormat("-> computed TP: entry=%.10f sl=%.10f diff=%.10f R:R=%.2f tp=%.10f", entry, sl, diff, RiskRewardRatio, pendingEntry.tp_price);
-    }
+      Print("-> Warning: compositeName empty after DrawPendingEntryVisuals");
   }
 
-  if(PrintEntryLog) PrintFormat("-> PendingEntry populated: dir=%d entry=%.10f sl=%.10f tp=%.10f fvgIndex=%d created=%s",
-                                pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price, pendingEntry.fvgIndex, TimeToString(pendingEntry.created_time, TIME_DATE|TIME_SECONDS));
-
-  // Draw visuals
-  DrawPendingEntryVisuals(sym);
-
-  // After drawing, log compositeName and check each object exists
-  if(StringLen(pendingEntry.compositeName) > 0)
-  {
-    if(PrintEntryLog) PrintFormat("-> DrawPendingEntryVisuals set compositeName=(%s)", pendingEntry.compositeName);
-
-    string parts[];
-    int n = StringSplit(pendingEntry.compositeName, '|', parts);
-    for(int i=0; i<n; i++)
-    {
-      string nm = parts[i];
-      if(StringLen(nm) == 0)
-      {
-        if(PrintEntryLog) PrintFormat("   part[%d] is empty", i);
-        continue;
-      }
-      int found = ObjectFind(0, nm);
-      if(found >= 0)
-        PrintFormat("   OBJECT FOUND: part[%d] name='%s' ObjectFind returned=%d", i, nm, found);
-      else
-        PrintFormat("   OBJECT MISSING: part[%d] name='%s' ObjectFind returned=%d", i, nm, found);
-    }
-  }
-  else
-  {
-    if(PrintEntryLog) Print("-> WARNING: pendingEntry.compositeName is empty AFTER DrawPendingEntryVisuals()");
-    // As extra debug, attempt to reconstruct expected entry object names using created_time
-    int timeStamp = (int)pendingEntry.created_time;
-    string base = SwingObjPrefix + "PEND_";
-    string expect_line = base + "LINE_E_" + IntegerToString(timeStamp);
-    string expect_lbl = base + "LBL_E_" + IntegerToString(timeStamp);
-    int found_line = ObjectFind(0, expect_line);
-    int found_lbl  = ObjectFind(0, expect_lbl);
-    if(PrintEntryLog) PrintFormat("-> Reconstructed expected names: %s(found=%d), %s(found=%d)", expect_line, found_line, expect_lbl, found_lbl);
-  }
-
-  if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS END");
+  if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS (NEW) END");
 }
 
 void OnTick()
