@@ -11,7 +11,7 @@
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
-input double RiskRewardRatio = 6.0;   // tỉ lệ R:R mặc định
+input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định
 
 input double moveSLRange = 1;   // Nomal moving SL: số R cần đạt để dời SL về entry (BE)
 input int MaxLimitOrderTime = 120;
@@ -1785,6 +1785,14 @@ bool CheckValidEntry(
   // =============================
   if(mssDirection == 0)
     return false;
+
+  // HTF phải có trend rõ ràng
+  if(htfTrend == 0)
+  {
+    if(PrintEntryLog)
+      Print("CheckValidEntry FAIL: HTF is SIDEWAY");
+    return false;
+  }
 
   if(fvgIndex < 0 || fvgIndex >= FVG_count)
   {
