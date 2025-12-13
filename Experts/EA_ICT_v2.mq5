@@ -11,10 +11,13 @@
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
-input double RiskRewardRatio = 8.0;   // tỉ lệ R:R mặc định
+input double RiskRewardRatio = 6.0;   // tỉ lệ R:R mặc định
 
-input double moveSLRange = 1;   // số R cần đạt để dời SL về entry (BE)
-input int MaxLimitOrderTime = 60;
+input double moveSLRange = 1;   // Nomal moving SL: số R cần đạt để dời SL về entry (BE)
+input int MaxLimitOrderTime = 120;
+
+input double moveSLStartR = 3;   // Advanced moving SL: bắt đầu kích hoạt trailing
+input double trailOffsetR = 3;   // Advanced moving SL: khoảng cách SL so với giá hiện tại
 
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
@@ -1737,20 +1740,114 @@ void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled
     mss.key_level = newer.broken_sw_price;
 
     // Nếu đang watch và MSS direction trùng với FVG direction -> xử lý pending
-    if(watchingMSSMode && watchingFVGIndex >= 0)
-    {
+    if(watchingMSSMode && watchingFVGIndex >= 0) {
       if(mss.found && mss.direction == watchingFVGDir)
       {
-        if(PrintEntryLog) PrintFormat("MSS matched watched FVG dir=%d -> creating pending", mss.direction);
-        watchingMSSMode = false;
-        watchingFVGIndex = -1;
-        watchingFVGDir = 0;
+        bool valid = CheckValidEntry(
+          mss.direction,
+          TrendTF[0],               // HTF trend
+          TrendTF[1],               // MTF trend
+          watchingFVGIndex
+        );
 
-        SetUpPendingEntryForMSS(mss, slot);
+        if(valid)
+        {
+          if(PrintEntryLog)
+            Print(">>> ENTRY CONDITIONS PASSED → Create Pending");
+
+          watchingMSSMode = false;
+          watchingFVGIndex = -1;
+          watchingFVGDir = 0;
+
+          SetUpPendingEntryForMSS(mss, slot);
+        }
+        else
+        {
+          if(PrintEntryLog)
+            Print(">>> ENTRY BLOCKED by CheckValidEntry()");
+        }
       }
     }
 
+
     DrawMss(sym, tf, mss, slot);
+}
+
+bool CheckValidEntry(
+  int mssDirection,
+  int htfTrend,
+  int mtfTrend,
+  int fvgIndex
+)
+{
+  // =============================
+  // 0. Sanity check
+  // =============================
+  if(mssDirection == 0)
+    return false;
+
+  if(fvgIndex < 0 || fvgIndex >= FVG_count)
+  {
+    if(PrintEntryLog)
+      Print("CheckValidEntry: invalid FVG index");
+    return false;
+  }
+
+  int fvgDir = FVGs[fvgIndex].type; // 1 bull, -1 bear
+
+  // =============================
+  // 1. MSS direction == FVG direction
+  // (thường đã đúng do watchingMSSMode,
+  // nhưng giữ lại cho chắc)
+  // =============================
+  if(mssDirection != fvgDir)
+  {
+    if(PrintEntryLog)
+      PrintFormat(
+        "CheckValidEntry FAIL: MSS dir=%d != FVG dir=%d",
+        mssDirection, fvgDir
+      );
+    return false;
+  }
+
+  // =============================
+  // 2. FVG direction thuận MTF trend
+  // =============================
+  if(mtfTrend != 0 && fvgDir != mtfTrend)
+  {
+    if(PrintEntryLog)
+      PrintFormat(
+        "CheckValidEntry FAIL: FVG dir=%d not aligned with MTF trend=%d",
+        fvgDir, mtfTrend
+      );
+    return false;
+  }
+
+  // =============================
+  // 3. MTF trend thuận HTF trend
+  // =============================
+  if(htfTrend != 0 && mtfTrend != 0 && htfTrend != mtfTrend)
+  {
+    if(PrintEntryLog)
+      PrintFormat(
+        "CheckValidEntry FAIL: MTF trend=%d not aligned with HTF trend=%d",
+        mtfTrend, htfTrend
+      );
+    return false;
+  }
+
+  // =============================
+  // PASS ALL CONDITIONS
+  // =============================
+  if(PrintEntryLog)
+  {
+    PrintFormat(
+      "CheckValidEntry PASS: dir=%d | FVG=%d | MTF trend=%d | HTF trend=%d",
+      mssDirection, fvgDir, mtfTrend, htfTrend
+    );
+  }
+
+  return true;
 }
 
 void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool detectMSS,
@@ -2043,7 +2140,7 @@ bool PlacePendingOrderFromPendingEntry()
   }
 
   // 1) Vẽ visuals trước (đảm bảo compositeName cập nhật)
-  DrawPendingEntryVisuals(sym);
+  // DrawPendingEntryVisuals(sym);
 
   // 2) Chuẩn bị trade request
   MqlTradeRequest request;
@@ -2430,12 +2527,117 @@ void CancelExpiredLimitOrder()
   }
 }
 
+void MoveStoplossAdvanced()
+{
+  string sym = Symbol();
+
+  // chỉ quản lý 1 position cho symbol
+  if(!PositionSelect(sym))
+    return;
+
+  ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+  ENUM_POSITION_TYPE type =
+    (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+  double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+  double sl    = PositionGetDouble(POSITION_SL);
+  double tp    = PositionGetDouble(POSITION_TP);
+
+  if(entry <= 0.0 || sl <= 0.0)
+    return;
+
+  // ===== R BAN ĐẦU =====
+  double R = MathAbs(entry - sl);
+  if(R <= 0.0)
+    return;
+
+  double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+  double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+  // ===== PROFIT HIỆN TẠI (theo R) =====
+  double profitR = 0.0;
+  if(type == POSITION_TYPE_BUY)
+    profitR = (bid - entry) / R;
+  else
+    profitR = (entry - ask) / R;
+
+  // ===== CHƯA ĐỦ ĐIỀU KIỆN BE =====
+  if(profitR < moveSLStartR)
+    return;
+
+  int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+  double newSL = sl;
+
+  // =========================================================
+  // 1️⃣ BE PHASE
+  // =========================================================
+  if(profitR >= moveSLStartR && profitR < (moveSLStartR + trailOffsetR))
+  {
+    newSL = entry;
+  }
+  else
+  {
+    // =========================================================
+    // 2️⃣ STEP TRAIL PHASE (theo bậc R)
+    // =========================================================
+    int step = (int)MathFloor(
+      (profitR - moveSLStartR) / trailOffsetR
+    );
+
+    double targetR = step * trailOffsetR;
+
+    if(type == POSITION_TYPE_BUY)
+      newSL = entry + targetR * R;
+    else
+      newSL = entry - targetR * R;
+  }
+
+  newSL = NormalizeDouble(newSL, digits);
+
+  // ===== KHÔNG CHO SL ĐI LÙI =====
+  if(type == POSITION_TYPE_BUY && newSL <= sl)
+    return;
+  if(type == POSITION_TYPE_SELL && newSL >= sl)
+    return;
+
+  // ===== GỬI MODIFY =====
+  MqlTradeRequest req;
+  MqlTradeResult  res;
+  ZeroMemory(req);
+  ZeroMemory(res);
+
+  req.action   = TRADE_ACTION_SLTP;
+  req.position = ticket;
+  req.symbol   = sym;
+  req.sl       = newSL;
+  req.tp       = tp;
+
+  if(!OrderSend(req, res))
+  {
+    if(PrintEntryLog)
+      PrintFormat("MoveSL ICT-C: OrderSend failed ticket=%I64u", ticket);
+    return;
+  }
+
+  if(res.retcode == TRADE_RETCODE_DONE && PrintEntryLog)
+  {
+    PrintFormat(
+      "MoveSL ICT-C: SL -> %.5f | profitR=%.2fR | step=%d",
+      newSL, profitR, 
+      (int)MathFloor((profitR - moveSLStartR) / trailOffsetR)
+    );
+  }
+}
+
 void OnTick()
 {
   string sym = Symbol();
 
   CancelExpiredLimitOrder();
-  MoveStoploss();   // ⭐ quản lý vốn
+  if (moveSLRange > 0) {
+    // MoveStoploss();
+    // MoveStoplossAdvanced();
+  }
 
   if(IsNewClosedBar(sym, HighTF, 0)) {
     HandleLogicForTimeframe(sym, HighTF, 0, DetectMSS_HTF, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
