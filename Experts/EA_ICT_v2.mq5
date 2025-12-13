@@ -1909,144 +1909,6 @@ void ClearPendingEntry()
   if(PrintEntryLog) Print("PendingEntry CLEARED");
 }
 
-// Draw pending entry visuals and save composite name inside struct
-void DrawPendingEntryVisuals(string symbol)
-{
-  if(!pendingEntry.active) return;
-  if(pendingEntry.price == 0.0) return;
-
-  // xóa objects cũ nếu có
-  if(StringLen(pendingEntry.compositeName) > 0)
-  {
-    string partsOld[];
-    int no = StringSplit(pendingEntry.compositeName, '|', partsOld);
-    for(int j=0;j<no;j++)
-    {
-      if(StringLen(partsOld[j])>0 && ObjectFind(0, partsOld[j])>=0)
-        ObjectDelete(0, partsOld[j]);
-    }
-    pendingEntry.compositeName = "";
-  }
-
-  // use created_time as anchor (fallback to TimeCurrent if not set)
-  datetime created = pendingEntry.created_time;
-  if(created == 0) created = TimeCurrent();
-
-  // chuẩn bị tên unique dựa trên created_time (ổn định khi redraw)
-  int timeStamp = (int)created;
-  string base = SwingObjPrefix + "PEND_";
-  string lineEntry = base + "LINE_E_" + IntegerToString(timeStamp);
-  string lblEntry  = base + "LBL_E_"  + IntegerToString(timeStamp);
-  string lineSL    = base + "LINE_SL_" + IntegerToString(timeStamp);
-  string lblSL     = base + "LBL_SL_"  + IntegerToString(timeStamp);
-  string lineTP    = base + "LINE_TP_" + IntegerToString(timeStamp);
-  string lblTP     = base + "LBL_TP_"  + IntegerToString(timeStamp);
-
-  // time để vẽ tia ngang: bắt đầu tại created, tia hướng sang phải => sử dụng OBJPROP_RAY_RIGHT
-  datetime barSecs = (datetime)PeriodSeconds(LowTF);
-  datetime left_time = created;
-  datetime right_time = (datetime)((long)created + (long)barSecs); // điểm phụ (không quan trọng vì ray_right=true)
-
-  // ENTRY line (trend object as horizontal ray)
-  if(ObjectCreate(0, lineEntry, OBJ_TREND, 0, left_time, pendingEntry.price, right_time, pendingEntry.price))
-  {
-    int col = (pendingEntry.direction == 1) ? clrLime : clrRed;
-    ObjectSetInteger(0, lineEntry, OBJPROP_COLOR, col);
-    ObjectSetInteger(0, lineEntry, OBJPROP_WIDTH, 2);
-    ObjectSetInteger(0, lineEntry, OBJPROP_STYLE, STYLE_DASH);
-    ObjectSetInteger(0, lineEntry, OBJPROP_SELECTABLE, false);
-    ObjectSetInteger(0, lineEntry, OBJPROP_BACK, true);
-    ObjectSetInteger(0, lineEntry, OBJPROP_RAY_RIGHT, true);   // <-- make it a ray to the right
-    ObjectSetInteger(0, lineEntry, OBJPROP_RAY_LEFT, false);
-  }
-
-  // ENTRY label (đặt tại created_time để hiện đúng khi pending tạo)
-  double yoffset = SymbolInfoDouble(symbol, SYMBOL_POINT) * 6.0;
-  int digs = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-  double entryLabelPrice = (pendingEntry.direction == 1) ? (pendingEntry.price + yoffset) : (pendingEntry.price - yoffset);
-  if(ObjectCreate(0, lblEntry, OBJ_TEXT, 0, left_time, entryLabelPrice))
-  {
-    string txtE = "PEND " + ((pendingEntry.direction==1) ? "BUY" : "SELL") + " " + DoubleToString(pendingEntry.price, digs);
-    ObjectSetString(0, lblEntry, OBJPROP_TEXT, txtE);
-    ObjectSetInteger(0, lblEntry, OBJPROP_FONTSIZE, SwingMarkerFontSize);
-    ObjectSetInteger(0, lblEntry, OBJPROP_COLOR, (pendingEntry.direction==1)?clrLime:clrRed);
-    ObjectSetInteger(0, lblEntry, OBJPROP_BACK, true);
-    ObjectSetInteger(0, lblEntry, OBJPROP_SELECTABLE, false);
-  }
-
-  // SL line + label (nếu có)
-  if(pendingEntry.sl_price != 0.0)
-  {
-    if(ObjectCreate(0, lineSL, OBJ_TREND, 0, left_time, pendingEntry.sl_price, right_time, pendingEntry.sl_price))
-    {
-      ObjectSetInteger(0, lineSL, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, lineSL, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, lineSL, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, lineSL, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, lineSL, OBJPROP_BACK, true);
-      ObjectSetInteger(0, lineSL, OBJPROP_RAY_RIGHT, true);
-      ObjectSetInteger(0, lineSL, OBJPROP_RAY_LEFT, false);
-    }
-
-    double slLabelPrice = (pendingEntry.sl_price - yoffset);
-    if(ObjectCreate(0, lblSL, OBJ_TEXT, 0, left_time, slLabelPrice))
-    {
-      string txtSL = "SL " + DoubleToString(pendingEntry.sl_price, digs);
-      ObjectSetString(0, lblSL, OBJPROP_TEXT, txtSL);
-      ObjectSetInteger(0, lblSL, OBJPROP_FONTSIZE, SwingMarkerFontSize - 1);
-      ObjectSetInteger(0, lblSL, OBJPROP_COLOR, clrRed);
-      ObjectSetInteger(0, lblSL, OBJPROP_BACK, true);
-      ObjectSetInteger(0, lblSL, OBJPROP_SELECTABLE, false);
-    }
-  }
-  else
-  {
-    // clear names so composite keeps consistent ordering
-    lineSL = ""; lblSL = "";
-  }
-
-  // TP line + label (nếu có)
-  if(pendingEntry.tp_price != 0.0)
-  {
-    if(ObjectCreate(0, lineTP, OBJ_TREND, 0, left_time, pendingEntry.tp_price, right_time, pendingEntry.tp_price))
-    {
-      ObjectSetInteger(0, lineTP, OBJPROP_COLOR, clrLime);
-      ObjectSetInteger(0, lineTP, OBJPROP_WIDTH, 1);
-      ObjectSetInteger(0, lineTP, OBJPROP_STYLE, STYLE_DOT);
-      ObjectSetInteger(0, lineTP, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(0, lineTP, OBJPROP_BACK, true);
-      ObjectSetInteger(0, lineTP, OBJPROP_RAY_RIGHT, true);
-      ObjectSetInteger(0, lineTP, OBJPROP_RAY_LEFT, false);
-    }
-
-    double tpLabelPrice = (pendingEntry.tp_price + yoffset);
-    if(ObjectCreate(0, lblTP, OBJ_TEXT, 0, left_time, tpLabelPrice))
-    {
-      string txtTP = "TP " + DoubleToString(pendingEntry.tp_price, digs);
-      ObjectSetString(0, lblTP, OBJPROP_TEXT, txtTP);
-      ObjectSetInteger(0, lblTP, OBJPROP_FONTSIZE, SwingMarkerFontSize - 1);
-      ObjectSetInteger(0, lblTP, OBJPROP_COLOR, clrLime);
-      ObjectSetInteger(0, lblTP, OBJPROP_BACK, true);
-      ObjectSetInteger(0, lblTP, OBJPROP_SELECTABLE, false);
-    }
-  }
-  else
-  {
-    lineTP = ""; lblTP = "";
-  }
-
-  // Lưu compositeName theo thứ tự: entryLine|entryLbl|slLine|slLbl|tpLine|tpLbl
-  string comp = lineEntry + "|" + lblEntry + "|" + lineSL + "|" + lblSL + "|" + lineTP + "|" + lblTP;
-  pendingEntry.compositeName = comp;
-
-  if(PrintEntryLog)
-  {
-    PrintFormat("PendingEntry VISUAL DRAWN: created=%s dir=%d entry=%.5f sl=%.5f tp=%.5f composite=(%s)",
-                TimeToString(created, TIME_DATE|TIME_MINUTES),
-                pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price, pendingEntry.compositeName);
-  }
-}
-
 // CalculateLotSizeForRisk:
 // - symbol: symbol
 // - entryPrice, slPrice: điểm entry và sl (giá thực tế)
@@ -2147,10 +2009,7 @@ bool PlacePendingOrderFromPendingEntry()
     return false;
   }
 
-  // 1) Vẽ visuals trước (đảm bảo compositeName cập nhật)
-  // DrawPendingEntryVisuals(sym);
-
-  // 2) Chuẩn bị trade request
+  // Chuẩn bị trade request
   MqlTradeRequest request;
   MqlTradeResult  result;
   ZeroMemory(request);
@@ -2378,14 +2237,6 @@ void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
     PrintFormat("-> PendingEntry populated (OB method): dir=%d entry=%.10f sl=%.10f tp=%.10f lots=%.4f created=%s",
                 pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price,
                 pendingEntry.lotSize, TimeToString(pendingEntry.created_time, TIME_DATE|TIME_SECONDS));
-  }
-
-  if(PrintEntryLog)
-  {
-    if(StringLen(pendingEntry.compositeName) > 0)
-      PrintFormat("-> compositeName after draw: (%s)", pendingEntry.compositeName);
-    else
-      Print("-> Warning: compositeName empty after DrawPendingEntryVisuals");
   }
 
   if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS (NEW) END");
