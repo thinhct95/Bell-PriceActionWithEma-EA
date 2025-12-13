@@ -11,16 +11,16 @@
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
-// --- Cấu hình Risk:Reward ---
-input double RiskRewardRatio = 6.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
+input double RiskRewardRatio = 8.0;   // tỉ lệ R:R mặc định
+
+input double moveSLRange = 1;   // số R cần đạt để dời SL về entry (BE)
+input int MaxLimitOrderTime = 60;
 
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           ltfSwingRange = 5;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
-
-input int MaxLimitOrderTime = 60;
 
 // Struct pending entry (single slot)
 struct PendingEntry
@@ -2286,6 +2286,87 @@ void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
   if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS (NEW) END");
 }
 
+void MoveStoploss()
+{
+  string sym = Symbol();
+
+  // EA chỉ quản lý 1 position cho symbol hiện tại
+  if(!PositionSelect(sym))
+    return;
+
+  ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+  ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+  double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+  double sl    = PositionGetDouble(POSITION_SL);
+  double tp    = PositionGetDouble(POSITION_TP);
+
+  if(entry <= 0.0 || sl <= 0.0)
+    return;
+
+  // Nếu SL đã >= entry (BUY) hoặc <= entry (SELL) → đã BE rồi
+  if(type == POSITION_TYPE_BUY && sl >= entry)
+    return;
+  if(type == POSITION_TYPE_SELL && sl <= entry)
+    return;
+
+  double R = MathAbs(entry - sl);
+  if(R <= 0.0)
+    return;
+
+  double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+  double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+  bool shouldMove = false;
+
+  // ======= ĐIỀU KIỆN BE DỰA TRÊN moveSLRange =======
+  if(type == POSITION_TYPE_BUY)
+  {
+    if(bid >= entry + moveSLRange * R)
+      shouldMove = true;
+  }
+  else if(type == POSITION_TYPE_SELL)
+  {
+    if(ask <= entry - moveSLRange * R)
+      shouldMove = true;
+  }
+
+  if(!shouldMove)
+    return;
+
+  // ---- MODIFY POSITION SL -> ENTRY ----
+  MqlTradeRequest req;
+  MqlTradeResult  res;
+  ZeroMemory(req);
+  ZeroMemory(res);
+
+  req.action   = TRADE_ACTION_SLTP;
+  req.position = ticket;
+  req.symbol   = sym;
+  req.sl       = NormalizeDouble(entry, (int)SymbolInfoInteger(sym, SYMBOL_DIGITS));
+  req.tp       = tp; // giữ nguyên TP
+
+  if(!OrderSend(req, res))
+  {
+    if(PrintEntryLog)
+      PrintFormat("MoveStoploss: OrderSend failed ticket=%I64u", ticket);
+    return;
+  }
+
+  if(res.retcode == TRADE_RETCODE_DONE)
+  {
+    if(PrintEntryLog)
+      PrintFormat("MoveStoploss: SL moved to BE at %.5f (%.2fR), ticket=%I64u",
+                  entry, moveSLRange, ticket);
+  }
+  else
+  {
+    if(PrintEntryLog)
+      PrintFormat("MoveStoploss: failed retcode=%d ticket=%I64u",
+                  res.retcode, ticket);
+  }
+}
+
 void CancelExpiredLimitOrder()
 {
   if(!pendingEntry.active) return;
@@ -2354,6 +2435,7 @@ void OnTick()
   string sym = Symbol();
 
   CancelExpiredLimitOrder();
+  MoveStoploss();   // ⭐ quản lý vốn
 
   if(IsNewClosedBar(sym, HighTF, 0)) {
     HandleLogicForTimeframe(sym, HighTF, 0, DetectMSS_HTF, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
