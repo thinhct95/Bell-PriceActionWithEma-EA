@@ -12,7 +12,15 @@ bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entr
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
 // --- Cấu hình Risk:Reward ---
-input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
+input double RiskRewardRatio = 6.0;   // tỉ lệ R:R mặc định (TP = entry ± RiskRewardRatio * |entry - SL|)
+
+// Cấu hình Swing
+input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 5;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
+
+input int MaxLimitOrderTime = 60;
 
 // Struct pending entry (single slot)
 struct PendingEntry
@@ -47,12 +55,6 @@ double   MTF_FVG_TouchPrice[];    // giá chạm đại diện (low khi bullish,
 input bool DetectMSS_HTF = false;
 input bool DetectMSS_MTF = false;
 input bool DetectMSS_LTF = true;
-
-// Cấu hình Swing
-input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 5;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Cấu hình vẽ Swing trên chart
 input bool   ShowSwingMarkers = true;      // Hiển thị các marker swing trên chart
@@ -2284,9 +2286,74 @@ void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
   if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS (NEW) END");
 }
 
+void CancelExpiredLimitOrder()
+{
+  if(!pendingEntry.active) return;
+  if(pendingEntry.orderTicket == 0) return;
+  if(pendingEntry.created_time == 0) return;
+
+  ulong ticket = pendingEntry.orderTicket;
+
+  // Nếu order không còn tồn tại → đã khớp hoặc bị xóa
+  if(!OrderSelect(ticket))
+  {
+    if(PrintEntryLog)
+      Print("Pending LIMIT no longer exists → cleared");
+
+    ClearPendingEntry();
+    return;
+  }
+
+  ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+
+  // Chỉ xử lý LIMIT
+  if(type != ORDER_TYPE_BUY_LIMIT && type != ORDER_TYPE_SELL_LIMIT)
+    return;
+
+  datetime now = TimeCurrent();
+  int aliveSec = (int)(now - pendingEntry.created_time);
+  int maxSec   = MaxLimitOrderTime * 60;
+
+  if(aliveSec < maxSec)
+    return; // chưa quá hạn
+
+  // ---- HỦY LỆNH LIMIT ----
+  MqlTradeRequest req;
+  MqlTradeResult  res;
+  ZeroMemory(req);
+  ZeroMemory(res);
+
+  req.action = TRADE_ACTION_REMOVE;
+  req.order  = ticket;
+
+  if(!OrderSend(req, res))
+  {
+    if(PrintEntryLog)
+      PrintFormat("Cancel LIMIT failed (OrderSend=false), ticket=%I64u", ticket);
+    return;
+  }
+
+  if(res.retcode == TRADE_RETCODE_DONE)
+  {
+    if(PrintEntryLog)
+      PrintFormat("LIMIT cancelled after %d minutes, ticket=%I64u",
+                  MaxLimitOrderTime, ticket);
+
+    ClearPendingEntry();
+  }
+  else
+  {
+    if(PrintEntryLog)
+      PrintFormat("Cancel LIMIT failed retcode=%d ticket=%I64u",
+                  res.retcode, ticket);
+  }
+}
+
 void OnTick()
 {
   string sym = Symbol();
+
+  CancelExpiredLimitOrder();
 
   if(IsNewClosedBar(sym, HighTF, 0)) {
     HandleLogicForTimeframe(sym, HighTF, 0, DetectMSS_HTF, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
