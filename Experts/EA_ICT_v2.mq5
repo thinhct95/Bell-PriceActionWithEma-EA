@@ -114,23 +114,21 @@ datetime lastClosedBarTime[3] = {0,0,0};
 // cache last FVG compute time (bar C or bar index 1 time used to detect change)
 datetime lastFVGBarTime = 0;
 
-// struct dùng để trả thông tin khi phát hiện MSS
-struct MSSInfo {
-  bool  found;                 // true nếu tìm thấy MSS
-  int   direction;             //  1 = down->up (bull MSS), -1 = up->down (bear MSS)
-  datetime sweep_time;         // thời điểm bar "sweep" (bar quét thanh khoản)
-  double sweep_price;          // giá swing gốc bị phá
-  // --- thêm: swing gốc đã bị swept (time/price) ---
-  datetime swept_swing_time;   // time của swing bar trước khi bị sweep (ví dụ l0/h0 tại thời điểm detect)
-  double   swept_swing_price;  // giá swing gốc
+struct MSS {
+  bool  found;
+  int   direction; //  1 = bearish → bullish | -1 = bullish → bearish
 
-  double key_level;            // mức key level (swing cần phá)
-  datetime break_time;         // thời điểm bar phá key level (thỏa điều kiện break)
-  double   break_price;        // **giá đóng của bar breaker** (mới thêm)
+  datetime sweep_time;            // time của nến quét liquidity
+  double   sweep_extreme_price;   // GIÁ QUÉT THỰC TẾ
 
-  // --- thêm: swing gốc bị broken (time/price) ---
-  datetime broken_swing_time;  // time của swing bar bị phá (ví dụ sh0/sl0 tại thời điểm detect)
-  double   low_sweap_price; // giá đóng nến của bos
+  datetime swept_swing_time;      // time của swing bị quét
+  double   swept_swing_price;     // GIÁ swing bị quét (liquidity pool)
+
+  datetime break_time;            // time nến BOS
+  double   bos_close_price;       // GIÁ ĐÓNG nến BOS
+
+  datetime broken_swing_time;     // time swing bị phá
+  double   broken_swing_price;    // GIÁ swing bị phá (key level)
 };
 
 // Kết quả BOS
@@ -1172,103 +1170,84 @@ datetime FindTouchTime(string symbol, ENUM_TIMEFRAMES timeframe,
    return TimeCurrent();
 }
 
-void DrawMss(string symbol, ENUM_TIMEFRAMES tf, const MSSInfo &mss, int slot)
+void DrawMss(string symbol, ENUM_TIMEFRAMES tf, const MSS &mss, int slot)
 {
-    if(!ShowSwingMarkers || !mss.found)
-        return;
+  if(!ShowSwingMarkers || !mss.found)
+    return;
 
-    string basePrefix = SwingObjPrefix + "MSS_" + IntegerToString(slot) + "_";
+  string basePrefix = SwingObjPrefix + "MSS_" + IntegerToString(slot) + "_";
 
-    int total = ObjectsTotal(0);
-    for(int i = total - 1; i >= 0; i--)
+  // ===== clear old MSS objects for this slot =====
+  int total = ObjectsTotal(0);
+  for(int i = total - 1; i >= 0; i--)
+  {
+    string nm = ObjectName(0, i);
+    if(StringFind(nm, basePrefix, 0) == 0)
+      ObjectDelete(0, nm);
+  }
+
+  int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  datetime bar_secs = (datetime)PeriodSeconds(tf);
+
+  // =================================================
+  // 1️⃣ DRAW SWEEP LABEL (wick)
+  // =================================================
+  if(mss.sweep_time != 0 && mss.sweep_extreme_price != 0.0)
+  {
+    string nmSweep = basePrefix + "SWEEP_" + IntegerToString((int)mss.sweep_time);
+
+    if(ObjectCreate(0, nmSweep, OBJ_TEXT, 0,
+                    mss.sweep_time, mss.sweep_extreme_price))
     {
-        string nm = ObjectName(0, i);
-        if(StringFind(nm, basePrefix, 0) == 0)
-            ObjectDelete(0, nm);
+      ObjectSetString(0, nmSweep, OBJPROP_TEXT, "SWEEP");
+      ObjectSetInteger(0, nmSweep, OBJPROP_COLOR, clrMagenta);
+      ObjectSetInteger(0, nmSweep, OBJPROP_FONTSIZE, SwingMarkerFontSize + 2);
+      ObjectSetInteger(0, nmSweep, OBJPROP_BACK, true);
+      ObjectSetInteger(0, nmSweep, OBJPROP_SELECTABLE, false);
     }
+  }
 
-    datetime bar_secs = (datetime)PeriodSeconds(tf);
+  // =================================================
+  // 2️⃣ DRAW MSS LABEL (BOS close)
+  // =================================================
+  if(mss.break_time != 0 && mss.bos_close_price != 0.0)
+  {
+    string nmMSS = basePrefix + "MSS_" + IntegerToString((int)mss.break_time);
 
-    if(mss.sweep_time != 0 && mss.sweep_price != 0.0)
+    if(ObjectCreate(0, nmMSS, OBJ_TEXT, 0,
+                    mss.break_time, mss.bos_close_price))
     {
-        string lblSweep = basePrefix + "SWEEP";
-        datetime t_sweep = mss.sweep_time;
-
-        if(ObjectCreate(0, lblSweep, OBJ_TEXT, 0, t_sweep, mss.sweep_price))
-        {
-            ObjectSetString(0,  lblSweep, OBJPROP_TEXT, "SWEEP");
-            ObjectSetInteger(0, lblSweep, OBJPROP_COLOR, clrMagenta);
-            ObjectSetInteger(0, lblSweep, OBJPROP_FONTSIZE, SwingMarkerFontSize + 2);
-            ObjectSetInteger(0, lblSweep, OBJPROP_BACK, true);
-            ObjectSetInteger(0, lblSweep, OBJPROP_SELECTABLE, false);
-        }
+      ObjectSetString(0, nmMSS, OBJPROP_TEXT, "MSS");
+      ObjectSetInteger(0, nmMSS, OBJPROP_COLOR, clrOrange);
+      ObjectSetInteger(0, nmMSS, OBJPROP_FONTSIZE, SwingMarkerFontSize + 2);
+      ObjectSetInteger(0, nmMSS, OBJPROP_BACK, true);
+      ObjectSetInteger(0, nmMSS, OBJPROP_SELECTABLE, false);
     }
+  }
 
-    if(mss.break_time != 0 && mss.break_price != 0.0)
+  // =================================================
+  // 3️⃣ DRAW LIQUIDITY SWEEP GUIDE LINE
+  // =================================================
+  if(mss.swept_swing_time != 0 &&
+     mss.swept_swing_price != 0.0 &&
+     mss.sweep_time > mss.swept_swing_time)
+  {
+    string nmGuide = basePrefix + "GUIDE_" + IntegerToString((int)mss.sweep_time);
+
+    if(ObjectCreate(0, nmGuide, OBJ_TREND, 0,
+                    mss.swept_swing_time,
+                    mss.swept_swing_price,
+                    mss.sweep_time,
+                    mss.swept_swing_price))
     {
-        string lblMss = basePrefix + "MSS";
-        datetime t_mss = mss.break_time;
-
-        if(ObjectCreate(0, lblMss, OBJ_TEXT, 0, t_mss, mss.break_price))
-        {
-            ObjectSetString(0, lblMss, OBJPROP_TEXT, "MSS");
-            ObjectSetInteger(0, lblMss, OBJPROP_COLOR, clrOrange);
-            ObjectSetInteger(0, lblMss, OBJPROP_FONTSIZE, SwingMarkerFontSize + 2);
-            ObjectSetInteger(0, lblMss, OBJPROP_BACK, true);
-            ObjectSetInteger(0, lblMss, OBJPROP_SELECTABLE, false);
-        }
+      ObjectSetInteger(0, nmGuide, OBJPROP_COLOR, clrMagenta);
+      ObjectSetInteger(0, nmGuide, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, nmGuide, OBJPROP_STYLE, STYLE_DOT);
+      ObjectSetInteger(0, nmGuide, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmGuide, OBJPROP_BACK, true);
+      ObjectSetInteger(0, nmGuide, OBJPROP_SELECTABLE, false);
     }
-
-    datetime t_swing = mss.swept_swing_time;
-    double   p_swing = mss.swept_swing_price;
-
-    if(t_swing == 0 || p_swing == 0.0)
-    {
-        if(mss.broken_swing_time != 0 && mss.low_sweap_price != 0.0)
-        {
-            t_swing = mss.broken_swing_time;
-            p_swing = mss.low_sweap_price;
-        }
-        else if(mss.sweep_time != 0 && mss.sweep_price != 0.0)
-        {
-            t_swing = mss.sweep_time - bar_secs;
-            p_swing = mss.sweep_price;
-        }
-    }
-
-    if(t_swing != 0 && p_swing != 0.0 && mss.sweep_time != 0)
-    {
-        string lineName = basePrefix + "GUIDE_" + IntegerToString((int)mss.sweep_time);
-
-        if(!ObjectCreate(0, lineName, OBJ_TREND, 0, t_swing, p_swing, mss.sweep_time, p_swing))
-        {
-            // silent
-        }
-        else
-        {
-            ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrMagenta);
-            ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 2);
-            ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
-            ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false);
-            ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
-            ObjectSetInteger(0, lineName, OBJPROP_BACK, true);
-        }
-
-        string valLabel = basePrefix + "GUIDE_VAL_" + IntegerToString((int)mss.sweep_time);
-        if(!ObjectCreate(0, valLabel, OBJ_TEXT, 0, mss.sweep_time, p_swing))
-        {
-            // ignore
-        }
-        else
-        {
-            string txt = DoubleToString(p_swing, (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS));
-            ObjectSetString(0, valLabel, OBJPROP_TEXT, txt);
-            ObjectSetInteger(0, valLabel, OBJPROP_COLOR, clrMagenta);
-            ObjectSetInteger(0, valLabel, OBJPROP_FONTSIZE, SwingMarkerFontSize - 1);
-            ObjectSetInteger(0, valLabel, OBJPROP_BACK, true);
-            ObjectSetInteger(0, valLabel, OBJPROP_SELECTABLE, false);
-        }
-    }
+  }
 }
 
 // Hàm tiện ích chuyển giá trị xu hướng thành chuỗi
@@ -1644,133 +1623,165 @@ void DrawInternalFVGMatches(string sym, ENUM_TIMEFRAMES tf, datetime sweep_time,
   }
 }
 
-void DetectMSSOnTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool enabled,
-                       bool requireFVG,
-                       double minBreakPips,
-                       int consecRequired,
-                       int lookForwardBars,
-                       int fvgLookback)
-{
-    if(!enabled) return;
-    if(BOS_Count[slot] < 2) return;
+void DetectMSSOnTimeframe(
+    string sym,
+    ENUM_TIMEFRAMES tf,
+    int slot,
+    bool enabled,
+    bool requireFVG,
+    double minBreakPips,
+    int consecRequired,
+    int lookForwardBars,
+    int fvgLookback
+) {
+  if(!enabled) return;
+  if(BOS_Count[slot] < 2) return;
 
-    BOSInfo a = BOSStore[slot][0];
-    BOSInfo b = BOSStore[slot][1];
-    BOSInfo older = a, newer = b;
-    if(a.break_time == 0 || b.break_time == 0)
-    {
-      older = BOSStore[slot][1];
-      newer = BOSStore[slot][0];
-    }
-    else
-    {
-      if(a.break_time <= b.break_time) { older = a; newer = b; }
-      else { older = b; newer = a; }
-    }
+  // ===============================
+  // 1️⃣ LẤY 2 BOS GẦN NHẤT & SẮP THỨ TỰ THỜI GIAN
+  // ===============================
+  BOSInfo b0 = BOSStore[slot][0];
+  BOSInfo b1 = BOSStore[slot][1];
 
-    if(!older.found || !newer.found) return;
-    if(older.direction == newer.direction) return;
+  BOSInfo olderBOS, newerBOS;
+  if(b0.break_time < b1.break_time)
+  {
+      olderBOS = b0;
+      newerBOS = b1;
+  }
+  else
+  {
+      olderBOS = b1;
+      newerBOS = b0;
+  }
 
-    // Lấy sweep/break price sớm (phải có trước khi dùng pmin/pmax)
-    double sweep_price = older.broken_sw_price;
-    double break_price = newer.broken_sw_price;
+  if(!olderBOS.found || !newerBOS.found) return;
+  if(olderBOS.direction == newerBOS.direction) return;
 
-    if(requireFVG)
-    {
-      // nếu TF là MiddleTF thì đảm bảo danh sách MTF FVG mới nhất
-      if(tf == MiddleTF) EnsureFVGUpToDate(sym, tf, fvgLookback);
+  datetime sweep_time = olderBOS.break_time;
+  datetime break_time = newerBOS.break_time;
+  if(sweep_time == 0 || break_time == 0 || break_time <= sweep_time)
+      return;
 
-      datetime sweep_time = older.break_time;
-      datetime break_time = newer.break_time;
+  // ===============================
+  // 2️⃣ XÁC ĐỊNH GIÁ QUÉT THỰC (WICK)
+  // ===============================
+  int sweepIdx = iBarShift(sym, tf, sweep_time, false);
+  if(sweepIdx < 0) return;
 
-      if(sweep_time == 0 || break_time == 0 || break_time <= sweep_time)
-      {
+  double sweepExtreme = 0.0;
+  if(newerBOS.direction == 1)
+      sweepExtreme = iLow(sym, tf, sweepIdx);   // bullish MSS → quét LOW
+  else
+      sweepExtreme = iHigh(sym, tf, sweepIdx);  // bearish MSS → quét HIGH
+
+  if(sweepExtreme == 0.0) return;
+
+  // ===============================
+  // 3️⃣ SWING BỊ QUÉT & SWING BỊ PHÁ
+  // ===============================
+  double sweptSwingPrice   = olderBOS.broken_sw_price;
+  datetime sweptSwingTime  = olderBOS.broken_sw_time;
+
+  double brokenSwingPrice  = newerBOS.broken_sw_price;
+  datetime brokenSwingTime = newerBOS.broken_sw_time;
+  if(sweptSwingPrice == 0.0 || brokenSwingPrice == 0.0)
+      return;
+
+  // ===============================
+  // 4️⃣ KIỂM TRA MSS HỢP LỆ (ICT CORE)
+  // ===============================
+  double tol = GetPipSize(sym) * 0.1;
+
+  if(newerBOS.direction == 1)
+  {
+      // Bullish MSS:
+      // - Wick quét sâu hơn swing low
+      // - Sau đó phá swing high
+      if(sweepExtreme >= sweptSwingPrice - tol)
           return;
-      }
+  }
+  else
+  {
+      // Bearish MSS
+      if(sweepExtreme <= sweptSwingPrice + tol)
+          return;
+  }
 
-      // price window: cần sweep_price/break_price phải đã có
-      if(sweep_price == 0.0 || break_price == 0.0) return;
-      double pmin = MathMin(sweep_price, break_price);
-      double pmax = MathMax(sweep_price, break_price);
+  // ===============================
+  // 5️⃣ REQUIRE FVG (GIỮ LOGIC CŨ)
+  // ===============================
+  if(requireFVG)
+  {
+    if(tf == MiddleTF)
+      EnsureFVGUpToDate(sym, tf, fvgLookback);
 
-      // Kiểm tra tồn tại FVG trên MTF (giữ logic cũ)
-      bool ok = false;
-      if(newer.direction == 1)
-          ok = HasBullFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
-      else
-          ok = HasBearFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
-
-      if(!ok)
-      {
-        // nếu requireFVG yêu cầu MTF FVG bắt buộc thì abort
-        return;
-      }
-
-      // --- VẼ các internal FVG trên LTF nằm giữa sweep_time & break_time ---
-      DrawInternalFVGMatches(sym, LowTF, sweep_time, break_time, pmin, pmax, FVGLookback);
-    }
-
-    // tiếp tục các kiểm tra MSS như trước
-    double pip = GetPipSize(sym);
-    double tol = pip * 0.1;
-    double low_sweap_price = sweep_price;
-
-    if(sweep_price == 0.0 || break_price == 0.0) return;
-
-    if(newer.direction == 1)
-    {
-      if(!(sweep_price + tol < break_price)) return;
-    }
+    bool hasFVG = false;
+    if(newerBOS.direction == 1)
+      hasFVG = HasBullFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
     else
+      hasFVG = HasBearFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
+
+    if(!hasFVG)
+      return;
+  }
+
+  // ===============================
+  // 6️⃣ TẠO MSS (STRUCT MỚI – CLEAN)
+  // ===============================
+  MSS mss;
+  mss.found = true;
+  mss.direction = newerBOS.direction;
+
+  mss.sweep_time = sweep_time;
+  mss.sweep_extreme_price = sweepExtreme;
+
+  mss.swept_swing_time  = sweptSwingTime;
+  mss.swept_swing_price = sweptSwingPrice;
+
+  mss.break_time = break_time;
+  mss.bos_close_price = newerBOS.break_price;
+
+  mss.broken_swing_time  = brokenSwingTime;
+  mss.broken_swing_price = brokenSwingPrice;
+
+  // ===============================
+  // 7️⃣ WATCHING MODE → ENTRY CHECK
+  // ===============================
+  if(watchingMSSMode && watchingFVGIndex >= 0)
+  {
+    if(mss.direction == watchingFVGDir)
     {
-      if(!(sweep_price - tol > break_price)) return;
-    }
+      bool valid = CheckValidEntry(
+        mss.direction,
+        TrendTF[0],   // HTF
+        TrendTF[1],   // MTF
+        watchingFVGIndex
+      );
 
-    MSSInfo mss;
-    mss.found = true;
-    mss.direction = newer.direction;
-    mss.sweep_time = older.break_time;
-    mss.sweep_price = sweep_price;
-    mss.break_time = newer.break_time;
-    mss.break_price = break_price;
-    mss.swept_swing_time = older.broken_sw_time;
-    mss.swept_swing_price = older.broken_sw_price;
-    mss.broken_swing_time = newer.broken_sw_time;
-    mss.low_sweap_price = low_sweap_price;
-    mss.key_level = newer.broken_sw_price;
-
-    // Nếu đang watch và MSS direction trùng với FVG direction -> xử lý pending
-    if(watchingMSSMode && watchingFVGIndex >= 0) {
-      if(mss.found && mss.direction == watchingFVGDir)
+      if(valid)
       {
-        bool valid = CheckValidEntry(
-          mss.direction,
-          TrendTF[0],               // HTF trend
-          TrendTF[1],               // MTF trend
-          watchingFVGIndex
-        );
+        if(PrintEntryLog)
+          Print(">>> ENTRY CONDITIONS PASSED → SETUP ENTRY");
 
-        if(valid)
-        {
-          if(PrintEntryLog)
-            Print(">>> ENTRY CONDITIONS PASSED → Create Pending");
+        watchingMSSMode = false;
+        watchingFVGIndex = -1;
+        watchingFVGDir = 0;
 
-          watchingMSSMode = false;
-          watchingFVGIndex = -1;
-          watchingFVGDir = 0;
-
-          SetUpPendingEntryForMSS(mss, slot);
-        }
-        else
-        {
-          if(PrintEntryLog)
-            Print(">>> ENTRY BLOCKED by CheckValidEntry()");
-        }
+        SetUpPendingEntryForMSS(mss, slot);
+      }
+      else
+      {
+        if(PrintEntryLog)
+          Print(">>> ENTRY BLOCKED by CheckValidEntry()");
       }
     }
+  }
 
-
-    DrawMss(sym, tf, mss, slot);
+  // ===============================
+  // 8️⃣ VẼ MSS
+  // ===============================
+  DrawMss(sym, tf, mss, slot);
 }
 
 bool CheckValidEntry(
@@ -2077,7 +2088,7 @@ bool PlacePendingOrderFromPendingEntry()
 }
 
 // SetUpPendingEntryForMSS: new implementation using OrderBlock (last opposite-color candle before break)
-// - mss: MSSInfo found
+// - mss: MSS found
 // - slot: slot where MSS detected
 // Logic:
 // 1) Find OrderBlock (OB) = first opposite-color candle when scanning backward from mss.break_time (exclusive).
@@ -2088,13 +2099,13 @@ bool PlacePendingOrderFromPendingEntry()
 // 4) TP computed using RiskRewardRatio as before (TP = entry ± R:R*|entry-sl|)
 // 5) Calculate lotsize such that risk = 1% equity (use CalculateLotSizeForRisk)
 // 6) Store into pendingEntry and draw visuals
-void SetUpPendingEntryForMSS(const MSSInfo &mss, int slot)
+void SetUpPendingEntryForMSS(const MSS &mss, int slot)
 {
   string sym = Symbol();
 
   if(PrintEntryLog)
     PrintFormat("==> SetUpPendingEntryForMSS (NEW) START: mss.found=%d dir=%d sweep_time=%d sweep_price=%.10f break_time=%d break_price=%.10f",
-                mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_price, (int)mss.break_time, mss.break_price);
+                mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_extreme_price, (int)mss.break_time, mss.bos_close_price);
 
   if(!mss.found)
   {
