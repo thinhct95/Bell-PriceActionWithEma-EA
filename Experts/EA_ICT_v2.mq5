@@ -14,15 +14,15 @@ input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
 input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định
 
 input double moveSLRange = 1;   // Nomal moving SL: số R cần đạt để dời SL về entry (BE)
-input int MaxLimitOrderTime = 120;
+input int MaxLimitOrderTime = 180;
 
 input double moveSLStartR = 3;   // Advanced moving SL: bắt đầu kích hoạt trailing
 input double trailOffsetR = 3;   // Advanced moving SL: khoảng cách SL so với giá hiện tại
 
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 4;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Struct pending entry (single slot)
@@ -53,11 +53,6 @@ int  watchingFVGDir = 0;         // 1 = bullish FVG, -1 = bearish FVG
 bool     MTF_FVG_Touched[];        // true = MTF FVG k đã bị LTF chạm
 datetime MTF_FVG_TouchTime[];     // thời điểm bar LTF đầu tiên chạm zone (datetime)
 double   MTF_FVG_TouchPrice[];    // giá chạm đại diện (low khi bullish, high khi bearish)
-
-// Bật/tắt MSS detection cho từng TF
-input bool DetectMSS_HTF = false;
-input bool DetectMSS_MTF = false;
-input bool DetectMSS_LTF = true;
 
 // Cấu hình vẽ Swing trên chart
 input bool   ShowSwingMarkers = true;      // Hiển thị các marker swing trên chart
@@ -100,12 +95,13 @@ struct FVG
   datetime timebarA;       // time of bar A (older)
   datetime timebarC;       // time of bar C (newer)
   bool     touched;     // whether LTF touched this MTF FVG yet (first-touch)
+  bool     used;        // whether this FVG has been used for entry already
   datetime touchTime;   // time of first touch (on LowTF)
   double   touchPrice;  // representative touch price (edge)
 };
 
-FVG FVGs[];
-int   FVG_count = 0;  // number of FVGs found (kept for compatibility)
+FVG MTF_FVGs[];
+int MTF_FVG_count = 0;  // number of FVGs found (kept for compatibility)
 
 
 // last closed bar time per slot (index 0=HighTF,1=MiddleTF,2=LowTF)
@@ -159,23 +155,23 @@ bool    BOS_HaveZone[3][2];  // flag có zone hay không
 
 void UpdateMTFFVGTouched(string symbol)
 {
-  if(FVG_count <= 0) return;
+  if(MTF_FVG_count <= 0) return;
 
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
   double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
   // scan each stored FVG
-  for(int fvgIndex = 0; fvgIndex < FVG_count; fvgIndex++)
+  for(int fvgIndex = 0; fvgIndex < MTF_FVG_count; fvgIndex++)
   {
     // nếu đã touched trước đó -> bỏ qua luôn (không in gì cả)
-    if(FVGs[fvgIndex].touched) continue;
+    if(MTF_FVGs[fvgIndex].touched) continue;
 
-    datetime mtfC = FVGs[fvgIndex].timebarC;
+    datetime mtfC = MTF_FVGs[fvgIndex].timebarC;
     if(mtfC == 0) continue;
 
-    double top = FVGs[fvgIndex].topPrice;
-    double bottom = FVGs[fvgIndex].bottomPrice;
-    int dir = FVGs[fvgIndex].type; // 1=bull, -1=bear
+    double top = MTF_FVGs[fvgIndex].topPrice;
+    double bottom = MTF_FVGs[fvgIndex].bottomPrice;
+    int dir = MTF_FVGs[fvgIndex].type; // 1=bull, -1=bear
 
     // find index of mtfC on LowTF
     int idxC_on_LTF = iBarShift(symbol, LowTF, mtfC, false);
@@ -218,16 +214,14 @@ void UpdateMTFFVGTouched(string symbol)
     if(touchedNow)
     {
       // chỉ set + print khi trước đó chưa touched (điều kiện đã đảm bảo vì ta continue ở trên nếu touched==true)
-      FVGs[fvgIndex].touched = true;
-      FVGs[fvgIndex].touchTime = touch_time;
-      FVGs[fvgIndex].touchPrice = touch_price;
+      MTF_FVGs[fvgIndex].touched = true;
+      MTF_FVGs[fvgIndex].touchTime = touch_time;
+      MTF_FVGs[fvgIndex].touchPrice = touch_price;
 
       // enable watchingMSSMode when any MTF FVG is first touched
-      if(!watchingMSSMode)
+      if(!watchingMSSMode && !MTF_FVGs[fvgIndex].used)
       {
-        watchingMSSMode = true;
-        watchingFVGIndex = fvgIndex;
-        watchingFVGDir   = dir;
+        ToggleWatchingMSSMode(true, fvgIndex, dir);
         if(PrintEntryLog)
           PrintFormat("watchingMSSMode ENABLED for FVG idx=%d dir=%d", watchingFVGIndex, watchingFVGDir);
       }
@@ -235,12 +229,19 @@ void UpdateMTFFVGTouched(string symbol)
   }
 }
 
+void ToggleWatchingMSSMode(bool enable, int fvgIndex = -1, int fvgDir = 0)
+{
+  watchingMSSMode = enable;
+  watchingFVGIndex = fvgIndex;
+  watchingFVGDir = fvgDir;
+}
+
 // Kiểm tra điều kiện vô hiệu hoá watchingMSSMode:
 // 1) last closed candle trên LowTF đóng dưới cạnh dưới của bullish FVG
 // 2) last closed candle trên LowTF đóng trên cạnh trên của bearish FVG
 void CheckWatchMSSInvalidation(string symbol)
 {
-  if(!watchingMSSMode || watchingFVGIndex < 0 || watchingFVGIndex >= FVG_count) return;
+  if(!watchingMSSMode || watchingFVGIndex < 0 || watchingFVGIndex >= MTF_FVG_count) return;
 
   // Lấy last closed close trên LowTF (index 1)
   double lastClose = iClose(symbol, LowTF, 1);
@@ -253,10 +254,10 @@ void CheckWatchMSSInvalidation(string symbol)
   int dir = watchingFVGDir;
 
   // bảo đảm FVG arrays còn hợp lệ
-  if(idx < 0 || idx >= FVG_count) return;
+  if(idx < 0 || idx >= MTF_FVG_count) return;
 
-  double top = FVGs[idx].topPrice;
-  double bottom = FVGs[idx].bottomPrice;
+  double top = MTF_FVGs[idx].topPrice;
+  double bottom = MTF_FVGs[idx].bottomPrice;
 
   // Nếu bullish FVG (dir == 1): invalid khi đóng dưới bottom
   if(dir == 1)
@@ -264,10 +265,7 @@ void CheckWatchMSSInvalidation(string symbol)
     if(lastClose < bottom - tol)
     {
       if(PrintEntryLog) PrintFormat("watchingMSSMode DISABLED: bullish FVG idx=%d invalidated by close=%.5f < bottom=%.5f", idx, lastClose, bottom);
-      // clear
-      watchingMSSMode = false;
-      watchingFVGIndex = -1;
-      watchingFVGDir = 0;
+      ToggleWatchingMSSMode(false);
     }
   }
   else if(dir == -1) // bearish: invalid khi đóng trên top
@@ -276,9 +274,7 @@ void CheckWatchMSSInvalidation(string symbol)
     {
       if(PrintEntryLog) PrintFormat("watchingMSSMode DISABLED: bearish FVG idx=%d invalidated by close=%.5f > top=%.5f", idx, lastClose, top);
       // clear
-      watchingMSSMode = false;
-      watchingFVGIndex = -1;
-      watchingFVGDir = 0;
+      ToggleWatchingMSSMode(false);
     }
   }
 }
@@ -330,7 +326,7 @@ void StoreNewBOS(int slot, const BOSInfo &bos)
   }
 
   // Vẽ lại tất cả BOS cho slot (DrawAllBOSForSlot sẽ tạo lại objects và ghi BOS_Names)
-  DrawAllBOSForSlot(slot);
+  // DrawAllBOSForSlot(slot);
 }
 
 // Vẽ tất cả BOS đã lưu cho 1 slot (0=HTF,1=MTF,2=LTF)
@@ -1294,6 +1290,14 @@ void UpdateTrendForSlot(int slot, ENUM_TIMEFRAMES timeframe, string symbol)
 {
   int oldTrend = TrendTF[slot];
 
+  // ===== LTF: KHÔNG TỰ TÍNH TREND =====
+  if(slot == 2)
+  {
+    // mirror MTF hoặc bỏ luôn
+    TrendTF[slot] = TrendTF[1];
+    return;
+  }
+
   double pip = GetPipSize(symbol);
   double provisionalThresh = (double)ProvisionalBreakPips * pip;
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
@@ -1362,8 +1366,8 @@ void UpdateTrendForSlot(int slot, ENUM_TIMEFRAMES timeframe, string symbol)
 int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
 {
   // clear old array
-  ArrayFree(FVGs);
-  FVG_count = 0;
+  ArrayFree(MTF_FVGs);
+  MTF_FVG_count = 0;
 
   int total = iBars(symbol, timeframe);
   if(total < 5) return 0;
@@ -1394,22 +1398,23 @@ int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
       double top = lowC;
       double bottom = highA;
       bool dup = false;
-      for(int k = 0; k < FVG_count; k++)
+      for(int k = 0; k < MTF_FVG_count; k++)
       {
-        if(MathAbs(FVGs[k].topPrice - top) <= tol && MathAbs(FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
+        if(MathAbs(MTF_FVGs[k].topPrice - top) <= tol && MathAbs(MTF_FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
       }
       if(!dup)
       {
-        ArrayResize(FVGs, FVG_count+1);
-        FVGs[FVG_count].type      = 1;
-        FVGs[FVG_count].topPrice       = top;
-        FVGs[FVG_count].bottomPrice    = bottom;
-        FVGs[FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
-        FVGs[FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
-        FVGs[FVG_count].touched   = false;
-        FVGs[FVG_count].touchTime = 0;
-        FVGs[FVG_count].touchPrice= 0.0;
-        FVG_count++;
+        ArrayResize(MTF_FVGs, MTF_FVG_count+1);
+        MTF_FVGs[MTF_FVG_count].type      = 1;
+        MTF_FVGs[MTF_FVG_count].topPrice       = top;
+        MTF_FVGs[MTF_FVG_count].bottomPrice    = bottom;
+        MTF_FVGs[MTF_FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
+        MTF_FVGs[MTF_FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
+        MTF_FVGs[MTF_FVG_count].touched   = false;
+        MTF_FVGs[MTF_FVG_count].used      = false;
+        MTF_FVGs[MTF_FVG_count].touchTime = 0;
+        MTF_FVGs[MTF_FVG_count].touchPrice= 0.0;
+        MTF_FVG_count++;
       }
       continue;
     }
@@ -1420,27 +1425,27 @@ int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
       double top = lowA;
       double bottom = highC;
       bool dup = false;
-      for(int k = 0; k < FVG_count; k++)
+      for(int k = 0; k < MTF_FVG_count; k++)
       {
-        if(MathAbs(FVGs[k].topPrice - top) <= tol && MathAbs(FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
+        if(MathAbs(MTF_FVGs[k].topPrice - top) <= tol && MathAbs(MTF_FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
       }
       if(!dup)
       {
-        ArrayResize(FVGs, FVG_count+1);
-        FVGs[FVG_count].type      = -1;
-        FVGs[FVG_count].topPrice       = top;
-        FVGs[FVG_count].bottomPrice    = bottom;
-        FVGs[FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
-        FVGs[FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
-        FVGs[FVG_count].touched   = false;
-        FVGs[FVG_count].touchTime = 0;
-        FVGs[FVG_count].touchPrice= 0.0;
-        FVG_count++;
+        ArrayResize(MTF_FVGs, MTF_FVG_count+1);
+        MTF_FVGs[MTF_FVG_count].type      = -1;
+        MTF_FVGs[MTF_FVG_count].topPrice       = top;
+        MTF_FVGs[MTF_FVG_count].bottomPrice    = bottom;
+        MTF_FVGs[MTF_FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
+        MTF_FVGs[MTF_FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
+        MTF_FVGs[MTF_FVG_count].touched   = false;
+        MTF_FVGs[MTF_FVG_count].touchTime = 0;
+        MTF_FVGs[MTF_FVG_count].touchPrice= 0.0;
+        MTF_FVG_count++;
       }
     }
   }
 
-  return FVG_count;
+  return MTF_FVG_count;
 }
 
 uint MakeARGB(int a, uint clr)
@@ -1462,19 +1467,19 @@ void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true
       ObjectDelete(0, nm);
   }
 
-  if(FVG_count <= 0) return;
+  if(MTF_FVG_count <= 0) return;
 
   datetime bar_secs = (datetime)PeriodSeconds(timeframe);
 
   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
   double tol = (point > 0.0) ? point * 0.5 : 0.0;
 
-  for(int k = 0; k < FVG_count; k++)
+  for(int k = 0; k < MTF_FVG_count; k++)
   {
-    double top = FVGs[k].topPrice;
-    double bottom = FVGs[k].bottomPrice;
-    datetime timeC = FVGs[k].timebarC;
-    datetime timeA = FVGs[k].timebarA;
+    double top = MTF_FVGs[k].topPrice;
+    double bottom = MTF_FVGs[k].bottomPrice;
+    datetime timeC = MTF_FVGs[k].timebarC;
+    datetime timeA = MTF_FVGs[k].timebarA;
 
     datetime start_time = startFromCBar ? timeC : timeA;
 
@@ -1522,7 +1527,7 @@ void DrawFVG(string symbol, ENUM_TIMEFRAMES timeframe, bool startFromCBar = true
     uint border_alpha = 0;
 
     uint color_fill;
-    if(FVGs[k].type == 1) color_fill = MakeARGB((int)fill_alpha, clrDodgerBlue);
+    if(MTF_FVGs[k].type == 1) color_fill = MakeARGB((int)fill_alpha, clrDodgerBlue);
     else color_fill = MakeARGB((int)fill_alpha, clrCrimson);
 
     uint col_border = MakeARGB((int)border_alpha, clrBlack);
@@ -1658,14 +1663,15 @@ void DetectMSSOnTimeframe(
     string sym,
     ENUM_TIMEFRAMES tf,
     int slot,
-    bool enabled,
     bool requireFVG,
     double minBreakPips,
     int consecRequired,
     int lookForwardBars,
     int fvgLookback
 ) {
-  if(!enabled) return;
+  // ===== REQUIRE WATCHING FVG BEFORE MSS =====
+  if(!watchingMSSMode) return; // chỉ xét MSS khi đang ở watching mode
+  if(tf != LowTF) return; // chỉ xét MSS trên LTF
   if(BOS_Count[slot] < 2) return;
 
   // ===============================
@@ -1744,9 +1750,6 @@ void DetectMSSOnTimeframe(
   // ===============================
   if(requireFVG)
   {
-    if(tf == MiddleTF)
-      EnsureFVGUpToDate(sym, tf, fvgLookback);
-
     bool hasFVG = false;
     if(newerBOS.direction == 1)
       hasFVG = HasBullFVGBetween(sym, tf, sweep_time, break_time, fvgLookback);
@@ -1793,13 +1796,10 @@ void DetectMSSOnTimeframe(
       if(valid)
       {
         if(PrintEntryLog)
-          Print(">>> ENTRY CONDITIONS PASSED → SETUP ENTRY");
-
-        watchingMSSMode = false;
-        watchingFVGIndex = -1;
-        watchingFVGDir = 0;
-
+          Print(">>> ENTRY CONDITIONS PASSED → SETUP ENTRY. Disable watchingMSSMode.");
         SetUpPendingEntryForMSS(mss, slot);
+        MTF_FVGs[watchingFVGIndex].used = true;
+        ToggleWatchingMSSMode(false);
       }
       else
       {
@@ -1836,14 +1836,14 @@ bool CheckValidEntry(
     return false;
   }
 
-  if(fvgIndex < 0 || fvgIndex >= FVG_count)
+  if(fvgIndex < 0 || fvgIndex >= MTF_FVG_count)
   {
     if(PrintEntryLog)
       Print("CheckValidEntry: invalid FVG index");
     return false;
   }
 
-  int fvgDir = FVGs[fvgIndex].type; // 1 bull, -1 bear
+  int fvgDir = MTF_FVGs[fvgIndex].type; // 1 bull, -1 bear
 
   // =============================
   // 1. MSS direction == FVG direction
@@ -1900,7 +1900,7 @@ bool CheckValidEntry(
   return true;
 }
 
-void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool detectMSS,
+void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot,
                                      int swingRange, bool requireFVG,
                                      double minBreakPips, int minConsec,
                                      int lookbackBarsForSweep, int fvgLookback)
@@ -1910,7 +1910,7 @@ void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool dete
   HandleBOSDetections(sym, tf, slot);
 
   if(tf == MiddleTF) EnsureFVGUpToDate(sym, MiddleTF, fvgLookback);
-  DetectMSSOnTimeframe(sym, tf, slot, detectMSS, requireFVG, minBreakPips, minConsec, lookbackBarsForSweep, fvgLookback);
+  DetectMSSOnTimeframe(sym, tf, slot, requireFVG, minBreakPips, minConsec, lookbackBarsForSweep, fvgLookback);
 
   if(ShowSwingMarkers)
   {
@@ -1918,19 +1918,21 @@ void HandleLogicForTimeframe(string sym, ENUM_TIMEFRAMES tf, int slot, bool dete
     if(tf == MiddleTF) DrawFVG(sym, MiddleTF, true);
   }
 
-  UpdateLabel((tf == HighTF) ? "LBL_HTF" : (tf == MiddleTF) ? "LBL_MTF" : "LBL_LTF", tf, TrendTF[slot]);
+  UpdateLabel((tf == HighTF) ? "LBL_HTF" : (tf == MiddleTF) ? "LBL_MTF" : "LTF: TRIGGER", tf, TrendTF[slot]);
 }
 
 // Clear & reset pending entry (xóa visuals nếu có)
 void ClearPendingEntry()
 {
-  if(!pendingEntry.active && StringLen(pendingEntry.compositeName)==0)
-  {
+  if(pendingEntry.fvgIndex >= 0 && pendingEntry.fvgIndex < MTF_FVG_count) {
+    MTF_FVGs[pendingEntry.fvgIndex].used = true; // FVG đã cho entry nhưng không khớp lệnh
+  }
+
+  if(!pendingEntry.active && StringLen(pendingEntry.compositeName)==0) {
     return;
   }
 
-  if(StringLen(pendingEntry.compositeName) > 0)
-  {
+  if(StringLen(pendingEntry.compositeName) > 0) {
     string parts[];
     int n = StringSplit(pendingEntry.compositeName, '|', parts);
     for(int i=0;i<n;i++)
@@ -2118,170 +2120,168 @@ bool PlacePendingOrderFromPendingEntry()
   }
 }
 
-// SetUpPendingEntryForMSS: new implementation using OrderBlock (last opposite-color candle before break)
-// - mss: MSS found
-// - slot: slot where MSS detected
-// Logic:
-// 1) Find OrderBlock (OB) = first opposite-color candle when scanning backward from mss.break_time (exclusive).
-//    - bullish MSS (mss.direction == 1): find first bearish candle (close < open) when scanning backward from break_time
-//    - bearish MSS (mss.direction == -1): find first bullish candle (close > open) when scanning backward from break_time
-// 2) Entry = OB edge (high for bearish candle (bullish OB), low for bullish candle (bearish OB))
-// 3) SL = Entry +/- 300 pips (bullish: SL = entry - 300 pips; bearish: SL = entry + 300 pips)
-// 4) TP computed using RiskRewardRatio as before (TP = entry ± R:R*|entry-sl|)
-// 5) Calculate lotsize such that risk = 1% equity (use CalculateLotSizeForRisk)
-// 6) Store into pendingEntry and draw visuals
 void SetUpPendingEntryForMSS(const MSS &mss, int slot)
 {
-  string sym = Symbol();
+  string symbol = Symbol();
+  int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  double pip   = GetPipSize(symbol);
 
-  if(PrintEntryLog)
-    PrintFormat("==> SetUpPendingEntryForMSS (NEW) START: mss.found=%d dir=%d sweep_time=%d sweep_price=%.10f break_time=%d break_price=%.10f",
-                mss.found ? 1 : 0, mss.direction, (int)mss.sweep_time, mss.sweep_extreme_price, (int)mss.break_time, mss.bos_close_price);
-
-  if(!mss.found)
-  {
-    if(PrintEntryLog) Print("-> abort: mss.found == false");
+  // ===============================
+  // 0️⃣ Sanity check
+  // ===============================
+  if(!mss.found || mss.sweep_time == 0 || mss.break_time == 0)
     return;
-  }
-  if(mss.break_time == 0)
-  {
-    if(PrintEntryLog) Print("-> abort: invalid break_time");
+
+  // ===============================
+  // 1️⃣ FIND ALL LTF INTERNAL FVGs
+  // ===============================
+  double fvgTopPrices[];
+  double fvgBottomPrices[];
+  datetime fvgTimeA[];
+  datetime fvgTimeC[];
+  int fvgDirections[];
+
+  int totalLtfFVGs = FindInternalFVG(
+    symbol,
+    LowTF,
+    100,                  // LTF lookback
+    fvgTopPrices,
+    fvgBottomPrices,
+    fvgTimeA,
+    fvgTimeC,
+    fvgDirections
+  );
+
+  if(totalLtfFVGs <= 0)
     return;
-  }
 
-  // 1) Find OrderBlock (scan backward on LowTF from break_time - 1 bar)
-  int idxStart = iBarShift(sym, LowTF, mss.break_time, false);
-  if(idxStart == -1) idxStart = 0;
+  // ===============================
+  // 2️⃣ SELECT FVG:
+  // - same direction as MSS
+  // - timeC strictly between sweep & break
+  // - closest to break_time
+  // ===============================
+  int selectedFvgIndex = -1;
+  datetime selectedFvgTime = 0;
 
-  int foundIdx = -1;
-  double obEdgePrice = 0.0; // entry price (edge)
-  int obDirection = 0; // 1 = bullish candle (close>open), -1 = bearish candle (close<open)
-
-  // Start scanning previous bars strictly before break_time -> start at idxStart (bar whose time == break_time) then go idxStart+1 ??? 
-  // iBarShift returns index (0 = current), bar with time==break_time likely index > 0. We want bars older than break_time so begin idx = idxStart (if that bar equals break_time) then idx = idxStart
-  // Safer: we want bars with time < break_time, so shift to idx = idxStart (if that index's time == break_time then idx++), but iBarShift(...,false) returns exact index.
-  // We'll start scanning from idx = idxStart (which should point to the bar with time==break_time) and step forward (older) idx+1, idx+2...
-  int scanIdx = idxStart;
-  // move one bar older to ensure strictly before break_time
-  scanIdx = scanIdx + 1;
-
-  int maxScan = 50; // cap scanning to avoid infinite loops (you can adjust)
-  int scanned = 0;
-  for(int idx = scanIdx; idx < iBars(sym, LowTF) && scanned < maxScan; idx++, scanned++)
+  for(int i = 0; i < totalLtfFVGs; i++)
   {
-    double o = iOpen(sym, LowTF, idx);
-    double c = iClose(sym, LowTF, idx);
-    if(o == 0.0 || c == 0.0) continue;
+    // direction must match MSS
+    if(fvgDirections[i] != mss.direction)
+      continue;
 
-    if(mss.direction == 1)
+    // must be between sweep & break
+    if(fvgTimeC[i] <= mss.sweep_time || fvgTimeC[i] >= mss.break_time)
+      continue;
+
+    // choose the one closest to break_time
+    if(selectedFvgIndex == -1 || fvgTimeC[i] > selectedFvgTime)
     {
-      // bullish MSS: find first bearish candle going backward => candle where close < open (bearish)
-      if(c < o)
-      {
-        foundIdx = idx;
-        obDirection = -1;
-        obEdgePrice = iHigh(sym, LowTF, idx); // use high of that bearish candle as OB edge
-        break;
-      }
-    }
-    else if(mss.direction == -1)
-    {
-      // bearish MSS: find first bullish candle (close > open)
-      if(c > o)
-      {
-        foundIdx = idx;
-        obDirection = 1;
-        obEdgePrice = iLow(sym, LowTF, idx); // use low of that bullish candle as OB edge
-        break;
-      }
+      selectedFvgIndex = i;
+      selectedFvgTime  = fvgTimeC[i];
     }
   }
 
-  if(foundIdx == -1)
+  if(selectedFvgIndex == -1)
   {
-    if(PrintEntryLog) Print("-> abort: no suitable OrderBlock (opposite-color candle) found before break_time on LowTF");
+    if(PrintEntryLog)
+      Print("SetUpPendingEntryForMSS: no valid LTF FVG between sweep & break");
     return;
   }
 
-  // Normalize entry price to symbol digits
-  int digs = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-  double entryPrice = NormalizeDouble(obEdgePrice, digs);
+  // ===============================
+  // 3️⃣ ENTRY = 50% OF SELECTED FVG
+  // ===============================
+  double fvgTop    = fvgTopPrices[selectedFvgIndex];
+  double fvgBottom = fvgBottomPrices[selectedFvgIndex];
 
-  if(PrintEntryLog)
-    PrintFormat("-> Found OB at index=%d time=%s dir=%d edge=%.10f (normalized=%.10f)",
-                foundIdx, TimeToString(iTime(sym, LowTF, foundIdx), TIME_DATE|TIME_MINUTES), obDirection, obEdgePrice, entryPrice);
+  double entryPrice = NormalizeDouble(
+    (fvgTop + fvgBottom) * 0.5,
+    digits
+  );
 
-  // 2) Set SL = entry +/- 300 pips
-  double pip = GetPipSize(sym);
-  double sl;
-  double slDistancePoints = 300.0 * pip;
+  // ===============================
+  // 4️⃣ STOP LOSS = LIQUIDITY SWEEP
+  // ===============================
+  double stopLoss = mss.sweep_extreme_price;
+
+  double slBuffer = 1.0 * pip; // safety buffer
+
   if(mss.direction == 1)
   {
-    // bullish MSS -> we will BUY at entry=OB(high) -> SL below OB
-    sl = entryPrice - slDistancePoints;
+    stopLoss -= slBuffer;
+    if(stopLoss >= entryPrice)
+      return;
   }
   else
   {
-    // bearish MSS -> SELL at entry=OB(low) -> SL above OB
-    sl = entryPrice + slDistancePoints;
+    stopLoss += slBuffer;
+    if(stopLoss <= entryPrice)
+      return;
   }
-  sl = NormalizeDouble(sl, digs);
 
-  // 3) Compute TP using RiskRewardRatio (existing input)
-  double tp = 0.0;
-  double diff = MathAbs(entryPrice - sl);
-  if(diff > 0.0)
-  {
-    if(mss.direction == 1)
-      tp = entryPrice + RiskRewardRatio * diff;
-    else
-      tp = entryPrice - RiskRewardRatio * diff;
-    tp = NormalizeDouble(tp, digs);
-  }
+  stopLoss = NormalizeDouble(stopLoss, digits);
+
+  // ===============================
+  // 5️⃣ TAKE PROFIT = RR
+  // ===============================
+  double riskDistance = MathAbs(entryPrice - stopLoss);
+  if(riskDistance <= 0.0)
+    return;
+
+  double takeProfit;
+  if(mss.direction == 1)
+    takeProfit = entryPrice + RiskRewardRatio * riskDistance;
   else
-  {
-    if(PrintEntryLog) Print("-> abort: computed diff==0 between entry and SL");
-    return;
-  }
+    takeProfit = entryPrice - RiskRewardRatio * riskDistance;
 
-  // 4) Calculate lotsize based on 1% equity risk (hard-coded 1% per your request)
-  double lots = CalculateLotSizeForRisk(sym, entryPrice, sl, 1.0); // 1% equity
-  if(lots <= 0.0)
-  {
-    if(PrintEntryLog) Print("-> abort: CalculateLotSizeForRisk returned 0.0 (cannot determine lotsize)");
-    return;
-  }
+  takeProfit = NormalizeDouble(takeProfit, digits);
 
-  // 5) Clear previous pending and populate new pendingEntry
+  // ===============================
+  // 6️⃣ LOT SIZE BY RISK
+  // ===============================
+  double lotSize = CalculateLotSizeForRisk(
+    symbol,
+    entryPrice,
+    stopLoss,
+    RishPercent
+  );
+
+  if(lotSize <= 0.0)
+    return;
+
+  // ===============================
+  // 7️⃣ STORE PENDING ENTRY
+  // ===============================
   ClearPendingEntry();
 
-  pendingEntry.active = true;
-  pendingEntry.direction = (mss.direction == 1) ? 1 : -1;
-  pendingEntry.price = entryPrice;
-  pendingEntry.fvgIndex = -1; // not using FVG for this method
+  pendingEntry.active       = true;
+  pendingEntry.direction    = mss.direction;
+  pendingEntry.price        = entryPrice;
+  pendingEntry.sl_price     = stopLoss;
+  pendingEntry.tp_price     = takeProfit;
+  pendingEntry.lotSize      = lotSize;
   pendingEntry.created_time = TimeCurrent();
-  pendingEntry.compositeName = "";
-  pendingEntry.source_slot = slot;
-  pendingEntry.sl_price = sl;
-  pendingEntry.tp_price = tp;
-  pendingEntry.lotSize = lots;
-  pendingEntry.orderTicket = 0;
-
-    // attempt to place pending order immediately
-  if(PrintEntryLog) Print("Attempting to place pending order from pendingEntry...");
-  bool ok = PlacePendingOrderFromPendingEntry();
-  if(!ok)
-    Print("Failed to place pending order (check broker settings, tick/tickvalue availability, volume limits).");
-
+  pendingEntry.source_slot  = slot;
+  pendingEntry.fvgIndex     = -1; // LTF FVG, không phải MTF
+  pendingEntry.orderTicket  = 0;
 
   if(PrintEntryLog)
   {
-    PrintFormat("-> PendingEntry populated (OB method): dir=%d entry=%.10f sl=%.10f tp=%.10f lots=%.4f created=%s",
-                pendingEntry.direction, pendingEntry.price, pendingEntry.sl_price, pendingEntry.tp_price,
-                pendingEntry.lotSize, TimeToString(pendingEntry.created_time, TIME_DATE|TIME_SECONDS));
+    PrintFormat(
+      "LTF FVG ENTRY SET | dir=%d | entry=%.5f | SL=%.5f | TP=%.5f | FVG time=%s",
+      mss.direction,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      TimeToString(selectedFvgTime, TIME_DATE|TIME_MINUTES)
+    );
   }
 
-  if(PrintEntryLog) Print("==> SetUpPendingEntryForMSS (NEW) END");
+  // ===============================
+  // 8️⃣ PLACE LIMIT ORDER
+  // ===============================
+  PlacePendingOrderFromPendingEntry();
 }
 
 void MoveStoploss()
@@ -2540,16 +2540,10 @@ void OnTick()
     // MoveStoplossAdvanced();
   }
 
-  if(IsNewClosedBar(sym, HighTF, 0)) {
-    HandleLogicForTimeframe(sym, HighTF, 0, DetectMSS_HTF, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
-  }
-
-  if(IsNewClosedBar(sym, MiddleTF, 1)) {
-    HandleLogicForTimeframe(sym, MiddleTF, 1, DetectMSS_MTF, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
-  }
-
   if(IsNewClosedBar(sym, LowTF, 2)) {
-    HandleLogicForTimeframe(sym, LowTF, 2, DetectMSS_LTF, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
+    HandleLogicForTimeframe(sym, HighTF, 0, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
+    HandleLogicForTimeframe(sym, MiddleTF, 1, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
+    HandleLogicForTimeframe(sym, LowTF, 2, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
     if (watchingMSSMode) {
       CheckWatchMSSInvalidation(sym);
     }
@@ -2559,11 +2553,11 @@ void OnTick()
 }
 
 int OnInit()
-{
+{ 
   string sym = Symbol();
-  HandleLogicForTimeframe(sym, HighTF, 0, false, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
-  HandleLogicForTimeframe(sym, MiddleTF, 1, false, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
-  HandleLogicForTimeframe(sym, LowTF, 2, false, ltfSwingRange, false, 10.0, 2, 50, FVGLookback);
+  HandleLogicForTimeframe(sym, HighTF, 0, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
+  HandleLogicForTimeframe(sym, MiddleTF, 1, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
+  HandleLogicForTimeframe(sym, LowTF, 2, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
 
   return(INIT_SUCCEEDED);
 }
@@ -2584,7 +2578,7 @@ void OnDeinit(const int reason)
 
   if(ObjectFind(0, "LBL_HTF") >= 0) ObjectDelete(0, "LBL_HTF");
   if(ObjectFind(0, "LBL_MTF") >= 0) ObjectDelete(0, "LBL_MTF");
-  if(ObjectFind(0, "LBL_LTF") >= 0) ObjectDelete(0, "LBL_LTF");
+  if(ObjectFind(0, "LTF: TRIGGER") >= 0) ObjectDelete(0, "LTF: TRIGGER");
 
   int tot = ObjectsTotal(0);
   for(int i = tot - 1; i >= 0; i--)

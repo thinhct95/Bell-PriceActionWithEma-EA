@@ -65,3 +65,10 @@ ltfSwingRange = 5;
 - R:R = 1:6 -> Profit 55% | Drawdown 22%
 - R:R = 1:7 -> Profit % | Drawdown %
 - R:R = 1:8 -> Profit % | Drawdown %
+
+===
+
+Issue: 
+
+- WatchingMSSMode bị bật lại khi giá chạm ltf fvg -> tổ chức fvg đang sai, fvg bị find và reset liên tục
+- Bị miss mss
