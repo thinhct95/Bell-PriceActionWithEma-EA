@@ -22,7 +22,7 @@ input double trailOffsetR = 3;   // Advanced moving SL: khoảng cách SL so v�
 // Cấu hình Swing
 input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           mtfSwingRange = 3;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 5;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int           ltfSwingRange = 4;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Struct pending entry (single slot)
@@ -1246,6 +1246,37 @@ void DrawMss(string symbol, ENUM_TIMEFRAMES tf, const MSS &mss, int slot)
       ObjectSetInteger(0, nmGuide, OBJPROP_RAY_RIGHT, false);
       ObjectSetInteger(0, nmGuide, OBJPROP_BACK, true);
       ObjectSetInteger(0, nmGuide, OBJPROP_SELECTABLE, false);
+    }
+  }
+
+  // =================================================
+  // 4️⃣ DRAW MSS BREAK (BOS) GUIDE LINE
+  // =================================================
+  if(mss.broken_swing_time != 0 &&
+    mss.broken_swing_price != 0.0 &&
+    mss.break_time != 0)
+  {
+    datetime t_start = mss.broken_swing_time;
+    datetime t_end   = mss.break_time;
+
+    // đảm bảo có độ dài để vẽ
+    if(t_end == t_start)
+      t_end = (datetime)((long)t_end + (long)bar_secs);
+
+    string nmBreak = basePrefix + "BREAK_" + IntegerToString((int)mss.break_time);
+
+    if(ObjectCreate(0, nmBreak, OBJ_TREND, 0,
+                    t_start,
+                    mss.broken_swing_price,
+                    t_end,
+                    mss.broken_swing_price))
+    {
+      ObjectSetInteger(0, nmBreak, OBJPROP_COLOR, clrOrange);
+      ObjectSetInteger(0, nmBreak, OBJPROP_WIDTH, 2);
+      ObjectSetInteger(0, nmBreak, OBJPROP_STYLE, STYLE_DASH);
+      ObjectSetInteger(0, nmBreak, OBJPROP_RAY_RIGHT, false);
+      ObjectSetInteger(0, nmBreak, OBJPROP_BACK, true);
+      ObjectSetInteger(0, nmBreak, OBJPROP_SELECTABLE, false);
     }
   }
 }
