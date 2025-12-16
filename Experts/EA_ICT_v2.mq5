@@ -1363,91 +1363,6 @@ void UpdateTrendForSlot(int slot, ENUM_TIMEFRAMES timeframe, string symbol)
   TrendTF[slot] = newTrend;
 }
 
-int FindFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback)
-{
-  // clear old array
-  ArrayFree(MTF_FVGs);
-  MTF_FVG_count = 0;
-
-  int total = iBars(symbol, timeframe);
-  if(total < 5) return 0;
-
-  int maxScan = MathMin(lookback, total - 3);
-  if(maxScan <= 0) return 0;
-
-  double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-  double tol = (point > 0.0) ? point * 0.5 : 0.0;
-
-  for(int i = 1; i <= maxScan; i++)
-  {
-    int idxA = i + 2;
-    int idxC = i;
-
-    if(idxA > total - 1) break;
-
-    double highA = iHigh(symbol, timeframe, idxA);
-    double lowA  = iLow(symbol, timeframe, idxA);
-    double highC = iHigh(symbol, timeframe, idxC);
-    double lowC  = iLow(symbol, timeframe, idxC);
-
-    if(highA == 0 || lowA == 0 || highC == 0 || lowC == 0) continue;
-
-    // bullish FVG (lowC > highA)
-    if(lowC > highA + tol)
-    {
-      double top = lowC;
-      double bottom = highA;
-      bool dup = false;
-      for(int k = 0; k < MTF_FVG_count; k++)
-      {
-        if(MathAbs(MTF_FVGs[k].topPrice - top) <= tol && MathAbs(MTF_FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
-      }
-      if(!dup)
-      {
-        ArrayResize(MTF_FVGs, MTF_FVG_count+1);
-        MTF_FVGs[MTF_FVG_count].type      = 1;
-        MTF_FVGs[MTF_FVG_count].topPrice       = top;
-        MTF_FVGs[MTF_FVG_count].bottomPrice    = bottom;
-        MTF_FVGs[MTF_FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
-        MTF_FVGs[MTF_FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
-        MTF_FVGs[MTF_FVG_count].touched   = false;
-        MTF_FVGs[MTF_FVG_count].used      = false;
-        MTF_FVGs[MTF_FVG_count].touchTime = 0;
-        MTF_FVGs[MTF_FVG_count].touchPrice= 0.0;
-        MTF_FVG_count++;
-      }
-      continue;
-    }
-
-    // bearish FVG (highC < lowA)
-    if(highC < lowA - tol)
-    {
-      double top = lowA;
-      double bottom = highC;
-      bool dup = false;
-      for(int k = 0; k < MTF_FVG_count; k++)
-      {
-        if(MathAbs(MTF_FVGs[k].topPrice - top) <= tol && MathAbs(MTF_FVGs[k].bottomPrice - bottom) <= tol) { dup = true; break; }
-      }
-      if(!dup)
-      {
-        ArrayResize(MTF_FVGs, MTF_FVG_count+1);
-        MTF_FVGs[MTF_FVG_count].type      = -1;
-        MTF_FVGs[MTF_FVG_count].topPrice       = top;
-        MTF_FVGs[MTF_FVG_count].bottomPrice    = bottom;
-        MTF_FVGs[MTF_FVG_count].timebarA     = iTime(symbol, timeframe, idxA);
-        MTF_FVGs[MTF_FVG_count].timebarC     = iTime(symbol, timeframe, idxC);
-        MTF_FVGs[MTF_FVG_count].touched   = false;
-        MTF_FVGs[MTF_FVG_count].touchTime = 0;
-        MTF_FVGs[MTF_FVG_count].touchPrice= 0.0;
-        MTF_FVG_count++;
-      }
-    }
-  }
-
-  return MTF_FVG_count;
-}
-
 uint MakeARGB(int a, uint clr)
 {
   if(a < 0) a = 0; if(a > 255) a = 255;
@@ -1598,12 +1513,14 @@ bool IsNewClosedBar(string symbol, ENUM_TIMEFRAMES tf, int slot)
 void EnsureFVGUpToDate(string symbol, ENUM_TIMEFRAMES tf, int lookback)
 {
   if(tf != MiddleTF) return;
-  datetime currentClosed = iTime(symbol, tf, 1);
-  if(currentClosed == -1 || currentClosed == 0) return;
-  if(currentClosed != lastFVGBarTime)
+
+  datetime closed = iTime(symbol, tf, 1);
+  if(closed == 0) return;
+
+  if(closed != lastFVGBarTime)
   {
-    FindFVG(symbol, tf, lookback);
-    lastFVGBarTime = currentClosed;
+    UpdateMTFFVGs(symbol, tf, lookback);
+    lastFVGBarTime = closed;
   }
 }
 
@@ -2552,9 +2469,181 @@ void OnTick()
   UpdateMTFFVGTouched(sym);
 }
 
+void MarkHistoricalTouchedFVGs(string symbol)
+{
+  if(MTF_FVG_count <= 0) return;
+
+  for(int i = 0; i < MTF_FVG_count; i++)
+  {
+    // reset mặc định
+    MTF_FVGs[i].touched = false;
+    MTF_FVGs[i].used    = false;
+    MTF_FVGs[i].touchTime  = 0;
+    MTF_FVGs[i].touchPrice = 0;
+  }
+
+  // Dùng logic đã có, nhưng scan TOÀN BỘ LTF history
+  for(int i = 0; i < MTF_FVG_count; i++)
+  {
+    datetime mtfC = MTF_FVGs[i].timebarC;
+    if(mtfC == 0) continue;
+
+    int idxC = iBarShift(symbol, LowTF, mtfC, false);
+    if(idxC <= 0) continue;
+
+    double top    = MTF_FVGs[i].topPrice;
+    double bottom = MTF_FVGs[i].bottomPrice;
+    int dir       = MTF_FVGs[i].type;
+
+    for(int idx = idxC - 1; idx >= 0; idx--)
+    {
+      double h = iHigh(symbol, LowTF, idx);
+      double l = iLow(symbol, LowTF, idx);
+      if(h == 0 || l == 0) continue;
+
+      bool touched =
+        (dir == 1 && h >= top) ||
+        (dir == -1 && l <= bottom);
+
+      if(touched)
+      {
+        MTF_FVGs[i].touched    = true;
+        MTF_FVGs[i].used       = true;   // 🔥 QUAN TRỌNG
+        MTF_FVGs[i].touchTime = iTime(symbol, LowTF, idx);
+        MTF_FVGs[i].touchPrice= (dir == 1 ? top : bottom);
+        break;
+      }
+    }
+  }
+}
+
+void InitMTFFVGs(string symbol, ENUM_TIMEFRAMES tf, int lookback)
+{
+  ArrayFree(MTF_FVGs);
+  MTF_FVG_count = 0;
+
+  int total = iBars(symbol, tf);
+  if(total < 5) return;
+
+  int maxScan = MathMin(lookback, total - 3);
+  double tol = SymbolInfoDouble(symbol, SYMBOL_POINT) * 0.5;
+
+  for(int i = 1; i <= maxScan; i++)
+  {
+    int idxA = i + 2;
+    int idxC = i;
+    if(idxA > total - 1) break;
+
+    double highA = iHigh(symbol, tf, idxA);
+    double lowA  = iLow(symbol, tf, idxA);
+    double highC = iHigh(symbol, tf, idxC);
+    double lowC  = iLow(symbol, tf, idxC);
+
+    if(highA == 0 || lowA == 0 || highC == 0 || lowC == 0) continue;
+
+    datetime timeC = iTime(symbol, tf, idxC);
+
+    // Bullish FVG
+    if(lowC > highA + tol)
+    {
+      int idx = MTF_FVG_count;
+      ArrayResize(MTF_FVGs, MTF_FVG_count + 1);
+      MTF_FVG_count++;
+
+      MTF_FVGs[idx].type = 1;
+      MTF_FVGs[idx].topPrice = lowC;
+      MTF_FVGs[idx].bottomPrice = highA;
+      MTF_FVGs[idx].timebarA = iTime(symbol, tf, idxA);
+      MTF_FVGs[idx].timebarC = timeC;
+      MTF_FVGs[idx].touched = false;
+      MTF_FVGs[idx].used = false;
+      MTF_FVGs[idx].touchTime = 0;
+      MTF_FVGs[idx].touchPrice = 0;
+      continue;
+    }
+
+    // Bearish FVG
+    if(highC < lowA - tol)
+    {
+      int idx = MTF_FVG_count;
+      ArrayResize(MTF_FVGs, MTF_FVG_count + 1);
+      MTF_FVG_count++;
+
+      MTF_FVGs[idx].type = -1;
+      MTF_FVGs[idx].topPrice = lowA;
+      MTF_FVGs[idx].bottomPrice = highC;
+      MTF_FVGs[idx].timebarA = iTime(symbol, tf, idxA);
+      MTF_FVGs[idx].timebarC = timeC;
+      MTF_FVGs[idx].touched = false;
+      MTF_FVGs[idx].used = false;
+      MTF_FVGs[idx].touchTime = 0;
+      MTF_FVGs[idx].touchPrice = 0;
+    }
+  }
+}
+
+void UpdateMTFFVGs(string symbol, ENUM_TIMEFRAMES tf, int lookback)
+{
+  int total = iBars(symbol, tf);
+  if(total < 5) return;
+
+  int maxScan = MathMin(lookback, total - 3);
+  double tol = SymbolInfoDouble(symbol, SYMBOL_POINT) * 0.5;
+
+  for(int i = 1; i <= maxScan; i++)
+  {
+    int idxA = i + 2;
+    int idxC = i;
+    if(idxA > total - 1) break;
+
+    datetime timeC = iTime(symbol, tf, idxC);
+    if(timeC == 0) continue;
+
+    // CHECK DUPLICATE BY timebarC
+    bool exists = false;
+    for(int k = 0; k < MTF_FVG_count; k++)
+    {
+      if(MTF_FVGs[k].timebarC == timeC)
+      {
+        exists = true;
+        break;
+      }
+    }
+    if(exists) continue;
+
+    double highA = iHigh(symbol, tf, idxA);
+    double lowA  = iLow(symbol, tf, idxA);
+    double highC = iHigh(symbol, tf, idxC);
+    double lowC  = iLow(symbol, tf, idxC);
+
+    if(highA == 0 || lowA == 0 || highC == 0 || lowC == 0) continue;
+
+    if(lowC > highA + tol || highC < lowA - tol)
+    {
+      int idx = MTF_FVG_count;
+      ArrayResize(MTF_FVGs, MTF_FVG_count + 1);
+      MTF_FVG_count++;
+
+      MTF_FVGs[idx].type = (lowC > highA) ? 1 : -1;
+      MTF_FVGs[idx].topPrice = (MTF_FVGs[idx].type == 1) ? lowC : lowA;
+      MTF_FVGs[idx].bottomPrice = (MTF_FVGs[idx].type == 1) ? highA : highC;
+      MTF_FVGs[idx].timebarA = iTime(symbol, tf, idxA);
+      MTF_FVGs[idx].timebarC = timeC;
+      MTF_FVGs[idx].touched = false;
+      MTF_FVGs[idx].used = false;
+      MTF_FVGs[idx].touchTime = 0;
+      MTF_FVGs[idx].touchPrice = 0;
+    }
+  }
+}
+
 int OnInit()
 { 
   string sym = Symbol();
+
+  InitMTFFVGs(sym, MiddleTF, FVGLookback);
+  MarkHistoricalTouchedFVGs(sym);
+
   HandleLogicForTimeframe(sym, HighTF, 0, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
   HandleLogicForTimeframe(sym, MiddleTF, 1, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
   HandleLogicForTimeframe(sym, LowTF, 2, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
