@@ -70,5 +70,8 @@ ltfSwingRange = 5;
 
 Issue: 
 
-- WatchingMSSMode bị bật lại khi giá chạm ltf fvg -> tổ chức fvg đang sai, fvg bị find và reset liên tục
+- WatchingMSSMode bị bật lại khi giá chạm ltf fvg -> tổ chức fvg đang sai, fvg bị find và reset liên tục -> fixed
 - Bị miss mss
+- Cần fix lại cách chọn FVG vào lệnh (premium, discount)
+- có trường hợp xuất hiện mss giảm, MTF sideway mà vẫn vào lệnh (jan 03) -> cần check lại
+- DetectMSS -> return luôn nếu trends không thuận
