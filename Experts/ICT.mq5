@@ -7,22 +7,41 @@
 #property version   "2.00"
 #property strict
 
+// ------------------ Các input về định lượng ------------------
+input int    LS_LookbackBars = 5;          // số nến nhìn lại
+input double LS_Wick_ATR_Ratio = 0.1;      // wick ≥ 10% ATR
+
+input double MSS_Break_ATR_Ratio = 0.1;   // phá ≥ 10% ATR
+input double MSS_Body_ATR_Ratio  = 0.1;   // body ≥ 10% ATR
+
+input double FVG_Min_ATR_Ratio = 0.25;
+input int ADX_Min = 10;
+
+// -------------------------------------------------------------
+
+double   DailyEquityStart = 0.0;
+datetime DailyEquityDate  = 0;
+bool     DailyLossBlocked = false;
+
+input double EntryFvgRetrace = 0.3; // 0.5 = 50%, 0.618 = aggressive
+input double MaxDailyLossPercent = 3.0;
+
 // --- Only Entry logs (user requested) ---
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
 input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định
 
-input double moveSLRange = 1;   // Nomal moving SL: số R cần đạt để dời SL về entry (BE)
+input double numberOfRToMoveToEntry = 1;   // Nomal moving SL: số R cần đạt để dời SL về entry (BE)
 input int MaxLimitOrderTime = 180;
 
-input double moveSLStartR = 3;   // Advanced moving SL: bắt đầu kích hoạt trailing
-input double trailOffsetR = 3;   // Advanced moving SL: khoảng cách SL so với giá hiện tại
+input double trailingStopStartR = 2;   // Advanced moving SL: bắt đầu kích hoạt trailing
+input double trailOffsetR = 1.5;   // Advanced moving SL: khoảng cách SL so với giá hiện tại
 
 // Cấu hình Swing
-input int           htfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           mtfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
-input int           ltfSwingRange = 2;        // X: số nến trước và sau để xác định 1 đỉnh/đáy
+input int htfSwingRange = 3;   // D1/H4: chắc trend
+input int mtfSwingRange = 3;   // H1: BOS rõ
+input int ltfSwingRange = 4;   // M5: giảm fake MSS
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Struct pending entry (single slot)
@@ -154,9 +173,129 @@ int     BOS_Count[3] = {0,0,0}; // số BOS hiện có cho mỗi slot (0..2)
 bool    BOS_HaveZone[3][2];  // flag có zone hay không
 
 input int NYStartHourVN = 19;
-input int NYEndHourVN   = 23;
+input int NYEndHourVN   = 22;
 input int LondonStartHourVN = 14;
 input int LondonEndHourVN   = 18;
+
+// ===== NEWS FILTER =====
+input bool EnableNewsFilter = true;
+
+// Block entry trước/sau tin (phút)
+input int NewsBlockBeforeMin = 30;
+input int NewsBlockAfterMin  = 30;
+
+bool IsValidMSS(
+   string sym,
+   ENUM_TIMEFRAMES tf,
+   int shift,
+   double swingLevel,
+   bool bullish
+)
+{
+   double atr = GetATR(sym, tf, 14, shift);
+   double close = iClose(sym, tf, shift);
+   double open  = iOpen(sym, tf, shift);
+   double body  = MathAbs(close - open);
+
+   if(bullish)
+   {
+      if(close <= swingLevel) return false;
+      if(close - swingLevel < atr * MSS_Break_ATR_Ratio) return false;
+   }
+   else
+   {
+      if(close >= swingLevel) return false;
+      if(swingLevel - close < atr * MSS_Break_ATR_Ratio) return false;
+   }
+
+   if(body < atr * MSS_Body_ATR_Ratio)
+      return false;
+
+   return true;
+}
+
+bool IsValidLiquiditySweep(
+   string sym,
+   ENUM_TIMEFRAMES tf,
+   int shift,
+   bool isHighSweep // true = sweep high, false = sweep low
+) {
+   double atr = GetATR(sym, tf, 14, shift);
+   double wick;
+
+   if(isHighSweep)
+      wick = iHigh(sym, tf, shift) - MathMax(iOpen(sym, tf, shift), iClose(sym, tf, shift));
+   else
+      wick = MathMin(iOpen(sym, tf, shift), iClose(sym, tf, shift)) - iLow(sym, tf, shift);
+
+   if(wick < atr * LS_Wick_ATR_Ratio)
+      return false;
+
+   // check phá high/low N bars trước
+   for(int i=shift+1; i<=shift+LS_LookbackBars; i++)
+   {
+      if(isHighSweep && iHigh(sym, tf, shift) <= iHigh(sym, tf, i))
+         return false;
+
+      if(!isHighSweep && iLow(sym, tf, shift) >= iLow(sym, tf, i))
+         return false;
+   }
+
+   return true;
+}
+
+bool IsHighImpactNewsNear(string symbol, int minutesBefore, int minutesAfter)
+{
+   // TODO: implement real news filter later
+   return false;
+}
+
+void UpdateDailyEquity()
+{
+  datetime now = TimeCurrent();
+  MqlDateTime t;
+  TimeToStruct(now, t);
+
+  // YYYYMMDD
+  int todayKey = t.year * 10000 + t.mon * 100 + t.day;
+
+  if(DailyEquityDate != todayKey)
+  {
+    DailyEquityDate  = todayKey;
+    DailyEquityStart = AccountInfoDouble(ACCOUNT_EQUITY);
+    DailyLossBlocked = false;
+
+    if(PrintEntryLog)
+      PrintFormat("DAILY RESET | EquityStart=%.2f", DailyEquityStart);
+  }
+}
+
+bool IsDailyLossExceeded()
+{
+  if(DailyEquityStart <= 0.0)
+    return false;
+
+  double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+  double maxLoss = DailyEquityStart * (MaxDailyLossPercent / 100.0);
+  double lossNow = DailyEquityStart - equity;
+
+  if(lossNow >= maxLoss)
+  {
+    if(!DailyLossBlocked && PrintEntryLog)
+    {
+      PrintFormat(
+        "MAX DAILY LOSS HIT | Loss=%.2f (%.2f%%) | Trading BLOCKED",
+        lossNow,
+        (lossNow / DailyEquityStart) * 100.0
+      );
+    }
+
+    DailyLossBlocked = true;
+    return true;
+  }
+
+  return false;
+}
 
 void UpdateMTFFVGTouched(string symbol)
 {
@@ -785,7 +924,7 @@ double GetPipSize(string symbol)
 // --------------------------------------------------------------
 int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
                     double &out_top[], double &out_bottom[],
-                    datetime &out_timeA[], datetime &out_timeC[], int &out_type[])
+                    datetime &out_timeA[], datetime &out_timeC[], int &out_type[]) 
 {
    // clear output arrays
    ArrayFree(out_top); 
@@ -835,8 +974,13 @@ int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
       // ------------------------------------------------------
       if(lowC > highA + tol)
       {
-         double top = lowC;
-         double bottom = highA;
+        double top = lowC;
+        double bottom = highA;
+
+        // ===== FVG SIZE FILTER (ATR-based) =====
+        double atr = GetATR(symbol, timeframe, 14, idxC);
+        if(MathAbs(top - bottom) < atr * FVG_Min_ATR_Ratio)
+          continue;
 
          // kiểm tra tránh duplicate FVG
          bool dup = false;
@@ -876,8 +1020,14 @@ int FindInternalFVG(string symbol, ENUM_TIMEFRAMES timeframe, int lookback,
       // ------------------------------------------------------
       if(highC < lowA - tol)
       {
-         double top = lowA;
-         double bottom = highC;
+        double top = lowA;
+        double bottom = highC;
+
+        // ===== FVG SIZE FILTER (ATR-based) =====
+        double atr = GetATR(symbol, timeframe, 14, idxC);
+        if(MathAbs(top - bottom) < atr * FVG_Min_ATR_Ratio)
+          continue;
+
 
          bool dup = false;
          for(int k = 0; k < found; k++)
@@ -1637,6 +1787,17 @@ void DetectMSSOnTimeframe(
   if(sweepExtreme == 0.0) return;
 
   // ===============================
+  // 2️⃣.1 VALIDATE LIQUIDITY SWEEP (ATR-based)
+  // ===============================
+  bool isHighSweep = (newerBOS.direction == -1); // bearish MSS quét HIGH
+  if(!IsValidLiquiditySweep(sym, tf, sweepIdx, isHighSweep))
+  {
+    if(PrintEntryLog)
+      Print("MSS rejected: invalid liquidity sweep (ATR filter)");
+    return;
+  }
+
+  // ===============================
   // 3️⃣ SWING BỊ QUÉT & SWING BỊ PHÁ
   // ===============================
   double sweptSwingPrice   = olderBOS.broken_sw_price;
@@ -1666,6 +1827,23 @@ void DetectMSSOnTimeframe(
       if(sweepExtreme <= sweptSwingPrice + tol)
           return;
   }
+
+  // ===============================
+  // 4️⃣.1 MSS STRENGTH VALIDATION (ATR + BODY)
+  // ===============================
+  if(!IsValidMSS(
+        sym,
+        tf,
+        newerBOS.confirm_bar_index,
+        newerBOS.broken_sw_price,
+        newerBOS.direction == 1
+    ))
+  {
+    if(PrintEntryLog)
+      Print("MSS rejected: weak break (ATR/body filter)");
+    return;
+  }
+
 
   // ===============================
   // 5️⃣ REQUIRE FVG (GIỮ LOGIC CŨ)
@@ -2117,8 +2295,16 @@ void SetUpPendingEntryForMSS(const MSS &mss, int slot)
   double fvgTop    = fvgTopPrices[selectedFvgIndex];
   double fvgBottom = fvgBottomPrices[selectedFvgIndex];
 
+  double retrace = EntryFvgRetrace;
+
+  // trend mạnh → entry sớm hơn
+  if(TrendTF[0] == TrendTF[1] && TrendTF[1] == mss.direction)
+    retrace = 0.2;
+  else
+    retrace = EntryFvgRetrace;
+
   double entryPrice = NormalizeDouble(
-    (fvgTop + fvgBottom) * 0.5,
+    fvgBottom + (fvgTop - fvgBottom) * retrace,
     digits
   );
 
@@ -2239,15 +2425,15 @@ void MoveStoploss()
 
   bool shouldMove = false;
 
-  // ======= ĐIỀU KIỆN BE DỰA TRÊN moveSLRange =======
+  // ======= ĐIỀU KIỆN BE DỰA TRÊN numberOfRToMoveToEntry =======
   if(type == POSITION_TYPE_BUY)
   {
-    if(bid >= entry + moveSLRange * R)
+    if(bid >= entry + numberOfRToMoveToEntry * R)
       shouldMove = true;
   }
   else if(type == POSITION_TYPE_SELL)
   {
-    if(ask <= entry - moveSLRange * R)
+    if(ask <= entry - numberOfRToMoveToEntry * R)
       shouldMove = true;
   }
 
@@ -2277,7 +2463,7 @@ void MoveStoploss()
   {
     if(PrintEntryLog)
       PrintFormat("MoveStoploss: SL moved to BE at %.5f (%.2fR), ticket=%I64u",
-                  entry, moveSLRange, ticket);
+                  entry, numberOfRToMoveToEntry, ticket);
   }
   else
   {
@@ -2385,7 +2571,7 @@ void MoveStoplossAdvanced()
     profitR = (entry - ask) / R;
 
   // ===== CHƯA ĐỦ ĐIỀU KIỆN BE =====
-  if(profitR < moveSLStartR)
+  if(profitR < trailingStopStartR)
     return;
 
   int digits = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
@@ -2394,7 +2580,7 @@ void MoveStoplossAdvanced()
   // =========================================================
   // 1️⃣ BE PHASE
   // =========================================================
-  if(profitR >= moveSLStartR && profitR < (moveSLStartR + trailOffsetR))
+  if(profitR >= trailingStopStartR && profitR < (trailingStopStartR + trailOffsetR))
   {
     newSL = entry;
   }
@@ -2404,7 +2590,7 @@ void MoveStoplossAdvanced()
     // 2️⃣ STEP TRAIL PHASE (theo bậc R)
     // =========================================================
     int step = (int)MathFloor(
-      (profitR - moveSLStartR) / trailOffsetR
+      (profitR - trailingStopStartR) / trailOffsetR
     );
 
     double targetR = step * trailOffsetR;
@@ -2447,7 +2633,7 @@ void MoveStoplossAdvanced()
     PrintFormat(
       "MoveSL ICT-C: SL -> %.5f | profitR=%.2fR | step=%d",
       newSL, profitR, 
-      (int)MathFloor((profitR - moveSLStartR) / trailOffsetR)
+      (int)MathFloor((profitR - trailingStopStartR) / trailOffsetR)
     );
   }
 }
@@ -2473,32 +2659,48 @@ bool IsEntryTimeAllowed()
 
 bool IsAllowedToTrade()
 {
-   if(!IsEntryTimeAllowed())
-      return false;
+  UpdateDailyEquity();
 
-  //  if(EnableNewsFilter &&
-  //     IsHighImpactNewsNear(_Symbol,
-  //                           NewsBlockBeforeMin,
-  //                           NewsBlockAfterMin))
-      return false;
+  if(IsDailyLossExceeded())
+    return false;
 
-   return true;
+  // ===============================
+  // REGIME FILTER – TREND REQUIRED
+  // ===============================
+  double adx = GetADX(_Symbol, MiddleTF, 14, 1); // dùng bar đã đóng
+  if(adx < ADX_Min)
+  {
+    if(PrintEntryLog)
+      PrintFormat("Trade blocked: ADX %.2f < %d", adx, ADX_Min);
+    return false;
+  }
+
+  if(!IsEntryTimeAllowed())
+    return false;
+
+  if(EnableNewsFilter &&
+    IsHighImpactNewsNear(_Symbol,
+                          NewsBlockBeforeMin,
+                          NewsBlockAfterMin))
+    return false;
+
+  return true;
 }
 
 
 void OnTick() {
-  if(!IsAllowedToTrade())
-   return;
-   
   string sym = Symbol();
 
   CancelExpiredLimitOrder();
-  if (moveSLRange > 0) {
+  if (numberOfRToMoveToEntry > 0) {
     // MoveStoploss();
-    // MoveStoplossAdvanced();
+    MoveStoplossAdvanced();
   }
 
   if(IsNewClosedBar(sym, LowTF, 2)) {
+    // if(!IsAllowedToTrade()) //TEST
+    //    return;
+
     HandleLogicForTimeframe(sym, HighTF, 0, htfSwingRange, false, 10.0, 2, 50, FVGLookback);
     HandleLogicForTimeframe(sym, MiddleTF, 1, mtfSwingRange, true, 10.0, 2, 50, FVGLookback);
     HandleLogicForTimeframe(sym, LowTF, 2, ltfSwingRange, true, 10.0, 2, 50, FVGLookback);
@@ -2717,4 +2919,59 @@ void OnDeinit(const int reason)
     if(StringFind(nm, SwingObjPrefix, 0) == 0)
       ObjectDelete(0, nm);
   }
+}
+
+double GetATR(string symbol, ENUM_TIMEFRAMES tf, int period, int shift)
+{
+   static int atrHandle = INVALID_HANDLE;
+   static ENUM_TIMEFRAMES lastTF = PERIOD_CURRENT;
+   static int lastPeriod = 0;
+
+   // recreate handle if TF or period changed
+   if(atrHandle == INVALID_HANDLE || tf != lastTF || period != lastPeriod)
+   {
+      if(atrHandle != INVALID_HANDLE)
+         IndicatorRelease(atrHandle);
+
+      atrHandle = iATR(symbol, tf, period);
+      lastTF = tf;
+      lastPeriod = period;
+   }
+
+   if(atrHandle == INVALID_HANDLE)
+      return 0.0;
+
+   double buffer[];
+   if(CopyBuffer(atrHandle, 0, shift, 1, buffer) <= 0)
+      return 0.0;
+
+   return buffer[0];
+}
+
+double GetADX(string symbol, ENUM_TIMEFRAMES tf, int period, int shift)
+{
+   static int adxHandle = INVALID_HANDLE;
+   static ENUM_TIMEFRAMES lastTF = PERIOD_CURRENT;
+   static int lastPeriod = 0;
+
+   // recreate handle if TF or period changed
+   if(adxHandle == INVALID_HANDLE || tf != lastTF || period != lastPeriod)
+   {
+      if(adxHandle != INVALID_HANDLE)
+         IndicatorRelease(adxHandle);
+
+      adxHandle = iADX(symbol, tf, period);
+      lastTF = tf;
+      lastPeriod = period;
+   }
+
+   if(adxHandle == INVALID_HANDLE)
+      return 0.0;
+
+   double buffer[];
+   // ADX MAIN = buffer index 0
+   if(CopyBuffer(adxHandle, 0, shift, 1, buffer) <= 0)
+      return 0.0;
+
+   return buffer[0];
 }
