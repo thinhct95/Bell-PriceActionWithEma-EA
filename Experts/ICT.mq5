@@ -153,6 +153,11 @@ string  BOS_Names[3][2];     // tên objects (composite) cho mỗi store entry
 int     BOS_Count[3] = {0,0,0}; // số BOS hiện có cho mỗi slot (0..2)
 bool    BOS_HaveZone[3][2];  // flag có zone hay không
 
+input int NYStartHourVN = 19;
+input int NYEndHourVN   = 23;
+input int LondonStartHourVN = 14;
+input int LondonEndHourVN   = 18;
+
 void UpdateMTFFVGTouched(string symbol)
 {
   if(MTF_FVG_count <= 0) return;
@@ -2447,8 +2452,44 @@ void MoveStoplossAdvanced()
   }
 }
 
-void OnTick()
+bool IsEntryTimeAllowed()
 {
+   datetime now = TimeCurrent();
+   MqlDateTime t;
+   TimeToStruct(now, t);
+
+   int hour = t.hour;
+
+   // ===== LONDON =====
+   if(hour >= LondonStartHourVN && hour < LondonEndHourVN)
+      return true;
+
+   // ===== NEW YORK =====
+   if(hour >= NYStartHourVN && hour < NYEndHourVN)
+      return true;
+
+   return false;
+}
+
+bool IsAllowedToTrade()
+{
+   if(!IsEntryTimeAllowed())
+      return false;
+
+  //  if(EnableNewsFilter &&
+  //     IsHighImpactNewsNear(_Symbol,
+  //                           NewsBlockBeforeMin,
+  //                           NewsBlockAfterMin))
+      return false;
+
+   return true;
+}
+
+
+void OnTick() {
+  if(!IsAllowedToTrade())
+   return;
+   
   string sym = Symbol();
 
   CancelExpiredLimitOrder();
