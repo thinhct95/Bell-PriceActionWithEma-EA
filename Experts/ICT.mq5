@@ -86,9 +86,9 @@ input bool   PrintToExperts = false;    // không dùng — logs đã được c
 // slot 0 = HTF, 1 = MTF, 2 = LTF
 int TrendTF[3]; // 1 = up, -1 = down, 0 = sideway / unknown
 
-input ENUM_TIMEFRAMES HighTF = PERIOD_D1;    // Khung thời gian cao
-input ENUM_TIMEFRAMES MiddleTF = PERIOD_H1;  // Khung thời gian trung bình (dùng để tìm FVG)
-input ENUM_TIMEFRAMES LowTF = PERIOD_M5;    // Khung thời gian thấp (Tìm điểm vào lệnh)
+input ENUM_TIMEFRAMES HighTF = PERIOD_H4;    // Khung thời gian cao
+input ENUM_TIMEFRAMES MiddleTF = PERIOD_M15;  // Khung thời gian trung bình (dùng để tìm FVG)
+input ENUM_TIMEFRAMES LowTF = PERIOD_M1;    // Khung thời gian thấp (Tìm điểm vào lệnh)
 
 // --- multi-TF swing storage (slots) ---
 // slot 0 = HighTF, slot 1 = MiddleTF, slot 2 = LowTF
@@ -1928,13 +1928,13 @@ bool CheckValidEntry(
   if(mssDirection == 0)
     return false;
 
-  // HTF phải có trend rõ ràng
-  if(htfTrend == 0)
-  {
-    if(PrintEntryLog)
-      Print("CheckValidEntry FAIL: HTF is SIDEWAY");
-    return false;
-  }
+  // HTF phải có trend rõ ràng // TEST
+  // if(htfTrend == 0)
+  // {
+  //   if(PrintEntryLog)
+  //     Print("CheckValidEntry FAIL: HTF is SIDEWAY");
+  //   return false;
+  // }
 
   if(fvgIndex < 0 || fvgIndex >= MTF_FVG_count)
   {
