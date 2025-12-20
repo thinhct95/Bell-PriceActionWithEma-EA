@@ -35,6 +35,7 @@ input int NewYorkAvoidLastMin  = 60;   // tránh 60 phút cuối phiên
 input double RiskPercent = 1.0;   // % vốn rủi ro mỗi lệnh
 input double RiskReward = 2.0;    // R:R = 1:2
 
+input double MaxDailyLossPercent = 3.0; // Dừng lệnh nếu lỗ vượt 3% vốn trong ngày
 //====================================================
 // DATA STRUCTURE
 //====================================================
@@ -95,6 +96,8 @@ struct OBWatchState
    double   obHigh;
    double   obLow;
    datetime createdTime;
+   int      barsAlive;   // số bar trigger TF đã trôi qua
+   int      triggerStartBar;
 };
 
 OBWatchState g_OBWatch;
@@ -102,13 +105,14 @@ OBWatchState g_OBWatch;
 struct OrderPlan
 {
    bool    valid;
-
    int     direction;   // 1 = buy, -1 = sell
    double  entry;
+
    double  stopLoss;
    double  takeProfit;
+
+   double  riskPoints;
    double  lot;
-   int     sourceSwingIndex; // cây nến tạo swing bị phá
 };
 
 struct TriggerTFStructure
@@ -127,6 +131,15 @@ struct TriggerTFStructure
 };
 
 TriggerTFStructure g_TriggerTF;
+
+struct DailyRiskState
+{
+   double   startBalance;
+   datetime dayStartTime;
+   bool     lossLimitHit;
+};
+
+DailyRiskState g_DailyRisk;
 
 void UpdateHTFBias(
    ENUM_TIMEFRAMES biasTf,
@@ -193,15 +206,53 @@ void UpdateHTFBias(
    state.bias = HTF_BIAS_NONE;
 }
 
-bool IsHTFBiasAligned(
-   ENUM_HTF_BIAS bias,
-   int trendDirection
-)
-{
+bool IsHTFBiasAligned(ENUM_HTF_BIAS bias, int trendDirection) {
    if(bias == HTF_BIAS_UP   && trendDirection == 1)  return true;
    if(bias == HTF_BIAS_DOWN && trendDirection == -1) return true;
 
    return false;
+}
+
+bool IsDailyLossExceeded(
+   DailyRiskState &risk,
+   double maxLossPercent
+)
+{
+   if(risk.lossLimitHit)
+      return true;
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   double lossPct =
+      (risk.startBalance - balance)
+      / risk.startBalance * 100.0;
+
+   if(lossPct >= maxLossPercent)
+   {
+      risk.lossLimitHit = true;
+
+      PrintFormat(
+         "⛔ MAX DAILY LOSS HIT | Loss=%.2f%% (Limit=%.2f%%)",
+         lossPct,
+         maxLossPercent
+      );
+      return true;
+   }
+
+   return false;
+}
+
+void UpdateDailyRiskState(DailyRiskState &risk)
+{
+   // Thời gian mở nến D1 hiện tại
+   datetime dailyBarTime = iTime(_Symbol, PERIOD_D1, 0);
+
+   if(dailyBarTime != risk.dayStartTime)
+   {
+      risk.dayStartTime  = dailyBarTime;
+      risk.startBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      risk.lossLimitHit = false;
+   }
 }
 
 //====================================================
@@ -567,6 +618,13 @@ bool FindTrendOrderBlock(
             obHigh = iHigh(_Symbol, timeframe, i);
             obLow  = iLow (_Symbol, timeframe, i);
             obCandleIndex = i;
+            
+            double range = MathAbs(obHigh - obLow);
+            double minRange = 10 * _Point;
+
+            if(range < minRange)
+               continue;
+
             return true;
          }
       }
@@ -587,6 +645,13 @@ bool FindTrendOrderBlock(
             obHigh = iHigh(_Symbol, timeframe, i);
             obLow  = iLow (_Symbol, timeframe, i);
             obCandleIndex = i;
+            
+            double range = MathAbs(obHigh - obLow);
+            double minRange = 10 * _Point;
+
+            if(range < minRange)
+               continue;
+
             return true;
          }
       }
@@ -633,28 +698,34 @@ bool IsTriggerTFStructureBreak(
 {
    if(!ts.valid) return false;
 
-   double close = iClose(_Symbol, tf, 1);
+   double high = iHigh(_Symbol, tf, 1);
+   double low  = iLow (_Symbol, tf, 1);
 
    if(trendDirection == 1)
-      return close > ts.breakLevel;
+      return high > ts.breakLevel;
 
    if(trendDirection == -1)
-      return close < ts.breakLevel;
+      return low < ts.breakLevel;
 
    return false;
 }
 
 void UpdateTriggerTFStructure(
    ENUM_TIMEFRAMES tf,
-   TriggerTFStructure &ts
+   TriggerTFStructure &ts,
+   int startBar
 ) {
-   double sh, sl;
-   int shi, sli;
+   double sh  = 0.0;
+   double sl  = 0.0;
+   int    shi = -1;
+   int    sli = -1;
 
    bool foundHigh = false;
    bool foundLow  = false;
 
-   for(int i = SwingDetectionRange + 1; i < StructureScanLookbackBars; i++)
+   for(int i = startBar + SwingDetectionRange;
+    i < startBar + StructureScanLookbackBars;
+    i++)
    {
       if(!foundHigh && IsSwingHighAtBar(tf, i))
       {
@@ -722,6 +793,8 @@ void TryActivateOBWatch(
    g_OBWatch.obHigh      = obHigh;
    g_OBWatch.obLow       = obLow;
    g_OBWatch.createdTime = TimeCurrent();
+   g_OBWatch.barsAlive = 0;
+   g_OBWatch.triggerStartBar = 1; 
 
    // Debug (optional)
    PrintFormat(
@@ -735,8 +808,15 @@ void TryActivateOBWatch(
 void HandleOBWatching(
    const TrendState &trend,
    double            currentPrice
-)
-{
+) {
+   g_OBWatch.barsAlive++;
+
+   if(g_OBWatch.barsAlive > 150) // ~30 bar M5 = ~150 phút
+   {
+      ResetOBWatch();
+      return;
+   }
+
    // 1️⃣ Bias hoặc trend không còn hợp lệ
    if(!IsHTFBiasAligned(g_HTFBias.bias, trend.trendDirection))
    {
@@ -773,10 +853,11 @@ void HandleOBWatching(
    // =================================================
    // 🔥 TRIGGER TF STRUCTURE LOGIC (CHỖ QUAN TRỌNG)
    // =================================================
-   if(!g_TriggerTF.valid)
-   {
-      UpdateTriggerTFStructure(TriggerTimeframe, g_TriggerTF);
-   }
+   UpdateTriggerTFStructure(
+      TriggerTimeframe,
+      g_TriggerTF,
+      g_OBWatch.triggerStartBar
+   );
 
    if(IsTriggerTFStructureBreak(g_TriggerTF,
                              trend.trendDirection,
@@ -803,12 +884,8 @@ void HandleOBWatching(
             plan.takeProfit,
             RiskReward
          );
-
-         // === SEND ORDER Ở ĐÂY ===
-         // SendMarketOrder(plan) hoặc PlacePending(plan)
-
-         MarkOBAsUsed();
       }
+            
    }
 
 }
@@ -871,7 +948,10 @@ OrderPlan BuildOrderPlanFromTriggerTF(
 
    plan.valid     = true;
    plan.direction = ts.direction;
-   plan.entry     = entryPrice;
+   plan.entry = (ts.direction == 1)
+             ? g_OBWatch.obHigh   // buy tại đỉnh OB
+             : g_OBWatch.obLow;   // sell tại đáy OB
+
 
    double riskPoints;
 
@@ -910,32 +990,36 @@ OrderPlan BuildOrderPlanFromTriggerTF(
 double CalculateRiskLot(
    double entryPrice,
    double stopLossPrice
-) {
-   double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-   double riskMoney  = balance * RiskPercent / 100.0;
+)
+{
+   double equity    = AccountInfoDouble(ACCOUNT_EQUITY);
+   double riskMoney = equity * RiskPercent / 100.0;
 
-   double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-
-   if(tickValue <= 0 || tickSize <= 0)
+   double contractSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+   if(contractSize <= 0)
       return 0;
 
-   double slPoints = MathAbs(entryPrice - stopLossPrice) / _Point;
-   if(slPoints <= 0)
+   double slDistance = MathAbs(entryPrice - stopLossPrice);
+   if(slDistance <= _Point)
       return 0;
 
-   double costPerLot = slPoints * (tickValue / tickSize);
-   double lot        = riskMoney / costPerLot;
+   // Cost cho 1 lot nếu SL hit
+   double costPerLot = slDistance * contractSize;
+
+   if(costPerLot <= 0)
+      return 0;
+
+   double rawLot = riskMoney / costPerLot;
 
    // ===== Normalize theo broker =====
    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
-   lot = MathMax(minLot, MathMin(lot, maxLot));
-   lot = NormalizeDouble(lot, (int)MathLog10(1.0 / lotStep));
+   rawLot = MathMax(minLot, MathMin(rawLot, maxLot));
+   rawLot = MathFloor(rawLot / lotStep) * lotStep;
 
-   return lot;
+   return NormalizeDouble(rawLot, 2);
 }
 
 void ExecuteOrder(const OrderPlan &plan)
@@ -947,13 +1031,11 @@ void ExecuteOrder(const OrderPlan &plan)
    ZeroMemory(req);
    ZeroMemory(res);
 
-   req.action   = TRADE_ACTION_DEAL;
+   req.action = TRADE_ACTION_PENDING;
    req.symbol   = _Symbol;
    req.volume   = plan.lot;
-   req.type     = plan.direction == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   req.price    = plan.direction == 1 ?
-                  SymbolInfoDouble(_Symbol, SYMBOL_ASK) :
-                  SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   req.type     = plan.direction == 1 ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
+   req.price  = plan.entry;
 
    req.sl       = plan.stopLoss;
    req.tp       = plan.takeProfit;
@@ -961,11 +1043,16 @@ void ExecuteOrder(const OrderPlan &plan)
    req.magic    = 202501;
    req.comment  = "ICT_OB_Trigger";
 
-   OrderSend(req, res);
+   bool sent = OrderSend(req, res);
 
-   if(res.retcode != TRADE_RETCODE_DONE)
+   if(!sent || res.retcode != TRADE_RETCODE_DONE)
    {
-      Print("❌ OrderSend failed: ", res.retcode);
+      PrintFormat(
+         "❌ OrderSend failed | sent=%d | retcode=%d",
+         sent,
+         res.retcode
+      );
+      return;
    }
    else
    {
@@ -976,11 +1063,17 @@ void ExecuteOrder(const OrderPlan &plan)
          plan.stopLoss,
          plan.takeProfit
       );
+      MarkOBAsUsed();
    }
 }
 
 void OnTick()
 {
+   UpdateDailyRiskState(g_DailyRisk);
+
+   if(IsDailyLossExceeded(g_DailyRisk, MaxDailyLossPercent))
+      return;
+
    if(!IsNewBarFormed(TriggerTimeframe, g_LastTriggerBarTime))
       return;
 
