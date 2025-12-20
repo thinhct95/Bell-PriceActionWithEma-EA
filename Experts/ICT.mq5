@@ -39,9 +39,9 @@ input double trailingStopStartR = 2;   // Advanced moving SL: bắt đầu kích
 input double trailOffsetR = 1.5;   // Advanced moving SL: khoảng cách SL so với giá hiện tại
 
 // Cấu hình Swing
-input int htfSwingRange = 3;   // D1/H4: chắc trend
-input int mtfSwingRange = 3;   // H1: BOS rõ
-input int ltfSwingRange = 4;   // M5: giảm fake MSS
+input int htfSwingRange = 1;   // D1/H4: chắc trend
+input int mtfSwingRange = 2;   // H1: BOS rõ
+input int ltfSwingRange = 2;   // M5: giảm fake MSS
 input int           MaxSwingKeep = 2;            // Số đỉnh/đáy gần nhất cần lưu (bạn yêu cầu 2)
 
 // Struct pending entry (single slot)
@@ -86,9 +86,9 @@ input bool   PrintToExperts = false;    // không dùng — logs đã được c
 // slot 0 = HTF, 1 = MTF, 2 = LTF
 int TrendTF[3]; // 1 = up, -1 = down, 0 = sideway / unknown
 
-input ENUM_TIMEFRAMES HighTF = PERIOD_H4;    // Khung thời gian cao
-input ENUM_TIMEFRAMES MiddleTF = PERIOD_M15;  // Khung thời gian trung bình (dùng để tìm FVG)
-input ENUM_TIMEFRAMES LowTF = PERIOD_M1;    // Khung thời gian thấp (Tìm điểm vào lệnh)
+input ENUM_TIMEFRAMES HighTF = PERIOD_W1;    // Khung thời gian cao
+input ENUM_TIMEFRAMES MiddleTF = PERIOD_H4;  // Khung thời gian trung bình (dùng để tìm FVG)
+input ENUM_TIMEFRAMES LowTF = PERIOD_M15;    // Khung thời gian thấp (Tìm điểm vào lệnh)
 
 // --- multi-TF swing storage (slots) ---
 // slot 0 = HighTF, slot 1 = MiddleTF, slot 2 = LowTF
