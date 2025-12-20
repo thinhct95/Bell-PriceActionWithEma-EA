@@ -1,0 +1,5 @@
+Issues: Còn nhiều bug, EA không vào lệnh
+
+1. Draw OB -> Chưa thành công.
+2. Draw label, trend ngay khi khởi tạo. -> đang bị chậm
+3. OB đang được active ngay khi tìm thấy -> xem câu trả lời gần nhất của GPT để giải quyết vấn đề Logic và Draw

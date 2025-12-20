@@ -30,7 +30,7 @@ input double MaxDailyLossPercent = 3.0;
 bool PrintEntryLog = true;   // nếu true -> in log chỉ liên quan tới entry
 
 input double RishPercent = 1.0;        // % vốn rủi ro cho mỗi lệnh
-input double RiskRewardRatio = 3.0;   // tỉ lệ R:R mặc định
+input double RiskRewardRatio = 6.0;   // tỉ lệ R:R mặc định
 
 input double numberOfRToMoveToEntry = 1;   // Nomal moving SL: số R cần đạt để dời SL về entry (BE)
 input int MaxLimitOrderTime = 180;
