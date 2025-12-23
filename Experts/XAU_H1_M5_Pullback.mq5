@@ -6,6 +6,9 @@
 //+------------------------------------------------------------------+
 #property strict
 
+#define OBJ_OB_RECT   "OB_RECT"
+#define OBJ_OB_LABEL  "OB_LABEL"
+
 //====================================================
 // DEBUG CONFIG
 //====================================================
@@ -16,6 +19,28 @@ input bool Debug_OB = false;
 input bool Debug_TriggerTF = false;
 input bool Debug_Order = true;
 input bool Debug_DrawOnChart = true;
+
+input int TriggerMaxScanBars = 30;
+
+enum ENUM_OB_STATE
+{
+  OB_NONE = 0,     // chưa có OB nào
+  OB_CANDIDATE,   // tìm được OB hợp lệ, CHƯA CHẠM
+  OB_TOUCHED,      // đã chạm (mitigated), chờ trigger
+  OB_USED,        // đã trade HOẶC bị invalidate (KẾT THÚC)
+};
+
+enum ENUM_BLOCK_REASON
+{
+    BLOCK_NONE,
+    BLOCK_NO_OB,
+    BLOCK_OB_NOT_TOUCHED,
+    BLOCK_BIAS_MISMATCH,
+    BLOCK_SESSION,
+    BLOCK_DAILY_LOSS
+};
+
+ENUM_BLOCK_REASON g_BlockReason = BLOCK_NONE;
 
 enum ENUM_OB_RESET_REASON
 {
@@ -127,10 +152,7 @@ struct OBWatchState
 {
   int direction; // 1 = buy, -1 = sell
 
-  bool active;   // đang theo dõi OB
-  bool used;     // OB đã được sử dụng (entry xong)
-
-  bool touched;        // 🔥 GIÁ ĐÃ CHẠM OB
+  ENUM_OB_STATE state;
   datetime touchTime;  // 🔥 thời điểm chạm đầu tiên
 
   double obHigh;
@@ -296,25 +318,215 @@ void UpdateDailyRiskState(DailyRiskState &risk)
   }
 }
 
+void BootstrapHTFBias(
+    ENUM_TIMEFRAMES biasTf,
+    HTFBiasState &state)
+{
+  // ép reset
+  state.lastUpdateTime = 0;
+
+  // đảm bảo đủ data
+  if (Bars(_Symbol, biasTf) < 5)
+    return;
+
+  UpdateHTFBias(biasTf, state);
+}
+
+void BootstrapMarketStructure(
+    ENUM_TIMEFRAMES tf,
+    TrendState &state)
+{
+  ZeroMemory(state);
+  state.trendDirection = 0;
+  state.lastStructureUpdateTime = 0;
+
+  int maxBar =
+      MathMin(StructureScanLookbackBars,
+              Bars(_Symbol, tf) - SwingDetectionRange - 2);
+
+  double highs[2], lows[2];
+  int hiIdx[2], loIdx[2];
+  int hc = 0, lc = 0;
+
+  for (int i = SwingDetectionRange + 1; i <= maxBar; i++)
+  {
+    if (hc < 2 && IsSwingHighAtBar(tf, i))
+    {
+      highs[hc] = iHigh(_Symbol, tf, i);
+      hiIdx[hc] = i;
+      hc++;
+    }
+
+    if (lc < 2 && IsSwingLowAtBar(tf, i))
+    {
+      lows[lc] = iLow(_Symbol, tf, i);
+      loIdx[lc] = i;
+      lc++;
+    }
+
+    if (hc == 2 && lc == 2)
+      break;
+  }
+
+  if (hc < 2 || lc < 2)
+    return;
+
+  state.latestSwingHigh = highs[0];
+  state.previousSwingHigh = highs[1];
+  state.latestSwingLow = lows[0];
+  state.previousSwingLow = lows[1];
+
+  state.latestSwingHighIndex = hiIdx[0];
+  state.previousSwingHighIndex = hiIdx[1];
+  state.latestSwingLowIndex = loIdx[0];
+  state.previousSwingLowIndex = loIdx[1];
+
+  // interpret structure
+  if (state.previousSwingHigh < state.latestSwingHigh &&
+      state.previousSwingLow < state.latestSwingLow)
+  {
+    state.trendDirection = 1;
+    state.currentKeyLevel = state.latestSwingLow;
+  }
+  else if (state.previousSwingHigh > state.latestSwingHigh &&
+           state.previousSwingLow > state.latestSwingLow)
+  {
+    state.trendDirection = -1;
+    state.currentKeyLevel = state.latestSwingHigh;
+  }
+}
+
+bool BootstrapOBCandidate(
+    ENUM_TIMEFRAMES tf,
+    const TrendState &trend,
+    OBWatchState &ob)
+{
+    double h, l;
+    int idx;
+
+    if (!FindTrendOrderBlock(tf, trend, h, l, idx))
+        return false;
+
+    ob.state  = OB_CANDIDATE;   // candidate
+    ob.direction   = trend.trendDirection;
+    ob.obHigh      = h;
+    ob.obLow       = l;
+    ob.createdTime = iTime(_Symbol, tf, idx);
+    ob.barsAlive   = 0;
+    ob.triggerStartBar = 1;
+
+    return true;
+}
+
+void DrawInitialContext()
+{
+  DrawMarketStructure(TrendTimeframe, g_TrendState);
+  DrawTrendSummaryLabel(g_TrendState);
+  DrawEAStateOverlay();
+
+  // OB candidate (chưa chạm)
+  if (g_OBWatch.obHigh > 0 && g_OBWatch.state == OB_CANDIDATE)
+    DrawCandidateOB(g_OBWatch);
+}
+
 //====================================================
 // INITIALIZATION
 //====================================================
 int OnInit()
 {
+  // ===============================
+  // 0️⃣ RESET TOÀN BỘ STATE
+  // ===============================
   ZeroMemory(g_TrendState);
-  g_TrendState.trendDirection = 0;
-  g_TrendState.lastStructureUpdateTime = 0;
+  ZeroMemory(g_HTFBias);
+  ZeroMemory(g_OBWatch);
+  ZeroMemory(g_TriggerTF);
+  ZeroMemory(g_DailyRisk);
 
-  g_HTFBias.bias = HTF_BIAS_NONE;
-  g_HTFBias.rangeHigh = 0;
-  g_HTFBias.rangeLow = 0;
-  g_HTFBias.lastUpdateTime = 0;
+  g_EAStep = EA_STEP_IDLE;
+  g_LastTriggerBarTime = 0;
 
-  g_OBWatch.active = false;
+  // ===============================
+  // 1️⃣ ENSURE HISTORY READY
+  // ===============================
+  if (Bars(_Symbol, TrendTimeframe) < StructureScanLookbackBars + 10 ||
+      Bars(_Symbol, BiasTimeframe) < 5)
+  {
+    Print("⏳ Not enough historical data to initialize EA");
+    return INIT_FAILED;
+  }
 
-  Print("ICT Early Trend Detection EA initialized successfully");
+  // ===============================
+  // 2️⃣ BOOTSTRAP HTF BIAS
+  // ===============================
+  BootstrapHTFBias(BiasTimeframe, g_HTFBias);
+
+  if (Debug_HTFBias)
+    PrintFormat("INIT | HTF Bias = %d", g_HTFBias.bias);
+
+  // ===============================
+  // 3️⃣ BOOTSTRAP TREND STRUCTURE
+  // ===============================
+  BootstrapMarketStructure(TrendTimeframe, g_TrendState);
+
+  if (!HasConfirmedMarketStructure(g_TrendState))
+  {
+    Print("⚠ INIT | Market structure not confirmed yet");
+    return INIT_SUCCEEDED; // vẫn cho EA chạy, nhưng không trade
+  }
+
+  if (Debug_Trend)
+  {
+    PrintFormat(
+      "INIT | Trend=%d | H0=%.2f | H1=%.2f | L0=%.2f | L1=%.2f",
+      g_TrendState.trendDirection,
+      g_TrendState.latestSwingHigh,
+      g_TrendState.previousSwingHigh,
+      g_TrendState.latestSwingLow,
+      g_TrendState.previousSwingLow
+    );
+  }
+
+  // ===============================
+  // 4️⃣ BOOTSTRAP OB CANDIDATE
+  // ===============================
+  if (IsHTFBiasAligned(g_HTFBias.bias, g_TrendState.trendDirection))
+  {
+    bool obFound = BootstrapOBCandidate(
+        TrendTimeframe,
+        g_TrendState,
+        g_OBWatch);
+
+    if (obFound)
+    {
+      g_EAStep = EA_STEP_WAIT_OB;
+
+      if (Debug_OB)
+        PrintFormat(
+          "INIT | OB Candidate [%0.2f - %0.2f]",
+          g_OBWatch.obLow,
+          g_OBWatch.obHigh
+        );
+    }
+    else
+    {
+      if (Debug_OB)
+        Print("INIT | No valid OB candidate found");
+    }
+  }
+  else
+  {
+    if (Debug_HTFBias)
+      Print("INIT | Bias not aligned with trend → skip OB bootstrap");
+  }
+
+  Print("✅ ICT Early Trend Detection EA initialized (BOOTSTRAPPED)");
+
+  DrawInitialContext();
+
   return INIT_SUCCEEDED;
 }
+
 
 //====================================================
 // BAR UTILITY
@@ -556,72 +768,90 @@ bool FindTrendOrderBlock(
     double &obLow,
     int &obCandleIndex)
 {
-  obHigh = 0;
-  obLow = 0;
-  obCandleIndex = -1;
+    obHigh = 0;
+    obLow = 0;
+    obCandleIndex = -1;
 
-  // ===== UP TREND =====
-  if (trend.trendDirection == 1)
-  {
-    // Bắt đầu từ swing low gần nhất (key level)
-    for (int i = trend.latestSwingLowIndex - 1; i >= 1; i--)
+    // ===== XÁC ĐỊNH VÙNG QUÉT =====
+    int scanFrom, scanTo;
+
+    if (trend.trendDirection == 1)
     {
-      double open = iOpen(_Symbol, timeframe, i);
-      double close = iClose(_Symbol, timeframe, i);
-
-      // Nến giảm
-      if (close < open)
-      {
-        obHigh = iHigh(_Symbol, timeframe, i);
-        obLow = iLow(_Symbol, timeframe, i);
-        obCandleIndex = i;
-
-        double range = MathAbs(obHigh - obLow);
-        double minRange = 10 * _Point;
-
-        if (range < minRange)
-          continue;
-
-        return true;
-      }
+        // Uptrend: OB phải nằm giữa L1 -> L0
+        scanFrom = trend.latestSwingLowIndex - 1;
+        scanTo   = trend.previousSwingLowIndex + 1;
     }
-  }
-
-  // ===== DOWN TREND =====
-  if (trend.trendDirection == -1)
-  {
-    // Bắt đầu từ swing high gần nhất (key level)
-    for (int i = trend.latestSwingHighIndex - 1; i >= 1; i--)
+    else if (trend.trendDirection == -1)
     {
-      double open = iOpen(_Symbol, timeframe, i);
-      double close = iClose(_Symbol, timeframe, i);
-
-      // Nến tăng
-      if (close > open)
-      {
-        obHigh = iHigh(_Symbol, timeframe, i);
-        obLow = iLow(_Symbol, timeframe, i);
-        obCandleIndex = i;
-
-        double range = MathAbs(obHigh - obLow);
-        double minRange = 10 * _Point;
-
-        if (range < minRange)
-          continue;
-
-        return true;
-      }
+        // Downtrend: OB phải nằm giữa H1 -> H0
+        scanFrom = trend.latestSwingHighIndex - 1;
+        scanTo   = trend.previousSwingHighIndex + 1;
     }
-  }
+    else
+        return false;
 
-  return false;
+    scanFrom = MathMax(scanFrom, 1);
+    scanTo   = MathMax(scanTo, 1);
+
+    // ===== QUÉT OB =====
+    for (int i = scanFrom; i >= scanTo; i--)
+    {
+        double open  = iOpen(_Symbol, timeframe, i);
+        double close = iClose(_Symbol, timeframe, i);
+
+        // ===== NẾN NGƯỢC TREND =====
+        bool isBear = close < open;
+        bool isBull = close > open;
+
+        if ((trend.trendDirection == 1 && !isBear) ||
+            (trend.trendDirection == -1 && !isBull))
+            continue;
+
+        double h = iHigh(_Symbol, timeframe, i);
+        double l = iLow(_Symbol, timeframe, i);
+
+        // ===== RANGE FILTER =====
+        if (MathAbs(h - l) < 10 * _Point)
+            continue;
+
+        // ===== FILTER 1: OB PHẢI NẰM TRONG CON SÓNG =====
+        if (trend.trendDirection == 1 && l < trend.latestSwingLow)
+            continue;
+
+        if (trend.trendDirection == -1 && h > trend.latestSwingHigh)
+            continue;
+
+        // ===== FILTER 2: CHƯA BỊ MITIGATION =====
+        bool mitigated = false;
+        for (int j = i - 1; j >= 1; j--)
+        {
+            double price = iClose(_Symbol, timeframe, j);
+            if (HasPriceTouchedOB(trend.trendDirection, h, l, price))
+            {
+                mitigated = true;
+                break;
+            }
+        }
+        if (mitigated)
+            continue;
+
+        // ===== FILTER 3: CHƯA BỊ CLOSE BREAK (HTF) =====
+        if (IsOBCloseBreak(trend.trendDirection, h, l))
+            continue;
+
+        // ===== OK → OB HỢP LỆ =====
+        obHigh = h;
+        obLow  = l;
+        obCandleIndex = i;
+        return true;
+    }
+
+    return false;
 }
 
 void ResetOBWatch()
 {
-  g_OBWatch.active  = false;
-  g_OBWatch.used    = false;
-  g_OBWatch.touched = false;
+  g_OBWatch.state = OB_NONE;
   g_OBWatch.touchTime = 0;
 
   g_OBWatch.direction = 0;
@@ -691,7 +921,7 @@ void UpdateTriggerTFStructure(
   bool foundLow = false;
 
   for (int i = startBar + SwingDetectionRange;
-       i < startBar + StructureScanLookbackBars;
+       i < startBar + TriggerMaxScanBars;
        i++)
   {
     if (!foundHigh && IsSwingHighAtBar(tf, i))
@@ -735,41 +965,35 @@ void UpdateTriggerTFStructure(
   }
 }
 
-void TryActivateOBWatch(
+void CheckOBTouchAndActivate(
     const TrendState &trend,
     double currentPrice)
 {
-  if (g_OBWatch.used)
-    return;
-  double obHigh, obLow;
-  int obIndex;
+    // Chỉ xử lý khi có OB candidate đang chờ active
+    if (g_OBWatch.state != OB_CANDIDATE) return;
 
-  if (!FindTrendOrderBlock(TrendTimeframe,
-                           trend,
-                           obHigh,
-                           obLow,
-                           obIndex))
-    return;
+    // Kiểm tra giá chạm OB đang theo dõi
+    if (!HasPriceTouchedOB(
+            g_OBWatch.direction,
+            g_OBWatch.obHigh,
+            g_OBWatch.obLow,
+            currentPrice))
+    {
+        g_BlockReason = BLOCK_OB_NOT_TOUCHED;
+        return;
+    }
 
-  g_OBWatch.active = true;
-  g_OBWatch.touched = false;
-  g_OBWatch.used = false;
+    // ===== OB BỊ MITIGATE =====
+    MarkOBAsTouched(g_OBWatch, TriggerTimeframe);
 
-  ResetTriggerTFStructure();
-  
-  g_OBWatch.direction = trend.trendDirection;
-  g_OBWatch.obHigh = obHigh;
-  g_OBWatch.obLow = obLow;
-  g_OBWatch.createdTime = iTime(_Symbol, TriggerTimeframe, 0);
-  g_OBWatch.barsAlive = 0;
-  g_OBWatch.triggerStartBar = 1;
-
-  // Debug (optional)
-  PrintFormat(
-      "OB WATCH ACTIVATED | dir=%d | OB[%.2f - %.2f]",
-      g_OBWatch.direction,
-      g_OBWatch.obLow,
-      g_OBWatch.obHigh);
+    if (Debug_OB)
+    {
+        PrintFormat(
+            "🟦 OB MITIGATED | dir=%d | OB[%.2f - %.2f]",
+            g_OBWatch.direction,
+            g_OBWatch.obLow,
+            g_OBWatch.obHigh);
+    }
 }
 
 void HandleOBWatching(
@@ -790,7 +1014,7 @@ void HandleOBWatching(
                      g_OBWatch.obLow))
   {
     g_LastOBResetReason = OB_RESET_CLOSE_BREAK; // DEBUG
-    ResetOBWatch();
+    MarkOBAsUsed(); // đánh dấu đã dùng
     return;
   }
 
@@ -801,7 +1025,7 @@ void HandleOBWatching(
                       currentPrice))
   {
     g_LastOBResetReason = OB_RESET_INVALIDATED; // DEBUG
-    ResetOBWatch();
+    MarkOBAsUsed(); // đánh dấu đã dùng
     return;
   }
 
@@ -821,21 +1045,6 @@ void HandleOBWatching(
     ResetOBWatch();
     return;
   }
-
-  // DEBUG: Touch -> Draw on chart
-  if(!g_OBWatch.touched &&
-   HasPriceTouchedOB(g_OBWatch.direction,
-                     g_OBWatch.obHigh,
-                     g_OBWatch.obLow,
-                     currentPrice))
-  {
-    g_OBWatch.touched   = true;
-    g_OBWatch.touchTime = iTime(_Symbol, TriggerTimeframe, 1);
-
-    if(Debug_OB)
-        Print("🟦 OB TOUCHED");
-  }
-
 
   // =================================================
   // 🔥 TRIGGER TF STRUCTURE LOGIC (CHỖ QUAN TRỌNG)
@@ -875,8 +1084,8 @@ void HandleOBWatching(
 
 bool IsOBExpired(const OBWatchState &ob)
 {
-  if (!ob.active)
-    return true;
+  if (ob.createdTime <= 0)
+    return false;
 
   int aliveSec = (int)(TimeCurrent() - ob.createdTime);
   return aliveSec > OBMaxAliveMinutes * 60;
@@ -884,16 +1093,45 @@ bool IsOBExpired(const OBWatchState &ob)
 
 void MarkOBAsUsed()
 {
-  g_OBWatch.used = true;
-  g_OBWatch.active = false;
+  g_OBWatch.state = OB_USED;
 }
+
+void MarkOBAsTouched(
+    OBWatchState &ob,
+    ENUM_TIMEFRAMES triggerTf)
+{
+  if (ob.state != OB_CANDIDATE) return;
+
+  ob.state = OB_TOUCHED;
+
+  // Thời điểm chạm đầu tiên (bar đã đóng)
+  ob.touchTime = iTime(_Symbol, triggerTf, 1);
+
+  // Reset trigger waiting
+  ob.barsAlive = 0;
+  ob.triggerStartBar = 1;
+
+  // Reset trigger TF structure
+  ResetTriggerTFStructure();
+
+  if (Debug_OB)
+  {
+    PrintFormat(
+        "🟦 OB TOUCHED | dir=%d | OB[%.2f - %.2f]",
+        ob.direction,
+        ob.obLow,
+        ob.obHigh
+    );
+  }
+}
+
 
 bool IsOBCloseBreak(
     int direction,
     double obHigh,
     double obLow)
 {
-  double close = iClose(_Symbol, TriggerTimeframe, 1);
+  double close = iClose(_Symbol, TrendTimeframe, 1);
 
   if (direction == 1) // buy OB
     return close < obLow;
@@ -1049,82 +1287,157 @@ void ExecuteOrder(const OrderPlan &plan)
   }
 }
 
+bool IsOBCandidateStillValid(
+    const OBWatchState &ob,
+    const TrendState &trend)
+{
+    // OB phải cùng direction
+    if (ob.direction != trend.trendDirection)
+        return false;
+
+    // OB phải nằm trong con sóng hiện tại
+    if (trend.trendDirection == 1) // uptrend
+    {
+        if (ob.obLow < trend.previousSwingLow ||
+            ob.obLow > trend.latestSwingLow)
+            return false;
+    }
+    else // downtrend
+    {
+        if (ob.obHigh > trend.previousSwingHigh ||
+            ob.obHigh < trend.latestSwingHigh)
+            return false;
+    }
+
+    return true;
+}
+
 void OnTick()
 {
-  if (!IsNewBarFormed(TriggerTimeframe, g_LastTriggerBarTime))
-    return;
+    // ===== RUN ON NEW BAR (TRIGGER TF) =====
+    if (!IsNewBarFormed(TriggerTimeframe, g_LastTriggerBarTime))
+        return;
 
-  // STEP HOLD LOGIC (DEBUG PURPOSE)
-  if(g_EAStep == EA_STEP_ORDER_SENT)
-  {
-    int currentBar = Bars(_Symbol, TriggerTimeframe);
+    // =============================
+    // STEP HOLD AFTER ORDER SENT
+    // =============================
+    if (g_EAStep == EA_STEP_ORDER_SENT)
+    {
+        int currentBar = Bars(_Symbol, TriggerTimeframe);
+        if (currentBar <= g_OrderSentBarIndex)
+        {
+            DrawEAStateOverlay();
+            return;
+        }
+        g_OrderSentBarIndex = -1;
+    }
 
-    // giữ STEP_ORDER_SENT cho tới khi sang bar mới
-    if(currentBar <= g_OrderSentBarIndex) {
-        DrawEAStateOverlay(); // DEBUG
+    g_EAStep = EA_STEP_IDLE;
+
+    // =============================
+    // SESSION & RISK GUARD
+    // =============================
+    if (!IsTradingSessionAllowed())
+    {
+        g_BlockReason = BLOCK_SESSION;
+        DrawEAStateOverlay();
         return;
     }
 
-    // sang bar mới → cho phép reset to IDLE
-    g_OrderSentBarIndex = -1;
-  }
+    UpdateDailyRiskState(g_DailyRisk);
+    if (IsDailyLossExceeded(g_DailyRisk, MaxDailyLossPercent))
+    {
+        g_BlockReason = BLOCK_DAILY_LOSS;
+        DrawEAStateOverlay();
+        return;
+    }
 
-  g_EAStep = EA_STEP_IDLE; // DEBUG
+    // =============================
+    // CONTEXT UPDATE
+    // =============================
+    g_EAStep = EA_STEP_CONTEXT;
 
-  if (!IsTradingSessionAllowed()) 
-  {
-    DrawEAStateOverlay(); // DEBUG
-    return;
-  }
+    UpdateHTFBias(BiasTimeframe, g_HTFBias);
+    UpdateMarketStructure(TrendTimeframe, g_TrendState);
 
-  UpdateDailyRiskState(g_DailyRisk);
+    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    CheckForEarlyTrendFlip(g_TrendState, currentBid);
 
-  if (IsDailyLossExceeded(g_DailyRisk, MaxDailyLossPercent))
-  {
-    DrawEAStateOverlay(); // DEBUG
-    return;
-  }
+    if (!IsHTFBiasAligned(g_HTFBias.bias, g_TrendState.trendDirection))
+    {
+        g_BlockReason = BLOCK_BIAS_MISMATCH;
+        DrawEAStateOverlay();
+        return;
+    }
 
-  g_EAStep = EA_STEP_CONTEXT; // DEBUG
+    // =====================================================
+    // 🔥 PHASE 0.5: VALIDATE EXISTING OB CANDIDATE
+    // =====================================================
+    if (g_OBWatch.state == OB_CANDIDATE)
+    {
+      if (!IsOBCandidateStillValid(g_OBWatch, g_TrendState))
+      {
+        g_LastOBResetReason = OB_RESET_INVALIDATED; // hoặc OB_RESET_STRUCTURE_CHANGED
+        ResetOBWatch();
 
-  // ===== HTF BIAS =====
-  UpdateHTFBias(BiasTimeframe, g_HTFBias);
+        if (Debug_OB)
+            Print("🔴 OB INVALIDATED → STRUCTURE CHANGED");
+      }
+    }
 
-  // ===== TREND STRUCTURE =====
-  UpdateMarketStructure(TrendTimeframe, g_TrendState);
+    // =====================================================
+    // 🔥 PHASE 0: NO OB → FIND NEW OB CANDIDATE
+    // =====================================================
+    if (g_OBWatch.state != OB_CANDIDATE && g_OBWatch.state != OB_TOUCHED)
+    {
+        g_EAStep = EA_STEP_WAIT_OB;
 
-  double currentBidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-  CheckForEarlyTrendFlip(g_TrendState, currentBidPrice);
+        bool found = BootstrapOBCandidate(
+            TrendTimeframe,
+            g_TrendState,
+            g_OBWatch
+        );
 
-  // ===== ENTRY FILTER =====
-  if (!IsHTFBiasAligned(g_HTFBias.bias, g_TrendState.trendDirection))
-  {
-    DrawEAStateOverlay(); // DEBUG
-    return;
-  }
+        if (found && Debug_OB)
+        {
+            PrintFormat(
+                "🟧 NEW OB CANDIDATE | dir=%d | [%.2f - %.2f]",
+                g_OBWatch.direction,
+                g_OBWatch.obLow,
+                g_OBWatch.obHigh
+            );
+        }
+    }
 
-  // ===== ORDER BLOCK FLOW =====
-  if (!g_OBWatch.active)
-  {
-    g_EAStep = EA_STEP_WAIT_OB; // DEBUG
-    TryActivateOBWatch(g_TrendState, currentBidPrice);
-  }
-  else
-  {
-    g_EAStep = EA_STEP_WAIT_TRIGGER; // DEBUG
-    HandleOBWatching(g_TrendState, currentBidPrice);
-  }
+    // =====================================================
+    // 🔵 PHASE 1: OB CANDIDATE → WAIT FOR TOUCH
+    // =====================================================
+    else if (g_OBWatch.state == OB_CANDIDATE)
+    {
+      g_EAStep = EA_STEP_WAIT_OB;
+      CheckOBTouchAndActivate(g_TrendState, currentBid);
+    }
+    // =====================================================
+    // 🟦 PHASE 2: OB TOUCHED → WAIT TRIGGER
+    // =====================================================
+    else if (g_OBWatch.state == OB_TOUCHED)
+    {
+      g_EAStep = EA_STEP_WAIT_TRIGGER;
+      HandleOBWatching(g_TrendState, currentBid);
+    }
 
-  DrawMarketStructure(TrendTimeframe, g_TrendState);
-  DrawTrendSummaryLabel(g_TrendState);
-  DrawEAStateOverlay();
-  // OB đang sống (chưa bị chạm)
-  if(g_OBWatch.active && !g_OBWatch.touched)
-    DrawActiveOB(g_OBWatch);
+    // =============================
+    // DRAW
+    // =============================
+    DrawMarketStructure(TrendTimeframe, g_TrendState);
+    DrawTrendSummaryLabel(g_TrendState);
+    DrawEAStateOverlay();
 
-  // OB đã chạm → rectangle kết thúc
-  if(g_OBWatch.touched)
-    DrawTouchedOB(g_OBWatch);
+    if (g_OBWatch.state == OB_CANDIDATE && g_OBWatch.state != OB_TOUCHED)
+        DrawCandidateOB(g_OBWatch);
+
+    if (g_OBWatch.state == OB_TOUCHED)
+        DrawTouchedOB(g_OBWatch);
 }
 
 void DebugPrint(bool enabled, string message)
@@ -1195,7 +1508,7 @@ void DrawEAStateOverlay()
                           g_HTFBias.bias),
              70, clrWhite);
 
-  if (g_OBWatch.active)
+  if (g_OBWatch.state == OB_CANDIDATE)
   {
     DebugLabel("EA_OB",
                StringFormat("OB [%0.2f - %0.2f] alive=%d",
@@ -1214,16 +1527,30 @@ void DrawSwingLabel(
     double price,
     color labelColor)
 {
-  if (barIndex < 0)
+  if (barIndex < 0 || price <= 0)
     return;
 
   datetime barTime = iTime(_Symbol, timeframe, barIndex);
 
   ObjectDelete(0, objectName);
   ObjectCreate(0, objectName, OBJ_TEXT, 0, barTime, price);
+
   ObjectSetInteger(0, objectName, OBJPROP_COLOR, labelColor);
-  ObjectSetInteger(0, objectName, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, objectName, OBJPROP_FONTSIZE, 9);
   ObjectSetString(0, objectName, OBJPROP_TEXT, labelText);
+
+  // ===== PIXEL OFFSET =====
+  int SwingLabelYOffsetPx = 20;
+  if (labelText == "H0" || labelText == "H1")
+  {
+    ObjectSetInteger(0, objectName, OBJPROP_ANCHOR, ANCHOR_BOTTOM);
+    ObjectSetInteger(0, objectName, OBJPROP_YDISTANCE, SwingLabelYOffsetPx);
+  }
+  else if (labelText == "L0" || labelText == "L1")
+  {
+    ObjectSetInteger(0, objectName, OBJPROP_ANCHOR, ANCHOR_TOP);
+    ObjectSetInteger(0, objectName, OBJPROP_YDISTANCE, SwingLabelYOffsetPx);
+  }
 }
 
 void DrawMarketStructure(
@@ -1304,9 +1631,9 @@ void DrawOBRectangle(
    ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
 }
 
-void DrawActiveOB(const OBWatchState &ob)
+void DrawCandidateOB(const OBWatchState &ob)
 {
-   if(!ob.active) return;
+   if(ob.state != OB_CANDIDATE) return;
 
    datetime now = iTime(_Symbol, TriggerTimeframe, 0);
 
@@ -1315,7 +1642,7 @@ void DrawActiveOB(const OBWatchState &ob)
                : clrTomato;       // sell OB
 
    DrawOBRectangle(
-      "OB_ACTIVE",
+      "OB_CANDIDATE",
       ob.createdTime,
       now,
       ob.obHigh,
@@ -1326,7 +1653,7 @@ void DrawActiveOB(const OBWatchState &ob)
 
 void DrawTouchedOB(const OBWatchState &ob)
 {
-   if(!ob.touched) return;
+   if(ob.state != OB_TOUCHED) return;
 
    color clr = (ob.direction == 1)
                ? clrDeepSkyBlue
@@ -1340,4 +1667,84 @@ void DrawTouchedOB(const OBWatchState &ob)
       ob.obLow,
       clr
    );
+}
+
+void DrawOrUpdateOBRectangle(const OBWatchState &ob)
+{
+    if (ob.state == OB_NONE)
+        return;
+
+    datetime endTime;
+
+    if (ob.state == OB_CANDIDATE)
+        endTime = iTime(_Symbol, TriggerTimeframe, 0); // kéo tới hiện tại
+    else
+        endTime = ob.touchTime; // cố định khi touched / used
+
+    color clr;
+
+    switch (ob.state)
+    {
+        case OB_CANDIDATE: clr = clrDodgerBlue; break;
+        case OB_TOUCHED:   clr = clrDeepSkyBlue; break;
+        case OB_USED:      clr = clrGray; break;
+        default: return;
+    }
+
+    if (!ObjectFind(0, OBJ_OB_RECT))
+    {
+        ObjectCreate(0, OBJ_OB_RECT, OBJ_RECTANGLE, 0,
+                     ob.createdTime, ob.obHigh,
+                     endTime,        ob.obLow);
+
+        ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_BACK, true);
+        ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_WIDTH, 1);
+        ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_FILL, true);
+    }
+
+    ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_COLOR, clr);
+    ObjectMove(0, OBJ_OB_RECT, 1, endTime, ob.obLow);
+}
+
+void DrawOrUpdateOBLabel(const OBWatchState &ob)
+{
+    if (ob.state == OB_NONE)
+        return;
+
+    string text;
+    color clr;
+
+    switch (ob.state)
+    {
+        case OB_CANDIDATE:
+            text = "OB: CANDIDATE";
+            clr = clrDodgerBlue;
+            break;
+
+        case OB_TOUCHED:
+            text = "OB: TOUCHED";
+            clr = clrDeepSkyBlue;
+            break;
+
+        case OB_USED:
+            text = "OB: USED";
+            clr = clrGray;
+            break;
+
+        default:
+            return;
+    }
+
+    datetime labelTime = ob.createdTime;
+    double   labelPrice = ob.obHigh;
+
+    if (!ObjectFind(0, OBJ_OB_LABEL))
+    {
+        ObjectCreate(0, OBJ_OB_LABEL, OBJ_TEXT, 0,
+                     labelTime, labelPrice);
+    }
+
+    ObjectSetString(0, OBJ_OB_LABEL, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, OBJ_OB_LABEL, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, OBJ_OB_LABEL, OBJPROP_FONTSIZE, 9);
 }
