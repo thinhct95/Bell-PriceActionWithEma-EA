@@ -6,9 +6,6 @@
 //+------------------------------------------------------------------+
 #property strict
 
-#define OBJ_OB_RECT   "OB_RECT"
-#define OBJ_OB_LABEL  "OB_LABEL"
-
 //====================================================
 // DEBUG CONFIG
 //====================================================
@@ -32,12 +29,12 @@ enum ENUM_OB_STATE
 
 enum ENUM_BLOCK_REASON
 {
-    BLOCK_NONE,
-    BLOCK_NO_OB,
-    BLOCK_OB_NOT_TOUCHED,
-    BLOCK_BIAS_MISMATCH,
-    BLOCK_SESSION,
-    BLOCK_DAILY_LOSS
+  BLOCK_NONE,
+  BLOCK_NO_OB,
+  BLOCK_OB_NOT_TOUCHED,
+  BLOCK_BIAS_MISMATCH,
+  BLOCK_SESSION,
+  BLOCK_DAILY_LOSS
 };
 
 ENUM_BLOCK_REASON g_BlockReason = BLOCK_NONE;
@@ -54,16 +51,15 @@ enum ENUM_OB_RESET_REASON
 
 ENUM_OB_RESET_REASON g_LastOBResetReason;
 
-enum ENUM_EA_STEP
+enum ENUM_EA_STATE
 {
-  EA_STEP_IDLE = 0,
-  EA_STEP_CONTEXT,
-  EA_STEP_WAIT_OB,
-  EA_STEP_WAIT_TRIGGER,
-  EA_STEP_ORDER_SENT
+  EA_STATE_IDLE,
+  EA_STATE_WAIT_OB,
+  EA_STATE_WAIT_TRIGGER,
+  EA_STATE_ORDER_SENT
 };
 
-ENUM_EA_STEP g_EAStep = EA_STEP_IDLE;
+ENUM_EA_STATE g_EAState = EA_STATE_IDLE;
 int g_OrderSentBarIndex = -1;
 
 //====================================================
@@ -126,7 +122,6 @@ struct TrendState
 // GLOBAL STATE
 //====================================================
 TrendState g_TrendState;
-datetime g_LastTriggerBarTime = 0;
 
 enum ENUM_HTF_BIAS
 {
@@ -423,10 +418,6 @@ void DrawInitialContext()
   DrawMarketStructure(TrendTimeframe, g_TrendState);
   DrawTrendSummaryLabel(g_TrendState);
   DrawEAStateOverlay();
-
-  // OB candidate (chưa chạm)
-  if (g_OBWatch.obHigh > 0 && g_OBWatch.state == OB_CANDIDATE)
-    DrawCandidateOB(g_OBWatch);
 }
 
 //====================================================
@@ -443,8 +434,7 @@ int OnInit()
   ZeroMemory(g_TriggerTF);
   ZeroMemory(g_DailyRisk);
 
-  g_EAStep = EA_STEP_IDLE;
-  g_LastTriggerBarTime = 0;
+  g_EAState = EA_STATE_IDLE;
 
   // ===============================
   // 1️⃣ ENSURE HISTORY READY
@@ -499,7 +489,7 @@ int OnInit()
 
     if (obFound)
     {
-      g_EAStep = EA_STEP_WAIT_OB;
+      g_EAState = EA_STATE_WAIT_OB;
 
       if (Debug_OB)
         PrintFormat(
@@ -849,6 +839,14 @@ bool FindTrendOrderBlock(
     return false;
 }
 
+void ResetOBWithReason(ENUM_OB_RESET_REASON reason)
+{
+  g_LastOBResetReason = reason;
+  ResetOBWatch();
+  ResetTriggerTFStructure();
+  g_EAState = EA_STATE_IDLE;
+}
+
 void ResetOBWatch()
 {
   g_OBWatch.state = OB_NONE;
@@ -920,9 +918,9 @@ void UpdateTriggerTFStructure(
   bool foundHigh = false;
   bool foundLow = false;
 
-  for (int i = startBar + SwingDetectionRange;
-       i < startBar + TriggerMaxScanBars;
-       i++)
+  for (int i = startBar - SwingDetectionRange;
+     i >= MathMax(1, startBar - TriggerMaxScanBars);
+     i--)
   {
     if (!foundHigh && IsSwingHighAtBar(tf, i))
     {
@@ -965,123 +963,6 @@ void UpdateTriggerTFStructure(
   }
 }
 
-void CheckOBTouchAndActivate(
-    const TrendState &trend,
-    double currentPrice)
-{
-    // Chỉ xử lý khi có OB candidate đang chờ active
-    if (g_OBWatch.state != OB_CANDIDATE) return;
-
-    // Kiểm tra giá chạm OB đang theo dõi
-    if (!HasPriceTouchedOB(
-            g_OBWatch.direction,
-            g_OBWatch.obHigh,
-            g_OBWatch.obLow,
-            currentPrice))
-    {
-        g_BlockReason = BLOCK_OB_NOT_TOUCHED;
-        return;
-    }
-
-    // ===== OB BỊ MITIGATE =====
-    MarkOBAsTouched(g_OBWatch, TriggerTimeframe);
-
-    if (Debug_OB)
-    {
-        PrintFormat(
-            "🟦 OB MITIGATED | dir=%d | OB[%.2f - %.2f]",
-            g_OBWatch.direction,
-            g_OBWatch.obLow,
-            g_OBWatch.obHigh);
-    }
-}
-
-void HandleOBWatching(
-    const TrendState &trend,
-    double currentPrice)
-{
-  // 1️⃣ Bias hoặc trend không còn hợp lệ
-  if (!IsHTFBiasAligned(g_HTFBias.bias, trend.trendDirection))
-  {
-    g_LastOBResetReason = OB_RESET_BIAS_MISMATCH; // DEBUG
-    ResetOBWatch();
-    return;
-  }
-
-  // 2️⃣ Giá đóng nến xuyên qua OB
-  if (IsOBCloseBreak(g_OBWatch.direction,
-                     g_OBWatch.obHigh,
-                     g_OBWatch.obLow))
-  {
-    g_LastOBResetReason = OB_RESET_CLOSE_BREAK; // DEBUG
-    MarkOBAsUsed(); // đánh dấu đã dùng
-    return;
-  }
-
-  // 3️⃣ OB bị phá sâu (tick safety)
-  if (IsOBInvalidated(g_OBWatch.direction,
-                      g_OBWatch.obHigh,
-                      g_OBWatch.obLow,
-                      currentPrice))
-  {
-    g_LastOBResetReason = OB_RESET_INVALIDATED; // DEBUG
-    MarkOBAsUsed(); // đánh dấu đã dùng
-    return;
-  }
-
-  // 4️⃣ OB quá hạn
-  if (IsOBExpired(g_OBWatch))
-  {
-    g_LastOBResetReason = OB_RESET_EXPIRED; // DEBUG
-    ResetOBWatch();
-    return;
-  }
-
-  // 5️⃣ Trigger quá chậm
-  g_OBWatch.barsAlive++;
-  if (g_OBWatch.barsAlive > 150) // ~30 bar M5 = ~150 phút
-  {
-    g_LastOBResetReason = OB_RESET_BAR_TIMEOUT; // DEBUG
-    ResetOBWatch();
-    return;
-  }
-
-  // =================================================
-  // 🔥 TRIGGER TF STRUCTURE LOGIC (CHỖ QUAN TRỌNG)
-  // =================================================
-  UpdateTriggerTFStructure(
-      TriggerTimeframe,
-      g_TriggerTF,
-      g_OBWatch.triggerStartBar);
-
-  if (IsTriggerTFStructureBreak(g_TriggerTF,
-                                trend.trendDirection,
-                                TriggerTimeframe))
-  {
-    OrderPlan plan =
-        BuildOrderPlanFromTriggerTF(g_TriggerTF,
-                                    TriggerTimeframe);
-
-    if (plan.valid)
-    {
-      plan.lot = CalculateRiskLot(plan.entry, plan.stopLoss);
-
-      if (plan.lot <= 0)
-        return;
-
-      ExecuteOrder(plan);
-
-      PrintFormat(
-          "🎯 ENTRY CONFIRMED | dir=%d | entry=%.2f | SL=%.2f | TP=%.2f | RR=1:%.1f",
-          plan.direction,
-          plan.entry,
-          plan.stopLoss,
-          plan.takeProfit,
-          RiskReward);
-    }
-  }
-}
-
 bool IsOBExpired(const OBWatchState &ob)
 {
   if (ob.createdTime <= 0)
@@ -1109,7 +990,8 @@ void MarkOBAsTouched(
 
   // Reset trigger waiting
   ob.barsAlive = 0;
-  ob.triggerStartBar = 1;
+  int shift = iBarShift(_Symbol, triggerTf, ob.touchTime);
+  ob.triggerStartBar = (shift > 0 ? shift : 1);
 
   // Reset trigger TF structure
   ResetTriggerTFStructure();
@@ -1142,29 +1024,12 @@ bool IsOBCloseBreak(
   return false;
 }
 
-bool IsTriggerKeyLevelBreak(
-    const TrendState &trend,
-    ENUM_TIMEFRAMES triggerTf)
-{
-  double close = iClose(_Symbol, triggerTf, 1);
-
-  if (trend.trendDirection == 1)
-    return close > trend.currentKeyLevel;
-
-  if (trend.trendDirection == -1)
-    return close < trend.currentKeyLevel;
-
-  return false;
-}
-
 OrderPlan BuildOrderPlanFromTriggerTF(
     const TriggerTFStructure &ts,
     ENUM_TIMEFRAMES tf)
 {
   OrderPlan plan;
   ZeroMemory(plan);
-
-  double entryPrice = iClose(_Symbol, tf, 1);
 
   plan.valid = true;
   plan.direction = ts.direction;
@@ -1240,10 +1105,9 @@ double CalculateRiskLot(
   return NormalizeDouble(rawLot, 2);
 }
 
-void ExecuteOrder(const OrderPlan &plan)
+bool ExecuteOrder(const OrderPlan &plan)
 {
-  if (!plan.valid)
-    return;
+  if (!plan.valid) return false;
 
   MqlTradeRequest req;
   MqlTradeResult res;
@@ -1270,174 +1134,280 @@ void ExecuteOrder(const OrderPlan &plan)
         "❌ OrderSend failed | sent=%d | retcode=%d",
         sent,
         res.retcode);
-    return;
-  }
-  else
-  {
-    g_EAStep = EA_STEP_ORDER_SENT; // DEBUG
-    g_OrderSentBarIndex = Bars(_Symbol, TriggerTimeframe); // DEBUG: 🔑 bar hiện tại để dễ nhìn
-
+    return false;
+  } else {
     PrintFormat(
         "✅ ORDER SENT | lot=%.2f | entry=%.2f | SL=%.2f | TP=%.2f",
         plan.lot,
         plan.entry,
         plan.stopLoss,
         plan.takeProfit);
-    MarkOBAsUsed();
+    return true;
   }
 }
 
-bool IsOBCandidateStillValid(
-    const OBWatchState &ob,
-    const TrendState &trend)
+string GetOBRectName(const OBWatchState &ob)
 {
-    // OB phải cùng direction
-    if (ob.direction != trend.trendDirection)
-        return false;
+    return StringFormat("OB_RECT_%I64d", ob.createdTime);
+}
 
-    // OB phải nằm trong con sóng hiện tại
-    if (trend.trendDirection == 1) // uptrend
-    {
-        if (ob.obLow < trend.previousSwingLow ||
-            ob.obLow > trend.latestSwingLow)
-            return false;
-    }
-    else // downtrend
-    {
-        if (ob.obHigh > trend.previousSwingHigh ||
-            ob.obHigh < trend.latestSwingHigh)
-            return false;
-    }
+string GetOBLabelName(const OBWatchState &ob)
+{
+    return StringFormat("OB_LABEL_%I64d", ob.createdTime);
+}
 
-    return true;
+bool IsReadyToTrade()
+{
+  if (g_OBWatch.state != OB_TOUCHED)
+    return false;
+
+  if (!g_TriggerTF.valid)
+    return false;
+
+  if (!IsTriggerTFStructureBreak(
+      g_TriggerTF,
+      g_TrendState.trendDirection,
+      TriggerTimeframe))
+    return false;
+
+  return true;
+}
+
+bool TryExecuteTradeIfReady()
+{
+  // =====================================
+  // 0️⃣ CHƯA SẴN SÀNG
+  // =====================================
+  if (!IsReadyToTrade())
+      return false;
+
+  // =====================================
+  // 1️⃣ BUILD ORDER PLAN
+  // =====================================
+  OrderPlan plan =
+      BuildOrderPlanFromTriggerTF(
+          g_TriggerTF,
+          TriggerTimeframe);
+
+  if (!plan.valid)
+      return false;
+
+  plan.lot = CalculateRiskLot(
+      plan.entry,
+      plan.stopLoss);
+
+  if (plan.lot <= 0)
+      return false;
+
+  // =====================================
+  // 2️⃣ EXECUTE ORDER (DUY NHẤT Ở ĐÂY)
+  // =====================================
+  bool isExecuted = ExecuteOrder(plan);
+
+  if (Debug_Order)
+  {
+    PrintFormat(
+        "🚀 ORDER EXECUTED | dir=%d | entry=%.2f | SL=%.2f | TP=%.2f",
+        plan.direction,
+        plan.entry,
+        plan.stopLoss,
+        plan.takeProfit);
+  }
+
+  return isExecuted;
+}
+
+// Kiểm tra có đủ điều kiện tạo OB không
+void StateIdle()
+{
+  if (!HasConfirmedMarketStructure(g_TrendState))
+    return;
+
+  if (!IsHTFBiasAligned(g_HTFBias.bias, g_TrendState.trendDirection))
+    return;
+
+  if (BootstrapOBCandidate(TrendTimeframe, g_TrendState, g_OBWatch))
+  {
+    g_EAState = EA_STATE_WAIT_OB;
+  }
+}
+
+// Theo dõi OB chờ chạm
+void StateWaitOB()
+{
+  double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+  // invalidate / expire
+  if (IsOBCloseBreak(g_OBWatch.direction, g_OBWatch.obHigh, g_OBWatch.obLow) ||
+      IsOBInvalidated(g_OBWatch.direction, g_OBWatch.obHigh, g_OBWatch.obLow, price) ||
+      IsOBExpired(g_OBWatch))
+  {
+    ResetOBWithReason(OB_RESET_INVALIDATED);
+    return;
+  }
+
+  // touch
+  if (HasPriceTouchedOB(
+        g_OBWatch.direction,
+        g_OBWatch.obHigh,
+        g_OBWatch.obLow,
+        price))
+  {
+    MarkOBAsTouched(g_OBWatch, TriggerTimeframe);
+    g_EAState = EA_STATE_WAIT_TRIGGER;
+  }
+}
+
+// Theo dõi trigger timeframe chờ tín hiệu vào lệnh
+void StateWaitTrigger()
+{
+  double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+  // OB bị phá
+  if (IsOBCloseBreak(g_OBWatch.direction, g_OBWatch.obHigh, g_OBWatch.obLow) ||
+      IsOBInvalidated(g_OBWatch.direction, g_OBWatch.obHigh, g_OBWatch.obLow, price))
+  {
+    ResetOBWithReason(OB_RESET_INVALIDATED);
+    return;
+  }
+
+  static datetime lastTriggerBarForAlive = 0;
+  datetime currentTriggerBar = iTime(_Symbol, TriggerTimeframe, 0);
+
+  if (currentTriggerBar != lastTriggerBarForAlive)
+  {
+    lastTriggerBarForAlive = currentTriggerBar;
+    if (g_OBWatch.state == OB_TOUCHED)
+      g_OBWatch.barsAlive++;
+  }
+
+  if (g_OBWatch.barsAlive > TriggerMaxScanBars)
+  {
+    ResetOBWithReason(OB_RESET_EXPIRED);
+    return;
+  }
+
+  static datetime lastTriggerBar = 0;
+  datetime currentBar = iTime(_Symbol, TriggerTimeframe, 0);
+
+  if (currentBar != lastTriggerBar)
+  {
+    lastTriggerBar = currentBar;
+    UpdateTriggerTFStructure(TriggerTimeframe, g_TriggerTF, g_OBWatch.triggerStartBar);
+  }
+
+  if (IsReadyToTrade())
+  {
+    bool isExecutedSuccess = TryExecuteTradeIfReady();
+
+    if (isExecutedSuccess) {
+      MarkOBAsUsed();
+      g_EAState = EA_STATE_ORDER_SENT;
+      g_OrderSentBarIndex = Bars(_Symbol, TriggerTimeframe); // lưu lại bar index khi lệnh được gửi
+    }
+  }
+}
+
+void StateOrderSent()
+{
+  int currentBar = Bars(_Symbol, TriggerTimeframe);
+
+  // ❌ Không cho reset trong cùng bar vừa gửi lệnh
+  if (currentBar <= g_OrderSentBarIndex)
+    return;
+
+  if (!PositionSelect(_Symbol) && OrdersTotal() == 0)
+  {
+    g_EAState = EA_STATE_IDLE;
+  }
+}
+
+void UpdateContext()
+{
+  UpdateDailyRiskState(g_DailyRisk);
+  UpdateHTFBias(BiasTimeframe, g_HTFBias);
+  UpdateMarketStructure(TrendTimeframe, g_TrendState);
+
+  static datetime lastTrendBarTime = 0;
+  datetime currentTrendBarTime = iTime(_Symbol, TrendTimeframe, 0);
+
+  if (currentTrendBarTime != lastTrendBarTime)
+  {
+    lastTrendBarTime = currentTrendBarTime;
+
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    CheckForEarlyTrendFlip(g_TrendState, bid);
+  }
+}
+
+bool EvaluateTradePermission()
+{
+  g_BlockReason = BLOCK_NONE;
+
+  if (!IsTradingSessionAllowed())
+  {
+    g_BlockReason = BLOCK_SESSION;
+    return false;
+  }
+
+  if (IsDailyLossExceeded(g_DailyRisk, MaxDailyLossPercent))
+  {
+    g_BlockReason = BLOCK_DAILY_LOSS;
+    return false;
+  }
+
+  if (!IsHTFBiasAligned(g_HTFBias.bias, g_TrendState.trendDirection))
+  {
+    g_BlockReason = BLOCK_BIAS_MISMATCH;
+    return false;
+  }
+
+  return true;
+}
+
+void RunStateMachine()
+{
+  switch (g_EAState)
+  {
+    case EA_STATE_IDLE:
+      StateIdle();
+      break;
+
+    case EA_STATE_WAIT_OB:
+      StateWaitOB();
+      break;
+
+    case EA_STATE_WAIT_TRIGGER:
+      StateWaitTrigger();
+      break;
+
+    case EA_STATE_ORDER_SENT:
+      StateOrderSent();
+      break;
+  }
+}
+
+void ResetOBIfBlocked()
+{
+  if (g_EAState == EA_STATE_WAIT_OB ||
+      g_EAState == EA_STATE_WAIT_TRIGGER)
+  {
+    ResetOBWithReason(OB_RESET_BIAS_MISMATCH);
+  }
 }
 
 void OnTick()
 {
-    // ===== RUN ON NEW BAR (TRIGGER TF) =====
-    if (!IsNewBarFormed(TriggerTimeframe, g_LastTriggerBarTime))
-        return;
+  UpdateContext();
 
-    // =============================
-    // STEP HOLD AFTER ORDER SENT
-    // =============================
-    if (g_EAStep == EA_STEP_ORDER_SENT)
-    {
-        int currentBar = Bars(_Symbol, TriggerTimeframe);
-        if (currentBar <= g_OrderSentBarIndex)
-        {
-            DrawEAStateOverlay();
-            return;
-        }
-        g_OrderSentBarIndex = -1;
-    }
+  bool allowStateMachine = EvaluateTradePermission();
 
-    g_EAStep = EA_STEP_IDLE;
+  if (allowStateMachine)
+    RunStateMachine();
+  else
+    ResetOBIfBlocked();
 
-    // =============================
-    // SESSION & RISK GUARD
-    // =============================
-    if (!IsTradingSessionAllowed())
-    {
-        g_BlockReason = BLOCK_SESSION;
-        DrawEAStateOverlay();
-        return;
-    }
-
-    UpdateDailyRiskState(g_DailyRisk);
-    if (IsDailyLossExceeded(g_DailyRisk, MaxDailyLossPercent))
-    {
-        g_BlockReason = BLOCK_DAILY_LOSS;
-        DrawEAStateOverlay();
-        return;
-    }
-
-    // =============================
-    // CONTEXT UPDATE
-    // =============================
-    g_EAStep = EA_STEP_CONTEXT;
-
-    UpdateHTFBias(BiasTimeframe, g_HTFBias);
-    UpdateMarketStructure(TrendTimeframe, g_TrendState);
-
-    double currentBid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    CheckForEarlyTrendFlip(g_TrendState, currentBid);
-
-    if (!IsHTFBiasAligned(g_HTFBias.bias, g_TrendState.trendDirection))
-    {
-        g_BlockReason = BLOCK_BIAS_MISMATCH;
-        DrawEAStateOverlay();
-        return;
-    }
-
-    // =====================================================
-    // 🔥 PHASE 0.5: VALIDATE EXISTING OB CANDIDATE
-    // =====================================================
-    if (g_OBWatch.state == OB_CANDIDATE)
-    {
-      if (!IsOBCandidateStillValid(g_OBWatch, g_TrendState))
-      {
-        g_LastOBResetReason = OB_RESET_INVALIDATED; // hoặc OB_RESET_STRUCTURE_CHANGED
-        ResetOBWatch();
-
-        if (Debug_OB)
-            Print("🔴 OB INVALIDATED → STRUCTURE CHANGED");
-      }
-    }
-
-    // =====================================================
-    // 🔥 PHASE 0: NO OB → FIND NEW OB CANDIDATE
-    // =====================================================
-    if (g_OBWatch.state != OB_CANDIDATE && g_OBWatch.state != OB_TOUCHED)
-    {
-        g_EAStep = EA_STEP_WAIT_OB;
-
-        bool found = BootstrapOBCandidate(
-            TrendTimeframe,
-            g_TrendState,
-            g_OBWatch
-        );
-
-        if (found && Debug_OB)
-        {
-            PrintFormat(
-                "🟧 NEW OB CANDIDATE | dir=%d | [%.2f - %.2f]",
-                g_OBWatch.direction,
-                g_OBWatch.obLow,
-                g_OBWatch.obHigh
-            );
-        }
-    }
-
-    // =====================================================
-    // 🔵 PHASE 1: OB CANDIDATE → WAIT FOR TOUCH
-    // =====================================================
-    else if (g_OBWatch.state == OB_CANDIDATE)
-    {
-      g_EAStep = EA_STEP_WAIT_OB;
-      CheckOBTouchAndActivate(g_TrendState, currentBid);
-    }
-    // =====================================================
-    // 🟦 PHASE 2: OB TOUCHED → WAIT TRIGGER
-    // =====================================================
-    else if (g_OBWatch.state == OB_TOUCHED)
-    {
-      g_EAStep = EA_STEP_WAIT_TRIGGER;
-      HandleOBWatching(g_TrendState, currentBid);
-    }
-
-    // =============================
-    // DRAW
-    // =============================
-    DrawMarketStructure(TrendTimeframe, g_TrendState);
-    DrawTrendSummaryLabel(g_TrendState);
-    DrawEAStateOverlay();
-
-    if (g_OBWatch.state == OB_CANDIDATE && g_OBWatch.state != OB_TOUCHED)
-        DrawCandidateOB(g_OBWatch);
-
-    if (g_OBWatch.state == OB_TOUCHED)
-        DrawTouchedOB(g_OBWatch);
+  DrawVisuals();
 }
 
 void DebugPrint(bool enabled, string message)
@@ -1467,35 +1437,43 @@ void DebugLabel(string name, string text, int y, color clr)
 // DRAWING UTILITIES
 //====================================================
 
+void DrawVisuals()
+{
+  DrawMarketStructure(TrendTimeframe, g_TrendState);
+  DrawTrendSummaryLabel(g_TrendState);
+
+  DrawOrUpdateOBRectangle(g_OBWatch);
+  DrawOrUpdateOBLabel(g_OBWatch);
+
+  DrawEAStateOverlay();
+  DrawBlockReasonOverlay();
+}
+
+
 void DrawEAStateOverlay()
 {
   string stepText;
   color stepColor = clrGray;
 
-  switch (g_EAStep)
+  switch (g_EAState)
   {
-  case EA_STEP_IDLE:
+  case EA_STATE_IDLE:
     stepText = "STEP 0: IDLE / GUARD";
     stepColor = clrSilver;
     break;
 
-  case EA_STEP_CONTEXT:
-    stepText = "STEP 1: CONTEXT OK";
-    stepColor = clrAqua;
-    break;
-
-  case EA_STEP_WAIT_OB:
-    stepText = "STEP 2: WAIT OB TOUCH";
+  case EA_STATE_WAIT_OB:
+    stepText = "STEP 1: WAIT OB TOUCH";
     stepColor = clrOrange;
     break;
 
-  case EA_STEP_WAIT_TRIGGER:
-    stepText = "STEP 3: WAIT TRIGGER";
+  case EA_STATE_WAIT_TRIGGER:
+    stepText = "STEP 2: WAIT TRIGGER";
     stepColor = clrYellow;
     break;
 
-  case EA_STEP_ORDER_SENT:
-    stepText = "STEP 4: ORDER SENT";
+  case EA_STATE_ORDER_SENT:
+    stepText = "STEP 3: ORDER SENT";
     stepColor = clrLime;
     break;
   }
@@ -1608,143 +1586,141 @@ void DrawTrendSummaryLabel(const TrendState &state)
   ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
 }
 
-void DrawOBRectangle(
-   string   name,
-   datetime timeStart,
-   datetime timeEnd,
-   double   priceHigh,
-   double   priceLow,
-   color    clr,
-   bool     filled = true
-) {
-   ObjectDelete(0, name);
-
-   ObjectCreate(0, name, OBJ_RECTANGLE, 0,
-                timeStart, priceHigh,
-                timeEnd,   priceLow);
-
-   ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-   ObjectSetInteger(0, name, OBJPROP_BACK, true);
-   ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-
-   ObjectSetInteger(0, name, OBJPROP_FILL, filled);
-   ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
-}
-
-void DrawCandidateOB(const OBWatchState &ob)
-{
-   if(ob.state != OB_CANDIDATE) return;
-
-   datetime now = iTime(_Symbol, TriggerTimeframe, 0);
-
-   color clr = (ob.direction == 1)
-               ? clrDodgerBlue    // buy OB
-               : clrTomato;       // sell OB
-
-   DrawOBRectangle(
-      "OB_CANDIDATE",
-      ob.createdTime,
-      now,
-      ob.obHigh,
-      ob.obLow,
-      clr
-   );
-}
-
-void DrawTouchedOB(const OBWatchState &ob)
-{
-   if(ob.state != OB_TOUCHED) return;
-
-   color clr = (ob.direction == 1)
-               ? clrDeepSkyBlue
-               : clrIndianRed;
-
-   DrawOBRectangle(
-      "OB_TOUCHED",
-      ob.createdTime,
-      ob.touchTime,
-      ob.obHigh,
-      ob.obLow,
-      clr
-   );
-}
-
 void DrawOrUpdateOBRectangle(const OBWatchState &ob)
 {
-    if (ob.state == OB_NONE)
-        return;
+  string rectName = GetOBRectName(ob);
 
-    datetime endTime;
+  if (ob.state == OB_NONE)
+      return;
 
-    if (ob.state == OB_CANDIDATE)
-        endTime = iTime(_Symbol, TriggerTimeframe, 0); // kéo tới hiện tại
-    else
-        endTime = ob.touchTime; // cố định khi touched / used
+  datetime endTime;
 
-    color clr;
+  if (ob.state == OB_CANDIDATE)
+      endTime = iTime(_Symbol, TriggerTimeframe, 0); // kéo tới hiện tại
+  else
+      endTime = ob.touchTime; // cố định khi touched / used
 
-    switch (ob.state)
-    {
-        case OB_CANDIDATE: clr = clrDodgerBlue; break;
-        case OB_TOUCHED:   clr = clrDeepSkyBlue; break;
-        case OB_USED:      clr = clrGray; break;
-        default: return;
-    }
+  color clr;
 
-    if (!ObjectFind(0, OBJ_OB_RECT))
-    {
-        ObjectCreate(0, OBJ_OB_RECT, OBJ_RECTANGLE, 0,
-                     ob.createdTime, ob.obHigh,
-                     endTime,        ob.obLow);
+  switch (ob.state)
+  {
+      case OB_CANDIDATE: clr = clrDodgerBlue; break;
+      case OB_TOUCHED:   clr = clrDeepSkyBlue; break;
+      case OB_USED:      clr = clrGray; break;
+      default: return;
+  }
 
-        ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_BACK, true);
-        ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_WIDTH, 1);
-        ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_FILL, true);
-    }
+  if (!ObjectFind(0, rectName))
+  {
+      ObjectCreate(0, rectName, OBJ_RECTANGLE, 0,
+                    ob.createdTime, ob.obHigh,
+                    endTime,        ob.obLow);
 
-    ObjectSetInteger(0, OBJ_OB_RECT, OBJPROP_COLOR, clr);
-    ObjectMove(0, OBJ_OB_RECT, 1, endTime, ob.obLow);
+      ObjectSetInteger(0, rectName, OBJPROP_BACK, true);
+      ObjectSetInteger(0, rectName, OBJPROP_WIDTH, 1);
+      ObjectSetInteger(0, rectName, OBJPROP_FILL, true);
+  }
+
+  ObjectSetInteger(0, rectName, OBJPROP_COLOR, clr);
+  if (ob.state == OB_CANDIDATE)
+  {
+    ObjectMove(0, rectName, 1, endTime, ob.obLow);
+  }
+
 }
 
 void DrawOrUpdateOBLabel(const OBWatchState &ob)
 {
-    if (ob.state == OB_NONE)
-        return;
+  string labelName = GetOBLabelName(ob);
 
-    string text;
-    color clr;
+  if (ob.state == OB_NONE)
+      return;
 
-    switch (ob.state)
-    {
-        case OB_CANDIDATE:
-            text = "OB: CANDIDATE";
-            clr = clrDodgerBlue;
-            break;
+  string text;
+  color clr;
 
-        case OB_TOUCHED:
-            text = "OB: TOUCHED";
-            clr = clrDeepSkyBlue;
-            break;
+  switch (ob.state)
+  {
+      case OB_CANDIDATE:
+          text = "OB: CANDIDATE";
+          clr = clrDodgerBlue;
+          break;
 
-        case OB_USED:
-            text = "OB: USED";
-            clr = clrGray;
-            break;
+      case OB_TOUCHED:
+          text = "OB: TOUCHED";
+          clr = clrDeepSkyBlue;
+          break;
 
-        default:
-            return;
-    }
+      case OB_USED:
+          text = "OB: USED";
+          clr = clrGray;
+          break;
 
-    datetime labelTime = ob.createdTime;
-    double   labelPrice = ob.obHigh;
+      default:
+          return;
+  }
 
-    if (!ObjectFind(0, OBJ_OB_LABEL))
-    {
-        ObjectCreate(0, OBJ_OB_LABEL, OBJ_TEXT, 0,
-                     labelTime, labelPrice);
-    }
+  datetime labelTime = ob.createdTime;
+  double   labelPrice = ob.obHigh;
 
-    ObjectSetString(0, OBJ_OB_LABEL, OBJPROP_TEXT, text);
-    ObjectSetInteger(0, OBJ_OB_LABEL, OBJPROP_COLOR, clr);
-    ObjectSetInteger(0, OBJ_OB_LABEL, OBJPROP_FONTSIZE, 9);
+  if (!ObjectFind(0, labelName))
+  {
+      ObjectCreate(0, labelName, OBJ_TEXT, 0,
+                    labelTime, labelPrice);
+  }
+
+  ObjectSetString(0, labelName, OBJPROP_TEXT, text);
+  ObjectSetInteger(0, labelName, OBJPROP_COLOR, clr);
+  ObjectSetInteger(0, labelName, OBJPROP_FONTSIZE, 9);
+}
+
+string BlockReasonToText(ENUM_BLOCK_REASON reason)
+{
+  switch (reason)
+  {
+    case BLOCK_SESSION:        return "BLOCK: OUT OF SESSION";
+    case BLOCK_DAILY_LOSS:     return "BLOCK: MAX DAILY LOSS";
+    case BLOCK_BIAS_MISMATCH:  return "BLOCK: BIAS MISMATCH";
+    case BLOCK_NO_OB:          return "BLOCK: NO VALID OB";
+    case BLOCK_OB_NOT_TOUCHED: return "BLOCK: OB NOT TOUCHED";
+    default:                   return "";
+  }
+}
+
+color BlockReasonToColor(ENUM_BLOCK_REASON reason)
+{
+  switch (reason)
+  {
+    case BLOCK_SESSION:        return clrOrangeRed;
+    case BLOCK_DAILY_LOSS:     return clrRed;
+    case BLOCK_BIAS_MISMATCH:  return clrOrange;
+    case BLOCK_NO_OB:          return clrGray;
+    case BLOCK_OB_NOT_TOUCHED: return clrDodgerBlue;
+    default:                   return clrNONE;
+  }
+}
+
+void DrawBlockReasonOverlay()
+{
+  if (!Debug_DrawOnChart)
+    return;
+
+  if (g_BlockReason == BLOCK_NONE)
+  {
+    ObjectDelete(0, "EA_BLOCK_REASON");
+    return;
+  }
+
+  string text = BlockReasonToText(g_BlockReason);
+  color clr   = BlockReasonToColor(g_BlockReason);
+
+  ObjectDelete(0, "EA_BLOCK_REASON");
+  ObjectCreate(0, "EA_BLOCK_REASON", OBJ_LABEL, 0, 0, 0);
+
+  ObjectSetInteger(0, "EA_BLOCK_REASON", OBJPROP_CORNER, CORNER_LEFT_LOWER);
+  ObjectSetInteger(0, "EA_BLOCK_REASON", OBJPROP_XDISTANCE, 10);
+  ObjectSetInteger(0, "EA_BLOCK_REASON", OBJPROP_YDISTANCE, 160);
+  ObjectSetInteger(0, "EA_BLOCK_REASON", OBJPROP_COLOR, clr);
+  ObjectSetInteger(0, "EA_BLOCK_REASON", OBJPROP_FONTSIZE, 9);
+  ObjectSetString(0, "EA_BLOCK_REASON", OBJPROP_TEXT, text);
 }

@@ -4,4 +4,7 @@ Issues: Còn nhiều bug, EA không vào lệnh
 
 2. Draw label, trend ngay khi khởi tạo. -> đang bị chậm -> Đã fix
 
-3. OB đang được active ngay khi tìm thấy -> xem câu trả lời gần nhất của GPT để giải quyết vấn đề Logic và Draw -> Done logic, còn draw
+3. Đang triển khai state-driven
+
+
+-> Xem chat gpt gần nhất
