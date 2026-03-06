@@ -1,9 +1,9 @@
 //+------------------------------------------------------------------+
 //|                                         MarketProfile Canvas.mq5 |
-//|                              Copyright 2009-2025, MetaQuotes Ltd |
-//|                                             https://www.mql5.com |
+//|                             Copyright 2000-2026, MetaQuotes Ltd. |
+//|                                                     www.mql5.com |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2022, MetaQuotes Ltd."
+#property copyright "Copyright 2000-2026, MetaQuotes Ltd."
 #property link      "https://www.mql5.com"
 #property version   "1.00"
 #property indicator_chart_window

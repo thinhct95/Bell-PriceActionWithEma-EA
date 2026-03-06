@@ -42,14 +42,14 @@ __kernel void MatrixMult_GPU2(__global float *matrix_a,
    int offset_a_start=cols_a*BLOCK_SIZE*group_j;
    float sum=(float)0.0;
 
+   __local float submatrix_a[BLOCK_SIZE][BLOCK_SIZE];
+   __local float submatrix_b[BLOCK_SIZE][BLOCK_SIZE];
+
    for(int offset_a=offset_a_start;
        offset_a<offset_a_start+cols_a;
        offset_a+=BLOCK_SIZE,
        offset_b+=BLOCK_SIZE*cols_b)
      {
-      __local float submatrix_a[BLOCK_SIZE][BLOCK_SIZE];
-      __local float submatrix_b[BLOCK_SIZE][BLOCK_SIZE];
-
       submatrix_a[i][j]=matrix_a[offset_a+cols_a*i+j];
       submatrix_b[i][j]=matrix_b[offset_b+cols_b*i+j];
 

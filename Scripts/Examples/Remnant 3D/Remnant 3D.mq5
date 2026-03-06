@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //|                                                    Remnant3D.mq5 |
-//|                             Copyright 2000-2025, MetaQuotes Ltd. |
-//|                                             https://www.mql5.com |
+//|                             Copyright 2000-2026, MetaQuotes Ltd. |
+//|                                                     www.mql5.com |
 //+------------------------------------------------------------------+
 #resource "Shaders/vertex.hlsl" as string ExtShaderVS;
 #resource "Shaders/pixel.hlsl" as string ExtShaderPS;

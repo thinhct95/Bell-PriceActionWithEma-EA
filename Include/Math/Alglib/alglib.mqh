@@ -1,8 +1,8 @@
 //+------------------------------------------------------------------+
 //|                                                       alglib.mqh |
 //|            Copyright 2003-2022 Sergey Bochkanov (ALGLIB project) |
-//|                             Copyright 2012-2023, MetaQuotes Ltd. |
-//|                                             https://www.mql5.com |
+//|                             Copyright 2012-2026, MetaQuotes Ltd. |
+//|                                                     www.mql5.com |
 //+------------------------------------------------------------------+
 //| Implementation of ALGLIB library in MetaQuotes Language 5        |
 //|                                                                  |

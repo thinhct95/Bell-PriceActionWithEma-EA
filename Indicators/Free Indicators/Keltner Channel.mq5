@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                              Keltner Channel.mq5 |
-//|                              Copyright 2009-2025, MetaQuotes Ltd |
-//|                                             https://www.mql5.com |
+//|                             Copyright 2000-2026, MetaQuotes Ltd. |
+//|                                                     www.mql5.com |
 //+------------------------------------------------------------------+
-#property copyright   "2009-2025, MetaQuotes Ltd"
-#property link        "http://www.mql5.com"
+#property copyright   "2000-2026, MetaQuotes Ltd."
+#property link        "https://www.mql5.com"
 #property description "Keltner Channel"
 
 #property indicator_chart_window
