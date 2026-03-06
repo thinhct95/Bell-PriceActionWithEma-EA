@@ -145,17 +145,99 @@ int             g_TradeBarIndex = -1;
 // Mỗi hàm có guard – chỉ chạy khi bar mới
 //====================================================
 
+HTFBias ResolveBias(
+  double b1High,  double b1Low,  double b1Close,
+  double b2High,  double b2Low)
+{
+  // ── Rule 1: Breakout lên trên ──────────────────
+  if (b1Close > b2High)
+    return BIAS_UP;
+
+  // ── Rule 2: Breakout xuống dưới ───────────────
+  if (b1Close < b2Low)
+    return BIAS_DOWN;
+
+  // ── Rule 3: Sweep high → reject xuống ─────────
+  //    Wick lên trên bar2 nhưng close quay lại bên trong
+  if (b1High > b2High && b1Close < b2High)
+    return BIAS_DOWN;
+
+  // ── Rule 4: Sweep low → recover lên ───────────
+  //    Wick xuống dưới bar2 nhưng close quay lại bên trong
+  if (b1Low < b2Low && b1Close > b2Low)
+    return BIAS_UP;
+
+  // ── Rule 5: Còn lại → sideway ─────────────────
+  return BIAS_SIDEWAY;
+}
+
 void UpdateBiasContext()
 {
-  // TODO: So sánh bar 1 và bar 2 của BiasTF
-  //       → set g_Bias.bias
+  // Guard: chỉ update khi bar BiasTF mới hình thành
+  datetime currentBarTime = iTime(_Symbol, InpBiasTF, 0);
+  if (currentBarTime == g_Bias.lastBarTime)
+    return;
+
+  g_Bias.lastBarTime = currentBarTime;
+
+  // Đảm bảo đủ data
+  if (Bars(_Symbol, InpBiasTF) < 4)
+  {
+    g_Bias.bias = BIAS_NONE;
+    return;
+  }
+
+  double b1High  = iHigh (_Symbol, InpBiasTF, 1);
+  double b1Low   = iLow  (_Symbol, InpBiasTF, 1);
+  double b1Close = iClose(_Symbol, InpBiasTF, 1);
+  double b2High  = iHigh (_Symbol, InpBiasTF, 2);
+  double b2Low   = iLow  (_Symbol, InpBiasTF, 2);
+
+  HTFBias prevBias = g_Bias.bias;
+  g_Bias.bias      = ResolveBias(b1High, b1Low, b1Close, b2High, b2Low);
+
+  // Reset range (chỉ dùng khi sideway)
+  g_Bias.rangeHigh = (g_Bias.bias == BIAS_SIDEWAY) ? b2High : 0;
+  g_Bias.rangeLow  = (g_Bias.bias == BIAS_SIDEWAY) ? b2Low  : 0;
+
+  if (InpDebugLog && g_Bias.bias != prevBias)
+    PrintFormat("[BIAS] %s → %s | b1[H=%.5f L=%.5f C=%.5f] b2[H=%.5f L=%.5f]",
+      EnumToString(prevBias),
+      EnumToString(g_Bias.bias),
+      b1High, b1Low, b1Close,
+      b2High, b2Low);
 }
 
 void UpdateDailyRiskContext()
 {
-  // TODO: Reset startBalance khi ngày mới
-  //       Kiểm tra balance hiện tại vs startBalance
-  //       → set g_DailyRisk.limitHit
+  datetime todayBarTime = iTime(_Symbol, PERIOD_D1, 0);  // "ID" của ngày hôm nay – thay đổi khi sang ngày mới
+
+  if (todayBarTime != g_DailyRisk.dayStartTime)          // Bar D1 mới = sang ngày giao dịch mới
+  {
+    g_DailyRisk.dayStartTime = todayBarTime;             // Cập nhật mốc ngày
+    g_DailyRisk.startBalance = AccountInfoDouble(ACCOUNT_BALANCE); // Chụp balance đầu ngày (dùng BALANCE, không phải EQUITY – loại trừ floating P&L)
+    g_DailyRisk.limitHit     = false;                    // Reset cờ – cho phép trade ngày mới
+
+    if (InpDebugLog)
+      PrintFormat("[DAILY RISK] New day | startBalance=%.2f", g_DailyRisk.startBalance);
+  }
+
+  if (g_DailyRisk.limitHit)                             // Đã hit rồi → không tính lại, tránh gọi AccountInfoDouble() vô ích mỗi tick
+    return;
+
+  double currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+  double lostPct = (g_DailyRisk.startBalance - currentBalance)
+                    / g_DailyRisk.startBalance * 100.0; // VD: start=10000, now=9700 → lostPct=3.0%
+
+  if (lostPct >= InpMaxDailyLossPct)                    // Vượt ngưỡng → khóa EA cả ngày hôm nay
+  {
+    g_DailyRisk.limitHit = true;                        // IsDailyLossOK() = false → EvaluateGuards() fail → ResetToIdle()
+
+    PrintFormat("[DAILY RISK] ⛔ Limit hit | lost=%.2f%% | limit=%.2f%% | balance=%.2f",
+      lostPct,
+      InpMaxDailyLossPct,
+      currentBalance);
+  }
 }
 
 void UpdateAllContexts()
