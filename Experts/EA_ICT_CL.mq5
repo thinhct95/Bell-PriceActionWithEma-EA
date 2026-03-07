@@ -884,7 +884,7 @@ void DrawContextDebug()
   color biasColor = (g_Bias.bias == BIAS_UP)     ? clrLime   :
                     (g_Bias.bias == BIAS_DOWN)    ? clrTomato :
                     (g_Bias.bias == BIAS_SIDEWAY) ? clrOrange : clrGray;
-  SET_LABEL("DBG_BIAS", StringFormat("Bias  : %s", EnumToString(g_Bias.bias)), 30, biasColor)
+  SET_LABEL("DBG_BIAS", StringFormat("Bias  : %s", EnumToString(g_Bias.bias)), 42, biasColor)
 
   // ── MIDDLE TF TREND + KEY LEVEL ─────────── y=48
   // KL = Key Level cần theo dõi để phát hiện MSS
@@ -893,25 +893,26 @@ void DrawContextDebug()
   SET_LABEL("DBG_TREND",
     StringFormat("Trend : %s | KL=%.5f",
       EnumToString(g_MiddleTrend.trend), g_MiddleTrend.keyLevel),
-    48, trendColor)
+    68, trendColor)
 
   // ── SWING HIGH VALUES ───────────────────── y=66
   // H1 (cũ) → H0 (mới): thấy rõ Higher High hay Lower High
   SET_LABEL("DBG_SWING_H",
     StringFormat("H1=%.5f  H0=%.5f", g_MiddleTrend.h1, g_MiddleTrend.h0),
-    66, clrAqua)
+    94, clrAqua)
 
   // ── SWING LOW VALUES ────────────────────── y=84
   // L1 (cũ) → L0 (mới): thấy rõ Higher Low hay Lower Low
   SET_LABEL("DBG_SWING_L",
     StringFormat("L1=%.5f  L0=%.5f", g_MiddleTrend.l1, g_MiddleTrend.l0),
-    84, clrYellow)
+    120, clrYellow)
 
   // ── SIDEWAY RANGE (chỉ hiển thị khi bias = SIDEWAY) ─── y=102
-  if (g_Bias.bias == BIAS_SIDEWAY) {
+  if (g_Bias.bias == BIAS_SIDEWAY)
+  {
     SET_LABEL("DBG_BIAS_RANGE",
-      StringFormat("  Range : %.5f – %.5f", g_Bias.rangeLow, g_Bias.rangeHigh),
-      102, clrOrange)
+    StringFormat("  Range : %.5f – %.5f", g_Bias.rangeLow, g_Bias.rangeHigh),
+    146, clrOrange)
   }
   else
     ObjectDelete(0, "DBG_BIAS_RANGE"); // Ẩn khi không sideway
@@ -926,9 +927,9 @@ void DrawContextDebug()
   color riskColor = g_DailyRisk.limitHit              ? clrRed    :
                     lostPct > InpMaxDailyLossPct * 0.7 ? clrOrange : clrLime;
 
-  SET_LABEL("DBG_RISK",  StringFormat("Risk  : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 102, riskColor)
-  SET_LABEL("DBG_BAL",   StringFormat("Bal   : %.2f  (start %.2f)", g_DailyRisk.currentBalance, g_DailyRisk.startBalance), 120, clrSilver)
-  SET_LABEL("DBG_LIMIT", g_DailyRisk.limitHit ? "⛔ DAILY LOSS HIT" : "✅ Loss OK", 138, g_DailyRisk.limitHit ? clrRed : clrLime)
+  SET_LABEL("DBG_RISK",  StringFormat("Risk  : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 146, riskColor)
+  SET_LABEL("DBG_BAL",   StringFormat("Bal   : %.2f  (start %.2f)", g_DailyRisk.currentBalance, g_DailyRisk.startBalance), 172, clrSilver)
+  SET_LABEL("DBG_LIMIT", g_DailyRisk.limitHit ? "⛔ DAILY LOSS HIT" : "✅ Loss OK", 198, g_DailyRisk.limitHit ? clrRed : clrLime)
 
   // ── EA STATE ────────────────────────────── y=156
   // Màu theo mức độ "hoạt động": xám = idle, cam = chờ, vàng = sắp vào, xanh = trong lệnh
@@ -936,7 +937,7 @@ void DrawContextDebug()
                      (g_State == EA_WAIT_TOUCH)   ? clrOrange :
                      (g_State == EA_WAIT_TRIGGER) ? clrYellow :
                      (g_State == EA_IN_TRADE)     ? clrLime   : clrGray;
-  SET_LABEL("DBG_STATE", StringFormat("State : %s", EnumToString(g_State)), 156, stateColor)
+  SET_LABEL("DBG_STATE", StringFormat("State : %s", EnumToString(g_State)), 224, stateColor)
 
   // ── FVG ACTIVE INFO ─────────────────────── y=174 (chỉ khi có FVG)
   if (g_FVG.active)
@@ -945,16 +946,17 @@ void DrawContextDebug()
     SET_LABEL("DBG_FVG",
       StringFormat("FVG   : %s [%.5f – %.5f]",
         EnumToString(g_FVG.direction), g_FVG.low, g_FVG.high),
-      174, fvgColor)
+      250, fvgColor)
   }
   else
     ObjectDelete(0, "DBG_FVG"); // Không có FVG → ẩn dòng này
 
   // ── BLOCK REASON ────────────────────────── y=192 (chỉ khi bị block)
-  if (g_BlockReason != BLOCK_NONE) {
+  if (g_BlockReason != BLOCK_NONE)
+  {
     SET_LABEL("DBG_BLOCK",
       StringFormat("Block : %s", EnumToString(g_BlockReason)),
-      192, clrTomato)
+      276, clrTomato)
   }
   else
     ObjectDelete(0, "DBG_BLOCK"); // Không bị block → ẩn dòng này
