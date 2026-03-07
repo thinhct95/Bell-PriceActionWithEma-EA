@@ -1,439 +1,392 @@
 //+------------------------------------------------------------------+
 //| ICT EA – FVG Edition                                             |
-//| Architecture: 3 TF | 4 State Machine                            |
+//| Architecture : BiasTF(D1) + MiddleTF(H1) + TriggerTF(M5)       |
+//| State Machine: IDLE → WAIT_TOUCH → WAIT_TRIGGER → IN_TRADE      |
 //|                                                                  |
-//| Flow:                                                            |
-//|   D1 Bias + H1 Trend đồng thuận                                  |
-//|     → Tìm FVG trên H1  (EA_IDLE)                                |
-//|     → Chờ price chạm   (EA_WAIT_TOUCH)                          |
-//|     → Chờ trigger M5   (EA_WAIT_TRIGGER)                        |
-//|     → Vào lệnh         (EA_IN_TRADE)                            |
+//| FVG lifecycle:                                                   |
+//|   PENDING  → hình thành, chưa touch                             |
+//|   TOUCHED  → giá chạm vào gap (bid inside)                      |
+//|   USED     → case0=expired / case1=broken / case2=triggered      |
+//|                                                                  |
+//| MSS (Market Structure Shift):                                    |
+//|   Xảy ra khi bar[1].close phá vỡ KeyLevel của trend hiện tại    |
+//|   MiddleTF: vẽ marker M_ / TriggerTF: vẽ marker T_              |
+//|   TriggerTF MSS = điều kiện case 2 entry                        |
+//|                                                                  |
+//| Drawing: objects KHÔNG BAO GIỜ bị xóa, chỉ update              |
 //+------------------------------------------------------------------+
 #property strict
+
+#define MAX_FVG_POOL 30
 
 //====================================================
 // INPUTS
 //====================================================
+input ENUM_TIMEFRAMES InpBiasTF          = PERIOD_D1;  // Bias TF (HTF)
+input ENUM_TIMEFRAMES InpMiddleTF        = PERIOD_H1;  // FVG + trend TF (MTF)
+input ENUM_TIMEFRAMES InpTriggerTF       = PERIOD_M5;  // Entry confirmation (LTF)
 
-input ENUM_TIMEFRAMES InpBiasTF         = PERIOD_D1;  // Timeframe xác định bias HTF (thường D1)
-input ENUM_TIMEFRAMES InpMiddleTF       = PERIOD_H1;  // Timeframe tìm FVG + xác định trend MTF
-input ENUM_TIMEFRAMES InpTriggerTF      = PERIOD_M5;  // Timeframe xác nhận entry (nến trigger)
+input double InpRiskPercent              = 1.0;        // Risk % per trade
+input double InpRiskReward               = 2.0;        // TP/SL ratio
+input double InpMaxDailyLossPct          = 3.0;        // Max daily loss %
 
-input double InpRiskPercent             = 1.0;         // % balance chấp nhận rủi ro mỗi lệnh
-input double InpRiskReward              = 2.0;         // Tỉ lệ TP/SL (TP = SL × RR)
-input double InpMaxDailyLossPct         = 3.0;         // % loss tối đa trong ngày → dừng trade
+input int    InpLondonStartHour          = 8;          // London open (UTC)
+input int    InpLondonEndHour            = 17;         // London close (UTC)
+input int    InpNYStartHour              = 13;         // NY open (UTC)
+input int    InpNYEndHour                = 22;         // NY close (UTC)
 
-input int    InpLondonStartHour         = 8;           // Giờ mở phiên London (UTC)
-input int    InpLondonEndHour           = 17;          // Giờ đóng phiên London (UTC)
-input int    InpNYStartHour             = 13;          // Giờ mở phiên New York (UTC)
-input int    InpNYEndHour               = 22;          // Giờ đóng phiên New York (UTC)
-input int    InpSessionAvoidLastMin     = 60;          // Tránh N phút cuối mỗi phiên (không vào lệnh)
+input int    InpSwingRange               = 2;          // Bars each side for swing confirm
+input int    InpSwingLookback            = 50;         // MiddleTF swing scan bars
+input int    InpTriggerSwingLookback     = 30;         // TriggerTF swing scan bars
 
-input int    InpSwingRange              = 2;           // Số nến xác nhận mỗi bên của swing point
-                                                       //   VD: 2 → bar[i] phải cao hơn bar[i±1] và bar[i±2]
-input int    InpSwingLookback           = 50;          // Số bar MiddleTF quét ngược để tìm swing H/L
+input int    InpFVGMaxAliveMin           = 4320;       // Max PENDING lifetime (min) = 72h
+input int    InpFVGScanBars              = 50;         // MiddleTF bars to scan for FVGs
+input double InpFVGMinBodyPct            = 60.0;       // Mid-candle min body %
+input int    InpTriggerMaxBars           = 30;         // Trigger timeout (TriggerTF bars)
 
-input int    InpFVGMaxAliveMin          = 4320;        // FVG sống tối đa (phút) → 4320 = 72 giờ
-input int    InpFVGScanBars             = 50;          // Số bar MiddleTF quét ngược để tìm FVG candidate
-input double InpFVGMinBodyPct           = 60.0;        // Nến giữa của pattern FVG: body/range >= X%
-input int    InpTriggerMaxBars          = 30;          // Timeout trigger: sau N bar TriggerTF → bỏ qua
-
-input bool   InpDebugLog                = true;        // In log chi tiết vào Journal
-input bool   InpDebugDraw               = true;        // Vẽ FVG, swing points, debug panel lên chart
+input bool   InpDebugLog                 = true;       // Journal logging
+input bool   InpDebugDraw                = true;       // Chart drawing
 
 //====================================================
 // ENUMS
 //====================================================
-
 enum EAState
 {
-  EA_IDLE,          // Đang chờ: bias hợp lệ + MiddleTF trend đồng thuận + tìm FVG
-  EA_WAIT_TOUCH,    // Đã có FVG candidate, đang chờ giá retracement chạm vùng FVG
-  EA_WAIT_TRIGGER,  // Giá đã chạm FVG, đang chờ TriggerTF xác nhận entry
-  EA_IN_TRADE       // Đang có lệnh mở, theo dõi cho đến khi đóng
+  EA_IDLE,          // Looking for best FVG
+  EA_WAIT_TOUCH,    // Active FVG = PENDING, waiting price entry
+  EA_WAIT_TRIGGER,  // Active FVG = TOUCHED, waiting TriggerTF MSS
+  EA_IN_TRADE       // Position open
 };
 
-enum HTFBias
-{
-  BIAS_NONE    =  0,  // Chưa xác định được bias (chưa đủ bar)
-  BIAS_UP      =  1,  // Bias tăng – ưu tiên tìm lệnh Buy
-  BIAS_DOWN    = -1,  // Bias giảm – ưu tiên tìm lệnh Sell
-  BIAS_SIDEWAY =  2   // Sideway – không trade (không có bias rõ ràng)
-};
-
-enum MarketDir
-{
-  DIR_NONE  =  0,  // Chưa xác định hướng
-  DIR_UP    =  1,  // Hướng tăng (uptrend hoặc bullish FVG)
-  DIR_DOWN  = -1   // Hướng giảm (downtrend hoặc bearish FVG)
-};
-
+enum HTFBias    { BIAS_NONE=0, BIAS_UP=1, BIAS_DOWN=-1, BIAS_SIDEWAY=2 };
+enum MarketDir  { DIR_NONE=0,  DIR_UP=1,  DIR_DOWN=-1                  };
 enum BlockReason
 {
-  BLOCK_NONE,           // Không bị block, EA hoạt động bình thường
-  BLOCK_SESSION,        // Ngoài giờ giao dịch được phép
-  BLOCK_DAILY_LOSS,     // Đã chạm mức loss tối đa trong ngày
-  BLOCK_BIAS_MISMATCH,  // Bias D1 và MiddleTF trend ngược chiều nhau
-  BLOCK_NO_BIAS         // Bias là SIDEWAY hoặc NONE → không có hướng rõ
+  BLOCK_NONE, BLOCK_SESSION, BLOCK_DAILY_LOSS,
+  BLOCK_BIAS_MISMATCH, BLOCK_NO_BIAS
+};
+enum FVGStatus
+{
+  FVG_PENDING,  // Formed, not yet touched
+  FVG_TOUCHED,  // Price entered gap zone
+  FVG_USED      // Consumed: 0=expired 1=broken 2=triggered
 };
 
 //====================================================
 // STRUCTS
 //====================================================
-
 struct BiasContext
 {
-  HTFBias  bias;         // Bias hiện tại của BiasTF
-  double   rangeHigh;    // Đỉnh range khi bias = SIDEWAY (dùng để hiển thị)
-  double   rangeLow;     // Đáy range khi bias = SIDEWAY
-  datetime lastBarTime;  // Thời điểm bar BiasTF cuối cùng được xử lý (guard chống update lặp)
+  HTFBias  bias;
+  double   rangeHigh, rangeLow;
+  datetime lastBarTime;
 };
 
-struct MiddleTFTrend
+// Shared for both MiddleTF and TriggerTF.
+// Includes MSS tracking: recorded each time bar[1].close breaks the KeyLevel.
+struct TFTrendContext
 {
-  MarketDir trend;       // Trend hiện tại của MiddleTF: DIR_UP / DIR_DOWN / DIR_NONE
+  // ── Swing structure ────────────────────────────────────────────
+  MarketDir trend;
+  double    h0, h1, l0, l1;
+  int       idxH0, idxH1, idxL0, idxL1;
+  double    keyLevel;        // L0 (uptrend) or H0 (downtrend)
+  datetime  lastBarTime;     // Guard: recalculate only on new bar
 
-  // Swing structure – 2 điểm gần nhất, [0] = mới hơn
-  double    h0;          // Swing High gần nhất (Higher High hoặc Lower High)
-  double    h1;          // Swing High trước đó
-  double    l0;          // Swing Low gần nhất  (Higher Low hoặc Lower Low)
-  double    l1;          // Swing Low trước đó
-
-  int       idxH0;       // Bar index của h0 trên MiddleTF (dùng để vẽ)
-  int       idxH1;       // Bar index của h1
-  int       idxL0;       // Bar index của l0
-  int       idxL1;       // Bar index của l1
-
-  double    keyLevel;    // Level quan trọng nhất cần theo dõi:
-                         //   Uptrend  → keyLevel = l0  (close < l0 = MSS, trend đổi)
-                         //   Downtrend→ keyLevel = h0  (close > h0 = MSS, trend đổi)
-
-  datetime  lastBarTime; // Guard: chỉ recalculate khi có bar MiddleTF mới
+  // ── MSS tracking ───────────────────────────────────────────────
+  // lastMssTime  : open time of the bar whose close broke keyLevel
+  // lastMssLevel : the key level that was broken
+  // lastMssBreak : DIR_UP   = close > KL  (bear→bull flip)
+  //                DIR_DOWN = close < KL  (bull→bear flip)
+  datetime  lastMssTime;
+  double    lastMssLevel;
+  MarketDir lastMssBreak;
 };
 
-struct FVGContext
+struct FVGRecord  // Direct array access only – no & ref
 {
-  bool      active;      // true = đang tracking một FVG (state >= WAIT_TOUCH)
-  bool      touched;     // true = giá đã chạm vào vùng FVG ít nhất 1 lần
-
-  MarketDir direction;   // Hướng FVG: DIR_UP (bullish) hoặc DIR_DOWN (bearish)
-  double    high;        // Cạnh trên của vùng FVG
-  double    low;         // Cạnh dưới của vùng FVG
-  double    mid;         // Midpoint = (high+low)/2 – dùng làm entry tham chiếu
-
-  datetime  createdTime; // Thời điểm nến phải của pattern đóng = FVG được confirm
-  datetime  touchTime;   // Thời điểm giá chạm FVG lần đầu
-
-  int       barsAlive;   // Số bar TriggerTF đã trôi qua kể từ khi touched
-  int       touchBarIdx; // Bar index TriggerTF tại thời điểm touched (dùng đếm barsAlive)
+  int       id;
+  FVGStatus status;
+  int       usedCase;              // 0=expired 1=broken 2=triggered
+  MarketDir direction;
+  double    high, low, mid;
+  datetime  createdTime;
+  datetime  touchTime;             // Tick time when bid first entered gap
+  datetime  usedTime;
+  MarketDir triggerTrendAtTouch;   // M5 trend at touch, used for case2 detect
 };
 
 struct TriggerContext
 {
-  bool      valid;       // true = đã xác định được swing structure trên TriggerTF
-  MarketDir direction;   // Hướng trigger đang chờ
-  double    swingHigh;   // Swing high gần nhất trên TriggerTF (sau khi touched FVG)
-  double    swingLow;    // Swing low gần nhất trên TriggerTF
-  int       idxHigh;     // Bar index của swingHigh
-  int       idxLow;      // Bar index của swingLow
-  double    breakLevel;  // Level cần bị phá vỡ để xác nhận trigger entry
+  bool      valid;
+  MarketDir direction;
+  double    swingHigh, swingLow;
+  int       idxHigh, idxLow;
+  double    breakLevel;
 };
 
 struct OrderPlan
 {
-  bool   valid;          // true = plan đã được tính, có thể gửi lệnh
-  int    direction;      // 1 = Buy, -1 = Sell
-  double entry;          // Giá vào lệnh
-  double stopLoss;       // Giá stop loss
-  double takeProfit;     // Giá take profit
-  double lot;            // Khối lượng lô
+  bool   valid;
+  int    direction;
+  double entry, stopLoss, takeProfit, lot;
 };
 
 struct DailyRiskContext
 {
-  double   startBalance;    // Balance lúc đầu ngày (chụp khi bar D1 mới mở)
-  double   currentBalance;  // Balance hiện tại (cache mỗi tick, tránh gọi API 2 lần)
-  datetime dayStartTime;    // Thời điểm bar D1 hiện tại mở (ID của ngày)
-  bool     limitHit;        // true = đã chạm daily loss limit → không trade thêm hôm nay
+  double   startBalance, currentBalance;
+  datetime dayStartTime;
+  bool     limitHit;
 };
 
 //====================================================
-// GLOBAL STATE
+// GLOBALS
 //====================================================
+EAState          g_State       = EA_IDLE;
+BlockReason      g_BlockReason = BLOCK_NONE;
 
-EAState          g_State        = EA_IDLE;   // Trạng thái hiện tại của state machine
-BlockReason      g_BlockReason  = BLOCK_NONE; // Lý do EA bị block (hiển thị trên debug panel)
+BiasContext      g_Bias;
+TFTrendContext   g_MiddleTrend;
+TFTrendContext   g_TriggerTrend;
+TriggerContext   g_Trigger;
+DailyRiskContext g_DailyRisk;
 
-BiasContext      g_Bias;         // Context bias HTF (D1)
-MiddleTFTrend    g_MiddleTrend;  // Context trend + swing structure MTF (H1)
-FVGContext       g_FVG;          // Context FVG đang được tracking
-TriggerContext   g_Trigger;      // Context trigger entry (M5)
-DailyRiskContext g_DailyRisk;    // Context quản lý risk theo ngày
+FVGRecord  g_FVGPool[MAX_FVG_POOL];
+int        g_FVGCount      = 0;
+int        g_NextFVGId     = 0;
+int        g_ActiveFVGIdx  = -1;
+int        g_TradeBarIndex = -1;
 
-int              g_TradeBarIndex = -1; // Bar index TriggerTF lúc gửi lệnh (guard chống double-entry)
+// Chart object name prefixes
+// SW_   : MiddleTF swing arrows/labels/key-level lines
+// TS_   : TriggerTF swing arrows/labels/key-level lines
+// MSS_  : MSS markers (both TFs, distinguished by M/T inside name)
+// FVGP_ : FVG pool rectangles / midlines / labels
+// DBG_  : Debug panel labels
+const string SW_PREFIX   = "SW_";
+const string TS_PREFIX   = "TS_";
+const string MSS_PREFIX  = "MSS_";
+const string FVGP_PREFIX = "FVGP_";
+const string DBG_PREFIX  = "DBG_";
 
-// Tên cố định cho FVG drawing objects (chỉ 1 FVG active tại một thời điểm)
-const string FVG_RECT_NAME  = "FVG_RECT";   // Rectangle vùng FVG
-const string FVG_MID_NAME   = "FVG_MID";    // Đường midpoint (đứt nét)
-const string FVG_LABEL_NAME = "FVG_LABEL";  // Text label "FVG ▲/▼"
+//+------------------------------------------------------------------+
+//|  SECTION 1 – SWING HELPERS                                       |
+//+------------------------------------------------------------------+
 
-// Prefix cho swing drawing objects – dùng ObjectsDeleteAll(0, SW_PREFIX) để xóa toàn bộ
-const string SW_PREFIX = "SW_";
-
-//====================================================
-// SWING DETECTION HELPERS
-//====================================================
-
-// Trả về true nếu bar[i] là Swing High hợp lệ:
-//   bar[i].high > bar[i-k].high  với mọi k trong [1..InpSwingRange]  (nến bên phải / newer)
-//   bar[i].high > bar[i+k].high  với mọi k trong [1..InpSwingRange]  (nến bên trái / older)
-// Ý nghĩa: đỉnh cục bộ được xác nhận bởi InpSwingRange nến ở mỗi phía
 bool IsSwingHighAt(ENUM_TIMEFRAMES tf, int i)
 {
-  double price = iHigh(_Symbol, tf, i);
+  double p = iHigh(_Symbol, tf, i);
   for (int k = 1; k <= InpSwingRange; k++)
-  {
-    if (iHigh(_Symbol, tf, i - k) >= price) return false; // Nến newer (index thấp hơn) cao hơn → không phải đỉnh
-    if (iHigh(_Symbol, tf, i + k) >= price) return false; // Nến older (index cao hơn) cao hơn → không phải đỉnh
-  }
+    if (iHigh(_Symbol, tf, i-k) >= p || iHigh(_Symbol, tf, i+k) >= p) return false;
   return true;
 }
 
-// Tương tự IsSwingHighAt nhưng cho đáy cục bộ
 bool IsSwingLowAt(ENUM_TIMEFRAMES tf, int i)
 {
-  double price = iLow(_Symbol, tf, i);
+  double p = iLow(_Symbol, tf, i);
   for (int k = 1; k <= InpSwingRange; k++)
-  {
-    if (iLow(_Symbol, tf, i - k) <= price) return false; // Nến newer thấp hơn → không phải đáy
-    if (iLow(_Symbol, tf, i + k) <= price) return false; // Nến older thấp hơn → không phải đáy
-  }
+    if (iLow(_Symbol, tf, i-k) <= p || iLow(_Symbol, tf, i+k) <= p) return false;
   return true;
 }
 
-//====================================================
-// CONTEXT UPDATERS
-//====================================================
-
-// Phân loại bias dựa trên 2 bar BiasTF đã đóng gần nhất:
-//   b1 = bar[1] (vừa đóng), b2 = bar[2] (trước đó)
-// Rule 1: b1.close > b2.high          → BIAS_UP    (breakout rõ ràng lên trên)
-// Rule 2: b1.close < b2.low           → BIAS_DOWN  (breakout rõ ràng xuống dưới)
-// Rule 3: b1.high > b2.high nhưng close < b2.high → BIAS_DOWN (sweep đỉnh rồi reject)
-// Rule 4: b1.low  < b2.low  nhưng close > b2.low  → BIAS_UP   (sweep đáy rồi recover)
-// Rule 5: không khớp rule nào         → BIAS_SIDEWAY
-HTFBias ResolveBias(double b1High, double b1Low, double b1Close,
-                    double b2High, double b2Low)
+bool ScanSwingStructure(
+  ENUM_TIMEFRAMES tf, int lookback,
+  double &h0, double &h1, int &idxH0, int &idxH1,
+  double &l0, double &l1, int &idxL0, int &idxL1)
 {
-  if (b1Close > b2High)                    return BIAS_UP;    // Đóng cửa vượt đỉnh bar trước
-  if (b1Close < b2Low)                     return BIAS_DOWN;  // Đóng cửa xuyên đáy bar trước
-  if (b1High > b2High && b1Close < b2High) return BIAS_DOWN;  // Wick phá đỉnh nhưng close quay về → bearish
-  if (b1Low  < b2Low  && b1Close > b2Low)  return BIAS_UP;    // Wick phá đáy nhưng close quay lại → bullish
-  return BIAS_SIDEWAY;                                         // Không có tín hiệu rõ
+  int maxBar = MathMin(lookback, Bars(_Symbol, tf) - InpSwingRange - 2);
+  double highs[2]; int hiIdx[2]; int hc = 0;
+  double lows [2]; int loIdx[2]; int lc = 0;
+
+  for (int i = InpSwingRange + 1; i <= maxBar; i++)
+  {
+    if (hc < 2 && IsSwingHighAt(tf, i)) { highs[hc] = iHigh(_Symbol, tf, i); hiIdx[hc] = i; hc++; }
+    if (lc < 2 && IsSwingLowAt (tf, i)) { lows [lc] = iLow (_Symbol, tf, i); loIdx[lc] = i; lc++; }
+    if (hc == 2 && lc == 2) break;
+  }
+  if (hc < 2 || lc < 2) return false;
+
+  h0 = highs[0]; idxH0 = hiIdx[0];
+  h1 = highs[1]; idxH1 = hiIdx[1];
+  l0 = lows [0]; idxL0 = loIdx[0];
+  l1 = lows [1]; idxL1 = loIdx[1];
+  return true;
+}
+
+void ResolveTrendFromSwings(
+  ENUM_TIMEFRAMES tf,
+  double h0, double h1, double l0, double l1,
+  MarketDir &trend, double &keyLevel)
+{
+  double c1 = iClose(_Symbol, tf, 1);
+  if      (h0 > h1 && l0 > l1 && c1 > l0) { trend = DIR_UP;   keyLevel = l0; }
+  else if (h0 < h1 && l0 < l1 && c1 < h0) { trend = DIR_DOWN; keyLevel = h0; }
+  else                                      { trend = DIR_NONE; keyLevel = 0;  }
+}
+
+//+------------------------------------------------------------------+
+//|  SECTION 2 – CONTEXT UPDATERS                                    |
+//+------------------------------------------------------------------+
+
+HTFBias ResolveBias(double b1H, double b1L, double b1C, double b2H, double b2L)
+{
+  if (b1C > b2H)               return BIAS_UP;
+  if (b1C < b2L)               return BIAS_DOWN;
+  if (b1H > b2H && b1C < b2H) return BIAS_DOWN;
+  if (b1L < b2L && b1C > b2L) return BIAS_UP;
+  return BIAS_SIDEWAY;
 }
 
 void UpdateBiasContext()
 {
-  datetime currentBarTime = iTime(_Symbol, InpBiasTF, 0);
-  if (currentBarTime == g_Bias.lastBarTime) return; // Guard: chỉ tính lại khi có bar BiasTF mới
+  datetime t0 = iTime(_Symbol, InpBiasTF, 0);
+  if (t0 == g_Bias.lastBarTime) return;
+  g_Bias.lastBarTime = t0;
 
-  g_Bias.lastBarTime = currentBarTime;
+  if (Bars(_Symbol, InpBiasTF) < 4) { g_Bias.bias = BIAS_NONE; return; }
 
-  if (Bars(_Symbol, InpBiasTF) < 4) { g_Bias.bias = BIAS_NONE; return; } // Chưa đủ bar lịch sử
+  double b1H = iHigh (_Symbol, InpBiasTF, 1);
+  double b1L = iLow  (_Symbol, InpBiasTF, 1);
+  double b1C = iClose(_Symbol, InpBiasTF, 1);
+  double b2H = iHigh (_Symbol, InpBiasTF, 2);
+  double b2L = iLow  (_Symbol, InpBiasTF, 2);
 
-  double b1High  = iHigh (_Symbol, InpBiasTF, 1); // Bar đã đóng gần nhất
-  double b1Low   = iLow  (_Symbol, InpBiasTF, 1);
-  double b1Close = iClose(_Symbol, InpBiasTF, 1);
-  double b2High  = iHigh (_Symbol, InpBiasTF, 2); // Bar trước đó
-  double b2Low   = iLow  (_Symbol, InpBiasTF, 2);
+  HTFBias prev = g_Bias.bias;
+  g_Bias.bias  = ResolveBias(b1H, b1L, b1C, b2H, b2L);
+  g_Bias.rangeHigh = (g_Bias.bias == BIAS_SIDEWAY) ? b2H : 0;
+  g_Bias.rangeLow  = (g_Bias.bias == BIAS_SIDEWAY) ? b2L : 0;
 
-  HTFBias prevBias = g_Bias.bias;
-  g_Bias.bias      = ResolveBias(b1High, b1Low, b1Close, b2High, b2Low);
-
-  // Lưu range của b2 để hiển thị khi sideway (giúp trader thấy vùng congestion)
-  g_Bias.rangeHigh = (g_Bias.bias == BIAS_SIDEWAY) ? b2High : 0;
-  g_Bias.rangeLow  = (g_Bias.bias == BIAS_SIDEWAY) ? b2Low  : 0;
-
-  if (InpDebugLog && g_Bias.bias != prevBias) // Log khi bias thay đổi (không log mỗi bar)
+  if (InpDebugLog && g_Bias.bias != prev)
     PrintFormat("[BIAS] %s → %s | b1[H=%.5f L=%.5f C=%.5f] b2[H=%.5f L=%.5f]",
-      EnumToString(prevBias), EnumToString(g_Bias.bias),
-      b1High, b1Low, b1Close, b2High, b2Low);
+      EnumToString(prev), EnumToString(g_Bias.bias), b1H, b1L, b1C, b2H, b2L);
 }
 
-//====================================================
-// UPDATE MIDDLETF TREND
+//----------------------------------------------------------------------
+// UpdateTFTrendContext
 //
-// Mục tiêu: xác định xu hướng cấu trúc (market structure) trên MiddleTF
+// Called once per bar on each TF. Does two things:
 //
-// Quét ngược từ bar[SwingRange+1] trở về, thu thập:
-//   h0, h1 = 2 swing high gần nhất  (h0 mới hơn h1)
-//   l0, l1 = 2 swing low  gần nhất  (l0 mới hơn l1)
+// 1. MSS CHECK (before re-scan):
+//    Compares bar[1].close against the CURRENT keyLevel.
+//    If close breaks below L0 (uptrend) or above H0 (downtrend):
+//      → records MSS event in ctx.lastMssTime / lastMssLevel / lastMssBreak
+//    MSS objects are drawn separately in DrawMSSMarkers().
 //
-// Điều kiện UPTREND (Higher High + Higher Low, key level chưa bị phá):
-//   h0 > h1  (đỉnh sau cao hơn đỉnh trước = Higher High)
-//   l0 > l1  (đáy sau cao hơn đáy trước  = Higher Low)
-//   bar[1].close > l0  (giá chưa close dưới l0 → cấu trúc uptrend còn nguyên)
-//   keyLevel = l0  → nếu close < l0 thì MSS (Market Structure Shift) xảy ra
+// 2. SWING RE-SCAN:
+//    Finds new H0/H1/L0/L1 from bar data and resolves trend.
+//    keyLevel may change after re-scan (new L0 or H0).
 //
-// Điều kiện DOWNTREND (Lower High + Lower Low):
-//   h0 < h1  (Lower High)
-//   l0 < l1  (Lower Low)
-//   bar[1].close < h0  (giá chưa close trên h0 → cấu trúc downtrend còn nguyên)
-//   keyLevel = h0  → nếu close > h0 thì MSS xảy ra
-//====================================================
-
-void UpdateMiddleTfTrendContext()
+// Note: MSS is detected BEFORE re-scan so we capture the old keyLevel
+// that was broken, not the new one computed after the flip.
+//----------------------------------------------------------------------
+void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
 {
-  datetime currentBarTime = iTime(_Symbol, InpMiddleTF, 0);
-  if (currentBarTime == g_MiddleTrend.lastBarTime) return; // Guard: 1 lần/bar MiddleTF
+  datetime t0 = iTime(_Symbol, tf, 0);
+  if (t0 == ctx.lastBarTime) return;
+  ctx.lastBarTime = t0;
 
-  g_MiddleTrend.lastBarTime = currentBarTime;
-
-  // Giới hạn vùng quét: không vượt quá số bar thực tế có sẵn
-  int maxBar = MathMin(InpSwingLookback, Bars(_Symbol, InpMiddleTF) - InpSwingRange - 2);
-
-  double highs[2]; int hiIdx[2]; int hc = 0; // Mảng lưu 2 swing high, hc = đếm số đã tìm được
-  double lows[2];  int loIdx[2]; int lc = 0;
-
-  // Bắt đầu từ SwingRange+1 để đảm bảo có đủ InpSwingRange nến bên phải (newer) xác nhận swing
-  for (int i = InpSwingRange + 1; i <= maxBar; i++)
+  // ── 1. MSS check against existing key level ─────────────────────
+  if (ctx.trend != DIR_NONE && ctx.keyLevel > 0)
   {
-    if (hc < 2 && IsSwingHighAt(InpMiddleTF, i))
+    double   c1 = iClose(_Symbol, tf, 1);
+    datetime t1 = iTime (_Symbol, tf, 1);
+
+    bool mssHit =
+      (ctx.trend == DIR_UP   && c1 < ctx.keyLevel) ||  // bull→bear: close below L0
+      (ctx.trend == DIR_DOWN && c1 > ctx.keyLevel);     // bear→bull: close above H0
+
+    if (mssHit && t1 != ctx.lastMssTime)
     {
-      highs[hc] = iHigh(_Symbol, InpMiddleTF, i); // Lưu giá high của swing
-      hiIdx[hc] = i;                               // Lưu bar index để vẽ sau
-      hc++;
+      ctx.lastMssTime  = t1;
+      ctx.lastMssLevel = ctx.keyLevel;
+      ctx.lastMssBreak = (ctx.trend == DIR_UP) ? DIR_DOWN : DIR_UP;
+
+      if (InpDebugLog)
+        PrintFormat("[%s MSS] %s | KL=%.5f | close=%.5f | bar=%s",
+          EnumToString(tf),
+          (ctx.lastMssBreak == DIR_UP) ? "Bear→Bull ▲" : "Bull→Bear ▼",
+          ctx.lastMssLevel, c1, TimeToString(t1));
     }
-    if (lc < 2 && IsSwingLowAt(InpMiddleTF, i))
-    {
-      lows[lc] = iLow(_Symbol, InpMiddleTF, i);
-      loIdx[lc] = i;
-      lc++;
-    }
-    if (hc == 2 && lc == 2) break; // Đã đủ 2 high + 2 low → dừng sớm, tiết kiệm CPU
   }
 
-  if (hc < 2 || lc < 2) // Không đủ swing points trong vùng lookback
-  {
-    g_MiddleTrend.trend = DIR_NONE;
-    return;
-  }
+  // ── 2. Re-scan swing structure ───────────────────────────────────
+  double h0, h1, l0, l1;
+  int idxH0, idxH1, idxL0, idxL1;
+  if (!ScanSwingStructure(tf, lookback, h0, h1, idxH0, idxH1, l0, l1, idxL0, idxL1))
+    { ctx.trend = DIR_NONE; return; }
 
-  // highs[0]/lows[0] = gần nhất (newer), highs[1]/lows[1] = xa hơn (older)
-  g_MiddleTrend.h0 = highs[0]; g_MiddleTrend.idxH0 = hiIdx[0];
-  g_MiddleTrend.h1 = highs[1]; g_MiddleTrend.idxH1 = hiIdx[1];
-  g_MiddleTrend.l0 = lows[0];  g_MiddleTrend.idxL0 = loIdx[0];
-  g_MiddleTrend.l1 = lows[1];  g_MiddleTrend.idxL1 = loIdx[1];
+  ctx.h0 = h0; ctx.idxH0 = idxH0;
+  ctx.h1 = h1; ctx.idxH1 = idxH1;
+  ctx.l0 = l0; ctx.idxL0 = idxL0;
+  ctx.l1 = l1; ctx.idxL1 = idxL1;
 
-  double    bar1Close = iClose(_Symbol, InpMiddleTF, 1); // Bar đã đóng → dùng close để check MSS
-  MarketDir prevTrend = g_MiddleTrend.trend;             // Lưu trend cũ để detect thay đổi khi log
+  MarketDir prev = ctx.trend;
+  ResolveTrendFromSwings(tf, h0, h1, l0, l1, ctx.trend, ctx.keyLevel);
 
-  if (g_MiddleTrend.h0 > g_MiddleTrend.h1 && // Higher High: đỉnh mới cao hơn đỉnh cũ
-      g_MiddleTrend.l0 > g_MiddleTrend.l1 && // Higher Low: đáy mới cao hơn đáy cũ
-      bar1Close > g_MiddleTrend.l0)           // Close vẫn trên l0 → cấu trúc HH-HL chưa bị phá
-  {
-    g_MiddleTrend.trend    = DIR_UP;
-    g_MiddleTrend.keyLevel = g_MiddleTrend.l0; // l0 là key level: phá = MSS → trend có thể đổi
-  }
-  else if (g_MiddleTrend.h0 < g_MiddleTrend.h1 && // Lower High: đỉnh mới thấp hơn đỉnh cũ
-           g_MiddleTrend.l0 < g_MiddleTrend.l1 && // Lower Low: đáy mới thấp hơn đáy cũ
-           bar1Close < g_MiddleTrend.h0)            // Close vẫn dưới h0 → cấu trúc LH-LL chưa bị phá
-  {
-    g_MiddleTrend.trend    = DIR_DOWN;
-    g_MiddleTrend.keyLevel = g_MiddleTrend.h0; // h0 là key level: phá = MSS → trend có thể đổi
-  }
-  else // Không rõ HH-HL hay LH-LL, hoặc key level đã bị close phá → cấu trúc không rõ ràng
-  {
-    g_MiddleTrend.trend    = DIR_NONE;
-    g_MiddleTrend.keyLevel = 0;
-  }
-
-  if (InpDebugLog && g_MiddleTrend.trend != prevTrend)
-    PrintFormat("[MIDDLE TREND] %s → %s | H0=%.5f H1=%.5f L0=%.5f L1=%.5f | KeyLvl=%.5f",
-      EnumToString(prevTrend), EnumToString(g_MiddleTrend.trend),
-      g_MiddleTrend.h0, g_MiddleTrend.h1,
-      g_MiddleTrend.l0, g_MiddleTrend.l1,
-      g_MiddleTrend.keyLevel);
+  if (InpDebugLog && ctx.trend != prev)
+    PrintFormat("[%s TREND] %s → %s | H0=%.5f H1=%.5f L0=%.5f L1=%.5f | KL=%.5f",
+      EnumToString(tf), EnumToString(prev), EnumToString(ctx.trend),
+      h0, h1, l0, l1, ctx.keyLevel);
 }
 
 void UpdateDailyRiskContext()
 {
-  datetime todayBarTime = iTime(_Symbol, PERIOD_D1, 0); // "ID" của ngày: thay đổi khi bar D1 mới mở
-
-  if (todayBarTime != g_DailyRisk.dayStartTime) // Bar D1 mới = ngày mới → reset daily risk
+  datetime today = iTime(_Symbol, PERIOD_D1, 0);
+  if (today != g_DailyRisk.dayStartTime)
   {
-    g_DailyRisk.dayStartTime = todayBarTime;
-    g_DailyRisk.startBalance = AccountInfoDouble(ACCOUNT_BALANCE); // Chụp balance đầu ngày
-                                                                    // Dùng BALANCE (không dùng EQUITY)
-                                                                    // → không bị ảnh hưởng bởi floating P&L
-    g_DailyRisk.limitHit     = false; // Reset flag → cho phép trade ngày mới
-    if (InpDebugLog)
-      PrintFormat("[DAILY RISK] New day | startBalance=%.2f", g_DailyRisk.startBalance);
+    g_DailyRisk.dayStartTime = today;
+    g_DailyRisk.startBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    g_DailyRisk.limitHit     = false;
+    if (InpDebugLog) PrintFormat("[DAILY RISK] New day | start=%.2f", g_DailyRisk.startBalance);
   }
-
-  if (g_DailyRisk.limitHit) return; // Early exit: đã hit limit hôm nay → không cần tính lại mỗi tick
-
-  g_DailyRisk.currentBalance = AccountInfoDouble(ACCOUNT_BALANCE); // Cache vào struct
-                                                                    // → DrawContextDebug dùng lại,
-                                                                    //    tránh gọi API 2 lần trong cùng tick
-
+  if (g_DailyRisk.limitHit) return;
+  g_DailyRisk.currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
   double lostPct = (g_DailyRisk.startBalance - g_DailyRisk.currentBalance)
-                    / g_DailyRisk.startBalance * 100.0; // % đã mất so với đầu ngày (giá trị dương = loss)
-
-  if (lostPct >= InpMaxDailyLossPct) // Chạm ngưỡng → lock trading cả ngày
+                    / g_DailyRisk.startBalance * 100.0;
+  if (lostPct >= InpMaxDailyLossPct)
   {
     g_DailyRisk.limitHit = true;
-    PrintFormat("[DAILY RISK] ⛔ Limit hit | lost=%.2f%% | limit=%.2f%% | balance=%.2f",
-      lostPct, InpMaxDailyLossPct, g_DailyRisk.currentBalance);
+    PrintFormat("[DAILY RISK] ⛔ Limit hit | lost=%.2f%% | bal=%.2f",
+      lostPct, g_DailyRisk.currentBalance);
   }
 }
 
 void UpdateAllContexts()
 {
-  UpdateDailyRiskContext();     // Gọi mỗi tick (nhanh nhờ early-exit khi limitHit)
-  UpdateBiasContext();          // Gọi mỗi tick, chạy thực sự 1 lần/bar BiasTF (guard)
-  UpdateMiddleTfTrendContext(); // Gọi mỗi tick, chạy thực sự 1 lần/bar MiddleTF (guard)
+  UpdateDailyRiskContext();
+  UpdateBiasContext();
+  UpdateTFTrendContext(InpMiddleTF,  InpSwingLookback,        g_MiddleTrend);
+  UpdateTFTrendContext(InpTriggerTF, InpTriggerSwingLookback, g_TriggerTrend);
 }
 
-//====================================================
-// GUARDS
-// Mỗi guard kiểm tra 1 điều kiện độc lập.
-// EvaluateGuards() gọi tuần tự → điều kiện nào fail trước thì dừng.
-// Thứ tự: Session → DailyRisk → Bias → MiddleTrend
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 3 – GUARDS                                              |
+//+------------------------------------------------------------------+
 
-bool IsSessionAllowed() { return true; /* TODO: kiểm tra London/NY session theo giờ UTC */ }
-bool IsDailyLossOK()    { return !g_DailyRisk.limitHit; }  // false khi đã chạm daily loss limit
-bool IsBiasValid()      { return g_Bias.bias == BIAS_UP || g_Bias.bias == BIAS_DOWN; } // Chỉ trade khi có bias rõ (không trade sideway)
-
-// Kiểm tra Bias D1 và MiddleTF trend có cùng hướng không
-// Nguyên lý: chỉ trade theo trend đa khung thời gian đồng thuận
-//   Bias UP + Trend UP   → cho phép tìm Buy setup
-//   Bias DOWN + Trend DOWN → cho phép tìm Sell setup
-//   Ngược chiều hoặc DIR_NONE → block (BLOCK_BIAS_MISMATCH)
+bool IsSessionAllowed()    { return true; /* TODO: London/NY filter */ }
+bool IsDailyLossOK()       { return !g_DailyRisk.limitHit; }
+bool IsBiasValid()         { return g_Bias.bias == BIAS_UP || g_Bias.bias == BIAS_DOWN; }
 bool IsMiddleTrendAligned()
 {
-  if (g_MiddleTrend.trend == DIR_NONE)                              return false; // Trend chưa xác định
-  if (g_Bias.bias == BIAS_UP   && g_MiddleTrend.trend == DIR_UP)   return true;
-  if (g_Bias.bias == BIAS_DOWN && g_MiddleTrend.trend == DIR_DOWN) return true;
-  return false; // Bias và trend ngược chiều → không trade
+  if (g_MiddleTrend.trend == DIR_NONE) return false;
+  return (g_Bias.bias == BIAS_UP   && g_MiddleTrend.trend == DIR_UP) ||
+         (g_Bias.bias == BIAS_DOWN && g_MiddleTrend.trend == DIR_DOWN);
 }
 
 bool EvaluateGuards()
 {
-  g_BlockReason = BLOCK_NONE;                                                           // Reset trước khi check
-  if (!IsSessionAllowed())     { g_BlockReason = BLOCK_SESSION;       return false; }  // Ngoài giờ giao dịch
-  if (!IsDailyLossOK())        { g_BlockReason = BLOCK_DAILY_LOSS;    return false; }  // Đã hit daily loss
-  if (!IsBiasValid())          { g_BlockReason = BLOCK_NO_BIAS;       return false; }  // Bias = SIDEWAY/NONE
-  if (!IsMiddleTrendAligned()) { g_BlockReason = BLOCK_BIAS_MISMATCH; return false; }  // Bias ≠ Trend
-  return true; // Tất cả guards pass → EA được phép trade
+  g_BlockReason = BLOCK_NONE;
+  if (!IsSessionAllowed())     { g_BlockReason = BLOCK_SESSION;       return false; }
+  if (!IsDailyLossOK())        { g_BlockReason = BLOCK_DAILY_LOSS;    return false; }
+  if (!IsBiasValid())          { g_BlockReason = BLOCK_NO_BIAS;       return false; }
+  if (!IsMiddleTrendAligned()) { g_BlockReason = BLOCK_BIAS_MISMATCH; return false; }
+  return true;
 }
 
-//====================================================
-// TRANSITIONS
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 4 – STATE MACHINE HELPERS                               |
+//+------------------------------------------------------------------+
 
-// Chuyển state và log transition (không chứa business logic)
 void TransitionTo(EAState next)
 {
   if (InpDebugLog)
@@ -441,232 +394,348 @@ void TransitionTo(EAState next)
   g_State = next;
 }
 
-// Reset toàn bộ FVG context và quay về IDLE
-// Gọi khi: FVG expired, FVG invalidated, FVG broken, trigger timeout, trade closed, guards fail
 void ResetToIdle(string reason = "")
 {
   if (InpDebugLog && reason != "")
-    PrintFormat("[RESET] %s", reason);
-
-  ZeroMemory(g_FVG);     // Xóa toàn bộ FVG data
-  ZeroMemory(g_Trigger); // Xóa trigger data
-  g_TradeBarIndex = -1;  // Reset guard chống double-entry
-
-  // Xóa FVG drawing objects khỏi chart
-  ObjectDelete(0, FVG_RECT_NAME);
-  ObjectDelete(0, FVG_MID_NAME);
-  ObjectDelete(0, FVG_LABEL_NAME);
-
+    PrintFormat("[RESET→IDLE] %s", reason);
+  g_ActiveFVGIdx  = -1;
+  g_TradeBarIndex = -1;
+  ZeroMemory(g_Trigger);
   TransitionTo(EA_IDLE);
 }
 
-//====================================================
-// FVG HELPERS
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 5 – FVG HELPERS                                         |
+//+------------------------------------------------------------------+
 
-// Kiểm tra nến tại barIndex có body "mạnh" không (body/range >= InpFVGMinBodyPct%)
-// Mục đích: loại bỏ FVG do nến doji, spinning top gây ra → chỉ lấy FVG từ nến impulse
-bool IsCandleStrong(ENUM_TIMEFRAMES tf, int barIndex)
+bool IsCandleStrong(ENUM_TIMEFRAMES tf, int i)
 {
-  double high  = iHigh (_Symbol, tf, barIndex);
-  double low   = iLow  (_Symbol, tf, barIndex);
-  double open  = iOpen (_Symbol, tf, barIndex);
-  double close = iClose(_Symbol, tf, barIndex);
-
-  double range = high - low;
-  if (range < _Point) return false; // Nến có range gần 0 → bỏ qua (tránh chia cho 0)
-
-  return (MathAbs(close - open) / range * 100.0) >= InpFVGMinBodyPct;
+  double h = iHigh(_Symbol, tf, i), l = iLow(_Symbol, tf, i);
+  double o = iOpen(_Symbol, tf, i), c = iClose(_Symbol, tf, i);
+  double range = h - l;
+  if (range < _Point) return false;
+  return (MathAbs(c - o) / range * 100.0) >= InpFVGMinBodyPct;
 }
 
-// Kiểm tra FVG đã bị "fill" chưa = có bar nào sau FVG close vào trong vùng gap không
-//   fvgRightIdx = bar index của nến phải (newest) trong pattern 3 nến
-//   Scan từ fvgRightIdx-1 (bar ngay sau FVG) đến bar[1] (bar hiện tại đã đóng)
-//   Bullish FVG filled: có bar close <= fvgHigh (close vào trong gap từ trên xuống)
-//   Bearish FVG filled: có bar close >= fvgLow  (close vào trong gap từ dưới lên)
-bool IsFVGAlreadyFilled(ENUM_TIMEFRAMES tf, int fvgRightIdx,
-                        double fvgHigh, double fvgLow, MarketDir dir)
+bool IsFVGInPool(datetime created)
 {
-  for (int j = fvgRightIdx - 1; j >= 1; j--) // Scan từ ngay sau FVG đến bar gần nhất
-  {
-    double close = iClose(_Symbol, tf, j);
-    if (dir == DIR_UP   && close <= fvgHigh) return true; // Close vào trong bullish gap
-    if (dir == DIR_DOWN && close >= fvgLow)  return true; // Close vào trong bearish gap
-  }
-  return false; // Chưa có bar nào fill gap → FVG vẫn còn nguyên
-}
-
-// FVG expired = tồn tại quá InpFVGMaxAliveMin phút kể từ khi được confirm
-// Lý do expire: FVG quá cũ thường mất relevance, rủi ro cao khi vào lệnh
-bool IsFVGExpired()
-{
-  if (g_FVG.createdTime <= 0) return false; // FVG chưa được set → không thể expire
-  return (int)(TimeCurrent() - g_FVG.createdTime) > InpFVGMaxAliveMin * 60;
-}
-
-// FVG invalidated = MiddleTF bar[1] close xuyên hoàn toàn qua vùng FVG ngược chiều
-//   Bullish FVG: close < FVG.low  → giá đã xuyên xuống hoàn toàn qua gap → FVG không còn ý nghĩa
-//   Bearish FVG: close > FVG.high → giá đã xuyên lên hoàn toàn qua gap
-bool IsFVGInvalidated()
-{
-  double lastClose = iClose(_Symbol, InpMiddleTF, 1);
-  if (g_FVG.direction == DIR_UP   && lastClose < g_FVG.low)  return true;
-  if (g_FVG.direction == DIR_DOWN && lastClose > g_FVG.high) return true;
+  for (int j = 0; j < g_FVGCount; j++)
+    if (g_FVGPool[j].createdTime == created) return true;
   return false;
 }
 
-//====================================================
-// FVG DETECTION
-//
-// Pattern 3 nến tại bar index i (i = nến giữa / impulse candle):
-//   bar[i+1] = nến trái  (older)   → đáy/đỉnh tạo một cạnh của gap
-//   bar[i]   = nến giữa  (impulse) → nến mạnh tạo ra gap
-//   bar[i-1] = nến phải  (newer)   → đáy/đỉnh tạo cạnh còn lại của gap
-//
-// Bullish FVG (gap tăng – giá nhảy lên):
-//   Điều kiện: bar[i+1].high < bar[i-1].low  (đỉnh nến trái < đáy nến phải = có khoảng trống)
-//   gapLow  = bar[i+1].high  (đỉnh nến trái = cạnh dưới của gap)
-//   gapHigh = bar[i-1].low   (đáy nến phải  = cạnh trên của gap)
-//   → Khi retracement, giá về vùng [gapLow, gapHigh] để tìm buy
-//
-// Bearish FVG (gap giảm – giá nhảy xuống):
-//   Điều kiện: bar[i+1].low > bar[i-1].high
-//   gapHigh = bar[i+1].low   (đáy nến trái  = cạnh trên của gap)
-//   gapLow  = bar[i-1].high  (đỉnh nến phải = cạnh dưới của gap)
-//   → Khi retracement, giá về vùng [gapLow, gapHigh] để tìm sell
-//
-// Hàm scan từ i=2 → InpFVGScanBars, trả về FVG HỢP LỆ gần nhất (chưa fill, còn trong thời gian sống)
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 6 – FVG POOL: SCAN & REGISTER                          |
+//|                                                                  |
+//|  Called once per MiddleTF bar (static guard).                    |
+//|  Scans InpFVGScanBars window. Determines initial status:         |
+//|    P1 → case1 (close through gap)     → USED(1)                 |
+//|    P2 → touch  (wick entered gap)     → TOUCHED                 |
+//|    P3 → default                       → PENDING / USED(expired) |
+//+------------------------------------------------------------------+
 
-bool FindFVGCandidate(FVGContext &fvg)
+void ScanAndRegisterFVGs()
 {
-  MarketDir targetDir = g_MiddleTrend.trend; // Direction từ MiddleTF trend (đã pass guard đồng thuận với bias)
-  int maxBar = MathMin(InpFVGScanBars, Bars(_Symbol, InpMiddleTF) - 2); // Không scan quá số bar thực tế
+  static datetime s_lastScan = 0;
+  datetime t0 = iTime(_Symbol, InpMiddleTF, 0);
+  if (t0 == s_lastScan) return;
+  s_lastScan = t0;
 
-  for (int i = 2; i <= maxBar; i++) // i=2: nến phải là i-1=1 (bar đã đóng), an toàn để dùng
+  MarketDir dir = g_MiddleTrend.trend;
+  if (dir == DIR_NONE) return;
+
+  int maxBar = MathMin(InpFVGScanBars, Bars(_Symbol, InpMiddleTF) - 2);
+
+  for (int i = 2; i <= maxBar; i++)
   {
-    double leftHigh  = iHigh (_Symbol, InpMiddleTF, i + 1); // Nến trái (older)
-    double leftLow   = iLow  (_Symbol, InpMiddleTF, i + 1);
-    double rightHigh = iHigh (_Symbol, InpMiddleTF, i - 1); // Nến phải (newer)
-    double rightLow  = iLow  (_Symbol, InpMiddleTF, i - 1);
-    double midOpen   = iOpen (_Symbol, InpMiddleTF, i);     // Nến giữa (impulse)
-    double midClose  = iClose(_Symbol, InpMiddleTF, i);
+    double leftH  = iHigh (_Symbol, InpMiddleTF, i + 1);
+    double leftL  = iLow  (_Symbol, InpMiddleTF, i + 1);
+    double rightH = iHigh (_Symbol, InpMiddleTF, i - 1);
+    double rightL = iLow  (_Symbol, InpMiddleTF, i - 1);
+    double midO   = iOpen (_Symbol, InpMiddleTF, i);
+    double midC   = iClose(_Symbol, InpMiddleTF, i);
+    double gH = 0, gL = 0;
 
-    double gapHigh, gapLow;
-
-    if (targetDir == DIR_UP) // Tìm Bullish FVG
+    if (dir == DIR_UP)
     {
-      if (leftHigh >= rightLow)            continue; // Không có gap: đỉnh trái chạm/vượt đáy phải
-      if (midClose <= midOpen)             continue; // Nến giữa phải bullish (close > open)
-      if (!IsCandleStrong(InpMiddleTF, i)) continue; // Nến giữa phải đủ mạnh (body >= X%)
-      gapLow  = leftHigh; // Cạnh dưới gap = đỉnh nến trái
-      gapHigh = rightLow; // Cạnh trên gap = đáy nến phải
+      if (leftH >= rightL || midC <= midO || !IsCandleStrong(InpMiddleTF, i)) continue;
+      gL = leftH; gH = rightL;
     }
-    else // Tìm Bearish FVG
+    else
     {
-      if (leftLow <= rightHigh)            continue; // Không có gap
-      if (midClose >= midOpen)             continue; // Nến giữa phải bearish (close < open)
-      if (!IsCandleStrong(InpMiddleTF, i)) continue;
-      gapHigh = leftLow;  // Cạnh trên gap = đáy nến trái
-      gapLow  = rightHigh; // Cạnh dưới gap = đỉnh nến phải
+      if (leftL <= rightH || midC >= midO || !IsCandleStrong(InpMiddleTF, i)) continue;
+      gH = leftL; gL = rightH;
     }
 
-    // Kiểm tra FVG chưa bị fill: scan từ nến phải (i-1) đến bar hiện tại
-    if (IsFVGAlreadyFilled(InpMiddleTF, i - 1, gapHigh, gapLow, targetDir))
-      continue; // Đã bị fill → bỏ qua, tìm FVG khác
+    datetime created = iTime(_Symbol, InpMiddleTF, i - 1);
+    if (IsFVGInPool(created)) continue;
 
-    // ── FVG hợp lệ → điền vào struct và trả về ──────────────────
-    fvg.active      = true;
-    fvg.touched     = false;
-    fvg.direction   = targetDir;
-    fvg.high        = gapHigh;
-    fvg.low         = gapLow;
-    fvg.mid         = (gapHigh + gapLow) / 2.0;           // Midpoint dùng làm entry tham chiếu
-    fvg.createdTime = iTime(_Symbol, InpMiddleTF, i - 1); // Nến phải đóng = thời điểm FVG được confirm
-    fvg.touchTime   = 0;
-    fvg.barsAlive   = 0;
-    fvg.touchBarIdx = -1;
+    // ── Evict oldest USED if pool full ──────────────────────────────
+    if (g_FVGCount >= MAX_FVG_POOL)
+    {
+      int evict = -1; datetime oldest = TimeCurrent();
+      for (int j = 0; j < g_FVGCount; j++)
+        if (g_FVGPool[j].status == FVG_USED && g_FVGPool[j].createdTime < oldest)
+          { oldest = g_FVGPool[j].createdTime; evict = j; }
+      if (evict < 0) { if (InpDebugLog) Print("[FVG POOL] Full – no USED slot"); break; }
+      for (int j = evict; j < g_FVGCount - 1; j++) g_FVGPool[j] = g_FVGPool[j + 1];
+      g_FVGCount--;
+      if      (g_ActiveFVGIdx >  evict) g_ActiveFVGIdx--;
+      else if (g_ActiveFVGIdx == evict) g_ActiveFVGIdx = -1;
+    }
 
-    return true; // Trả về FVG gần nhất (i nhỏ nhất = gần bar hiện tại nhất)
+    // ── Build record ─────────────────────────────────────────────────
+    FVGRecord rec;
+    ZeroMemory(rec);
+    rec.id          = g_NextFVGId++;
+    rec.direction   = dir;
+    rec.high        = gH; rec.low = gL; rec.mid = (gH + gL) / 2.0;
+    rec.createdTime = created;
+    int rightBar    = i - 1;
+
+    // P1: case1 – H1 close punched through gap
+    bool c1Hit = false; datetime c1T = 0;
+    for (int j = rightBar - 1; j >= 1; j--)
+    {
+      double cl = iClose(_Symbol, InpMiddleTF, j);
+      if ((rec.direction == DIR_UP   && cl < rec.low) ||
+          (rec.direction == DIR_DOWN && cl > rec.high))
+        { c1Hit = true; c1T = iTime(_Symbol, InpMiddleTF, j); break; }
+    }
+    if (c1Hit) { rec.status = FVG_USED; rec.usedCase = 1; rec.usedTime = c1T; }
+    else
+    {
+      // P2: touch – wick entered gap
+      bool tdHit = false; datetime tdT = 0;
+      for (int j = rightBar - 1; j >= 1; j--)
+      {
+        bool inGap = (rec.direction == DIR_UP   && iLow (_Symbol, InpMiddleTF, j) <= rec.high) ||
+                     (rec.direction == DIR_DOWN && iHigh(_Symbol, InpMiddleTF, j) >= rec.low);
+        if (inGap) { tdHit = true; tdT = iTime(_Symbol, InpMiddleTF, j); break; }
+      }
+      if (tdHit) { rec.status = FVG_TOUCHED; rec.touchTime = tdT; rec.triggerTrendAtTouch = g_TriggerTrend.trend; }
+      else
+      {
+        rec.status = FVG_PENDING;
+        if ((int)(TimeCurrent() - rec.createdTime) > InpFVGMaxAliveMin * 60)
+          { rec.status = FVG_USED; rec.usedCase = 0; rec.usedTime = TimeCurrent(); }
+      }
+    }
+
+    g_FVGPool[g_FVGCount] = rec;
+    g_FVGCount++;
+
+    if (InpDebugLog)
+      PrintFormat("[FVG +] #%d %s [%.5f–%.5f] %s | %s",
+        rec.id, EnumToString(rec.direction), rec.low, rec.high,
+        EnumToString(rec.status), TimeToString(rec.createdTime));
   }
-
-  return false; // Không tìm được FVG nào thỏa mãn
 }
 
-//====================================================
-// STATE HANDLERS
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 7 – FVG POOL: UPDATE STATUSES (every tick)             |
+//|                                                                  |
+//|  Priority per FVG:                                               |
+//|  1. Case1 : H1 bar[1] close through gap          → USED(1)      |
+//|  2. Expire: PENDING age > limit                  → USED(0)      |
+//|  3. Touch : bid entered gap zone                 → TOUCHED       |
+//|  4. Case2 : TOUCHED + TriggerTF MSS confirmed    → USED(2)      |
+//|             (wasOpposing at touch, nowAligned)                   |
+//|  5. Timeout: TOUCHED too long → release active FVG (keep TOUCHED)|
+//+------------------------------------------------------------------+
 
-// EA_IDLE: Quét tìm FVG candidate mỗi tick (nhanh nhờ guard đã lọc trước)
-// Khi tìm được → lưu vào g_FVG → chuyển sang WAIT_TOUCH
+void UpdateFVGStatuses()
+{
+  double   bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  double   midC1 = iClose(_Symbol, InpMiddleTF, 1);
+  datetime midT1 = iTime (_Symbol, InpMiddleTF, 1);
+
+  for (int i = 0; i < g_FVGCount; i++)
+  {
+    if (g_FVGPool[i].status == FVG_USED) continue;
+
+    // ── 1. Case1 ─────────────────────────────────────────────────────
+    bool c1 = (g_FVGPool[i].direction == DIR_UP   && midC1 < g_FVGPool[i].low) ||
+              (g_FVGPool[i].direction == DIR_DOWN && midC1 > g_FVGPool[i].high);
+    if (c1)
+    {
+      g_FVGPool[i].status   = FVG_USED;
+      g_FVGPool[i].usedCase = 1;
+      g_FVGPool[i].usedTime = midT1;
+      if (InpDebugLog)
+        PrintFormat("[FVG #%d] USED(case1=broken) | close=%.5f vs [%.5f–%.5f]",
+          g_FVGPool[i].id, midC1, g_FVGPool[i].low, g_FVGPool[i].high);
+      continue;
+    }
+
+    if (g_FVGPool[i].status == FVG_PENDING)
+    {
+      // ── 2. Expire ────────────────────────────────────────────────────
+      int age = (int)(TimeCurrent() - g_FVGPool[i].createdTime);
+      if (age > InpFVGMaxAliveMin * 60)
+      {
+        g_FVGPool[i].status   = FVG_USED;
+        g_FVGPool[i].usedCase = 0;
+        g_FVGPool[i].usedTime = TimeCurrent();
+        if (InpDebugLog)
+          PrintFormat("[FVG #%d] USED(expired) | age=%dmin", g_FVGPool[i].id, age / 60);
+        continue;
+      }
+      // ── 3. Touch ─────────────────────────────────────────────────────
+      bool touched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high) ||
+                     (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low);
+      if (touched)
+      {
+        g_FVGPool[i].status              = FVG_TOUCHED;
+        g_FVGPool[i].touchTime           = TimeCurrent();
+        g_FVGPool[i].triggerTrendAtTouch = g_TriggerTrend.trend;
+        if (InpDebugLog)
+          PrintFormat("[FVG #%d] TOUCHED | bid=%.5f [%.5f–%.5f] TrigTrend=%s",
+            g_FVGPool[i].id, bid, g_FVGPool[i].low, g_FVGPool[i].high,
+            EnumToString(g_FVGPool[i].triggerTrendAtTouch));
+      }
+    }
+    else if (g_FVGPool[i].status == FVG_TOUCHED)
+    {
+      // ── 4. Case2 – TriggerTF MSS ─────────────────────────────────────
+      // Condition: at touch the TriggerTF trend was OPPOSING the FVG direction
+      //            (retracement confirmed), and NOW it has FLIPPED to align
+      //            (MSS confirmed on TriggerTF → entry signal)
+      bool wasOpposing, nowAligned;
+      if (g_FVGPool[i].direction == DIR_UP)
+        { wasOpposing = (g_FVGPool[i].triggerTrendAtTouch != DIR_UP);  nowAligned = (g_TriggerTrend.trend == DIR_UP);   }
+      else
+        { wasOpposing = (g_FVGPool[i].triggerTrendAtTouch != DIR_DOWN); nowAligned = (g_TriggerTrend.trend == DIR_DOWN); }
+
+      if (wasOpposing && nowAligned)
+      {
+        g_FVGPool[i].status   = FVG_USED;
+        g_FVGPool[i].usedCase = 2;
+        g_FVGPool[i].usedTime = TimeCurrent();
+        if (InpDebugLog)
+          PrintFormat("[FVG #%d] USED(case2=triggered) | TrigTrend %s→%s [%.5f–%.5f] %s",
+            g_FVGPool[i].id,
+            EnumToString(g_FVGPool[i].triggerTrendAtTouch),
+            EnumToString(g_TriggerTrend.trend),
+            g_FVGPool[i].low, g_FVGPool[i].high,
+            EnumToString(g_FVGPool[i].direction));
+        continue;
+      }
+      // ── 5. Trigger timeout ────────────────────────────────────────────
+      int bars = (int)((TimeCurrent() - g_FVGPool[i].touchTime) / PeriodSeconds(InpTriggerTF));
+      if (bars > InpTriggerMaxBars
+          && g_ActiveFVGIdx >= 0
+          && g_FVGPool[g_ActiveFVGIdx].id == g_FVGPool[i].id)
+      {
+        if (InpDebugLog)
+          PrintFormat("[FVG #%d] Trigger timeout (%d bars) – release active", g_FVGPool[i].id, bars);
+        g_ActiveFVGIdx = -1;
+      }
+    }
+  }
+}
+
+//+------------------------------------------------------------------+
+//|  SECTION 8 – BEST FVG SELECTOR                                   |
+//|  Priority: TOUCHED newest > PENDING newest                       |
+//+------------------------------------------------------------------+
+
+int GetBestActiveFVGIdx()
+{
+  int bestIdx = -1; datetime bestTime = 0; bool foundTouch = false;
+  for (int i = 0; i < g_FVGCount; i++)
+  {
+    if (g_FVGPool[i].status == FVG_USED) continue;
+    if (g_FVGPool[i].status == FVG_TOUCHED)
+    {
+      if (!foundTouch || g_FVGPool[i].createdTime > bestTime)
+        { foundTouch = true; bestIdx = i; bestTime = g_FVGPool[i].createdTime; }
+    }
+    else if (!foundTouch && g_FVGPool[i].createdTime > bestTime)
+      { bestIdx = i; bestTime = g_FVGPool[i].createdTime; }
+  }
+  return bestIdx;
+}
+
+//+------------------------------------------------------------------+
+//|  SECTION 9 – STATE HANDLERS                                      |
+//+------------------------------------------------------------------+
+
 void OnStateIdle()
 {
-  FVGContext candidate;
-  ZeroMemory(candidate); // Đảm bảo struct sạch trước khi truyền vào FindFVGCandidate
-  if (!FindFVGCandidate(candidate)) return; // Không có FVG nào thỏa mãn → chờ tick tiếp
-
-  g_FVG = candidate; // Commit FVG candidate vào global state
-
+  int idx = GetBestActiveFVGIdx();
+  if (idx < 0) return;
+  g_ActiveFVGIdx = idx;
   if (InpDebugLog)
-    PrintFormat("[FVG FOUND] dir=%s | high=%.5f | low=%.5f | mid=%.5f | created=%s",
-      EnumToString(g_FVG.direction), g_FVG.high, g_FVG.low, g_FVG.mid,
-      TimeToString(g_FVG.createdTime));
-
-  TransitionTo(EA_WAIT_TOUCH);
+    PrintFormat("[ACTIVE FVG] #%d %s [%.5f–%.5f] %s",
+      g_FVGPool[idx].id, EnumToString(g_FVGPool[idx].direction),
+      g_FVGPool[idx].low, g_FVGPool[idx].high, EnumToString(g_FVGPool[idx].status));
+  TransitionTo(g_FVGPool[idx].status == FVG_TOUCHED ? EA_WAIT_TRIGGER : EA_WAIT_TOUCH);
 }
 
-// EA_WAIT_TOUCH: Theo dõi FVG đang active, chờ giá retracement vào vùng FVG
-// Exit sớm (reset) nếu: FVG hết hạn sống | FVG bị invalidate (giá xuyên qua)
-// Touch condition:
-//   Bullish FVG: giá bid <= FVG.high → giá đã retraced xuống chạm cạnh trên gap
-//   Bearish FVG: giá bid >= FVG.low  → giá đã retraced lên chạm cạnh dưới gap
 void OnStateWaitTouch()
 {
-  if (IsFVGExpired())     { ResetToIdle("FVG expired");     return; } // Quá tuổi thọ → bỏ
-  if (IsFVGInvalidated()) { ResetToIdle("FVG invalidated"); return; } // Giá xuyên gap ngược chiều → bỏ
+  if (g_ActiveFVGIdx < 0) { ResetToIdle("active lost"); return; }
+  int ai = g_ActiveFVGIdx;
 
-  double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Dùng bid (không dùng ask) để check touch
+  if (g_FVGPool[ai].status == FVG_USED)
+    { ResetToIdle(StringFormat("FVG #%d used(case%d) before touch", g_FVGPool[ai].id, g_FVGPool[ai].usedCase)); return; }
+  if (g_FVGPool[ai].status == FVG_TOUCHED)
+    { TransitionTo(EA_WAIT_TRIGGER); return; }
 
-  bool touched = false;
-  if (g_FVG.direction == DIR_UP   && bid <= g_FVG.high) touched = true; // Giá pullback xuống chạm cạnh trên gap
-  if (g_FVG.direction == DIR_DOWN && bid >= g_FVG.low)  touched = true; // Giá pullback lên chạm cạnh dưới gap
-
-  if (!touched) return; // Chưa chạm → chờ tick tiếp
-
-  g_FVG.touched     = true;
-  g_FVG.touchTime   = TimeCurrent();
-  g_FVG.touchBarIdx = iBarShift(_Symbol, InpTriggerTF, TimeCurrent()); // Bar index TriggerTF lúc touched (dùng đếm timeout)
-  g_FVG.barsAlive   = 0; // Reset counter
-
-  if (InpDebugLog)
-    PrintFormat("[FVG TOUCHED] dir=%s | price=%.5f | FVG[%.5f – %.5f]",
-      EnumToString(g_FVG.direction), bid, g_FVG.low, g_FVG.high);
-
-  TransitionTo(EA_WAIT_TRIGGER);
+  int better = GetBestActiveFVGIdx();
+  if (better >= 0 && better != ai)
+  {
+    bool bTouch = (g_FVGPool[better].status == FVG_TOUCHED);
+    bool bNewer = (g_FVGPool[better].createdTime > g_FVGPool[ai].createdTime);
+    if (bTouch || bNewer)
+    {
+      if (InpDebugLog)
+        PrintFormat("[SWITCH] FVG #%d → #%d", g_FVGPool[ai].id, g_FVGPool[better].id);
+      g_ActiveFVGIdx = better;
+      if (bTouch) TransitionTo(EA_WAIT_TRIGGER);
+    }
+  }
 }
 
-// EA_WAIT_TRIGGER: Giá đã chạm FVG, đang chờ TriggerTF xác nhận entry
 void OnStateWaitTrigger()
 {
-  // TODO: Nếu FVG bị giá phá xuyên (close hoàn toàn ra ngoài) → ResetToIdle("FVG broken")
-  // TODO: Nếu barsAlive > InpTriggerMaxBars → ResetToIdle("trigger timeout")  (chờ quá lâu, momentum mất)
-  // TODO: Mỗi bar TriggerTF mới → cập nhật TriggerContext (swing structure + breakLevel)
-  // TODO: Khi breakLevel bị phá vỡ → BuildOrderPlan() → ExecuteOrder() → TransitionTo(EA_IN_TRADE)
+  if (g_ActiveFVGIdx < 0) { ResetToIdle("trigger timeout / active lost"); return; }
+  int ai = g_ActiveFVGIdx;
+
+  if (g_FVGPool[ai].status == FVG_USED)
+  {
+    if (g_FVGPool[ai].usedCase == 2)
+    {
+      if (InpDebugLog)
+        PrintFormat("[ENTRY SIGNAL] FVG #%d %s [%.5f–%.5f]",
+          g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
+          g_FVGPool[ai].low, g_FVGPool[ai].high);
+      // TODO: BuildOrderPlan() → ExecuteOrder()
+      TransitionTo(EA_IN_TRADE);
+    }
+    else
+      ResetToIdle(StringFormat("FVG #%d used(case%d) during trigger", g_FVGPool[ai].id, g_FVGPool[ai].usedCase));
+    return;
+  }
+  if (g_FVGPool[ai].status == FVG_PENDING) { TransitionTo(EA_WAIT_TOUCH); return; }
+  // Still TOUCHED – wait for case2
 }
 
-// EA_IN_TRADE: Đang có lệnh mở, theo dõi cho đến khi lệnh đóng
 void OnStateInTrade()
 {
-  if (Bars(_Symbol, InpTriggerTF) <= g_TradeBarIndex) return; // Vẫn trong cùng bar lúc vừa gửi lệnh → skip
-  // TODO: Kiểm tra còn position/pending nào không → nếu không còn → ResetToIdle("trade closed")
+  if (Bars(_Symbol, InpTriggerTF) <= g_TradeBarIndex) return;
+  // TODO: Monitor position → ResetToIdle("trade closed") when flat
 }
 
-//====================================================
-// STATE MACHINE
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 10 – STATE MACHINE RUNNER                               |
+//+------------------------------------------------------------------+
 
 void RunStateMachine()
 {
+  UpdateFVGStatuses();
+  ScanAndRegisterFVGs();
   switch (g_State)
   {
     case EA_IDLE:         OnStateIdle();        break;
@@ -676,352 +745,432 @@ void RunStateMachine()
   }
 }
 
-//====================================================
-// SWING DRAWING
-//
-// Mỗi swing point gồm tối đa 3 objects (đều dùng prefix SW_):
-//   SW_ARR_<tag>  – Mũi tên OBJ_ARROW chỉ vào đỉnh/đáy
-//   SW_TXT_<tag>  – Text label "H0"/"H1"/"L0"/"L1"
-//   SW_KL_<tag>   – Đường ngang nét đứt OBJ_TREND (chỉ vẽ cho key level)
-//
-// Màu sắc (sáng = gần nhất, tối = cũ hơn):
-//   H0 = clrAqua       | H1 = C'0,140,160'
-//   L0 = clrYellow     | L1 = C'160,140,0'
-//
-// Key level logic:
-//   Uptrend   → L0 là key level (vẽ đường ngang vàng → MSS nếu close < L0)
-//   Downtrend → H0 là key level (vẽ đường ngang cyan → MSS nếu close > H0)
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 11 – DRAWING                                            |
+//+------------------------------------------------------------------+
 
-void DrawOneSwing(
-  string tag,        // "H0" | "H1" | "L0" | "L1"
-  bool   isHigh,     // true = swing high (mũi tên ▼), false = swing low (mũi tên ▲)
-  int    barIdx,     // Bar index trên MiddleTF
-  double price,      // Giá high (nếu isHigh) hoặc low (nếu !isHigh) của swing
-  color  clr,        // Màu hiển thị
-  bool   isKeyLevel) // true → vẽ thêm đường ngang nét đứt (key level / MSS line)
+//----------------------------------------------------------------------
+// DrawOneSwingPoint
+//
+// Generic swing-point drawing. Used for both MiddleTF and TriggerTF.
+// Parameters:
+//   prefix   – object name prefix ("SW_" or "TS_")
+//   tf       – timeframe whose bar data supplies the time/range
+//   tag      – short label ("H0" / "H1" / "L0" / "L1")
+//   isHigh   – true for swing high, false for swing low
+//   barIdx   – bar index on tf
+//   price    – swing price
+//   clr      – arrow + label color
+//   isKL     – draw a dashed key-level line to bar[0]
+//   arrowSz  – OBJPROP_WIDTH of arrow (2 for MTF, 1 for LTF)
+//   fontSize – label font size
+//----------------------------------------------------------------------
+void DrawOneSwingPoint(
+  string prefix, ENUM_TIMEFRAMES tf,
+  string tag, bool isHigh, int barIdx, double price,
+  color clr, bool isKL, int arrowSz = 2, int fontSize = 8)
 {
-  string arrName  = SW_PREFIX + "ARR_" + tag;
-  string txtName  = SW_PREFIX + "TXT_" + tag;
-  string lineName = SW_PREFIX + "KL_"  + tag;
+  string arrN = prefix + "ARR_" + tag;
+  string txtN = prefix + "TXT_" + tag;
+  string klN  = prefix + "KL_"  + tag;
+  datetime t  = iTime(_Symbol, tf, barIdx);
 
-  datetime t = iTime(_Symbol, InpMiddleTF, barIdx); // Thời điểm bar swing (dùng làm tọa độ X)
+  if (ObjectFind(0, arrN) < 0) ObjectCreate(0, arrN, OBJ_ARROW, 0, t, price);
+  ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isHigh ? 234 : 233);
+  ObjectSetInteger(0, arrN, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, arrN, OBJPROP_WIDTH,     arrowSz);
+  ObjectSetInteger(0, arrN, OBJPROP_ANCHOR,    isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
+  ObjectMove(0, arrN, 0, t, price);
 
-  // ── Arrow: chỉ vào đỉnh/đáy ─────────────────────────────────────
-  if (ObjectFind(0, arrName) < 0)
-    ObjectCreate(0, arrName, OBJ_ARROW, 0, t, price);
+  double rng  = iHigh(_Symbol, tf, barIdx) - iLow(_Symbol, tf, barIdx);
+  double txtY = isHigh ? price + rng * 0.3 : price - rng * 0.3;
+  if (ObjectFind(0, txtN) < 0) ObjectCreate(0, txtN, OBJ_TEXT, 0, t, txtY);
+  ObjectMove(0, txtN, 0, t, txtY);
+  ObjectSetString (0, txtN, OBJPROP_TEXT,    tag);
+  ObjectSetInteger(0, txtN, OBJPROP_COLOR,   clr);
+  ObjectSetInteger(0, txtN, OBJPROP_FONTSIZE, fontSize);
+  ObjectSetInteger(0, txtN, OBJPROP_ANCHOR,  isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
 
-  ObjectSetInteger(0, arrName, OBJPROP_ARROWCODE, isHigh ? 234 : 233); // 234 = ▼ (đỉnh), 233 = ▲ (đáy)
-  ObjectSetInteger(0, arrName, OBJPROP_COLOR,     clr);
-  ObjectSetInteger(0, arrName, OBJPROP_WIDTH,     2);
-  ObjectSetInteger(0, arrName, OBJPROP_ANCHOR,    isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
-  ObjectMove(0, arrName, 0, t, price); // Cập nhật vị trí mỗi lần vẽ (phòng khi barIdx thay đổi)
-
-  // ── Text label: hiển thị tên tag cạnh mũi tên ───────────────────
-  // Offset theo chiều dọc để text không đè lên mũi tên
-  double offset = (iHigh(_Symbol, InpMiddleTF, barIdx) - iLow(_Symbol, InpMiddleTF, barIdx)) * 0.3;
-  double txtY   = isHigh ? price + offset : price - offset; // Đặt text trên đỉnh hoặc dưới đáy
-
-  if (ObjectFind(0, txtName) < 0)
-    ObjectCreate(0, txtName, OBJ_TEXT, 0, t, txtY);
-
-  ObjectMove(0, txtName, 0, t, txtY);
-  ObjectSetString (0, txtName, OBJPROP_TEXT,     tag);
-  ObjectSetInteger(0, txtName, OBJPROP_COLOR,    clr);
-  ObjectSetInteger(0, txtName, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, txtName, OBJPROP_ANCHOR,   isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
-
-  // ── Key Level line: đường ngang nét đứt từ swing đến bar hiện tại ─
-  if (isKeyLevel)
+  if (isKL)
   {
-    datetime tEnd = iTime(_Symbol, InpMiddleTF, 0); // Kéo đến bar hiện tại (sẽ cập nhật mỗi tick)
-
-    if (ObjectFind(0, lineName) < 0)
-      ObjectCreate(0, lineName, OBJ_TREND, 0, t, price, tEnd, price);
-
-    ObjectSetInteger(0, lineName, OBJPROP_COLOR,     clr);
-    ObjectSetInteger(0, lineName, OBJPROP_STYLE,     STYLE_DASH);
-    ObjectSetInteger(0, lineName, OBJPROP_WIDTH,     1);
-    ObjectSetInteger(0, lineName, OBJPROP_RAY_RIGHT, false); // Không kéo dài vô tận sang phải
-    ObjectMove(0, lineName, 0, t,    price);
-    ObjectMove(0, lineName, 1, tEnd, price); // Cập nhật điểm phải mỗi tick
+    datetime tEnd = iTime(_Symbol, tf, 0);
+    if (ObjectFind(0, klN) < 0) ObjectCreate(0, klN, OBJ_TREND, 0, t, price, tEnd, price);
+    ObjectSetInteger(0, klN, OBJPROP_COLOR,     clr);
+    ObjectSetInteger(0, klN, OBJPROP_STYLE,     STYLE_DASH);
+    ObjectSetInteger(0, klN, OBJPROP_WIDTH,     1);
+    ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
+    ObjectMove(0, klN, 0, t, price);
+    ObjectMove(0, klN, 1, tEnd, price);
   }
-  else
-  {
-    ObjectDelete(0, lineName); // Swing này không còn là key level → xóa đường ngang nếu có
-  }
+  else ObjectDelete(0, klN);
 }
 
-void DrawSwingPoints()
+//----------------------------------------------------------------------
+// DrawMiddleSwingPoints – MiddleTF (H1) H0/H1/L0/L1
+// Colors: H=Aqua / L=Yellow  (brighter, thicker – higher TF)
+//----------------------------------------------------------------------
+void DrawMiddleSwingPoints()
 {
   if (!InpDebugDraw) return;
-
-  // Chưa đủ swing points (idxH0 = 0 sau ZeroMemory) → xóa tất cả swing objects
   if (g_MiddleTrend.idxH0 <= 0 || g_MiddleTrend.idxH1 <= 0 ||
       g_MiddleTrend.idxL0 <= 0 || g_MiddleTrend.idxL1 <= 0)
-  {
-    ObjectsDeleteAll(0, SW_PREFIX);
-    return;
-  }
+    { ObjectsDeleteAll(0, SW_PREFIX); return; }
 
-  bool uptrend   = (g_MiddleTrend.trend == DIR_UP);
-  bool downtrend = (g_MiddleTrend.trend == DIR_DOWN);
-
-  DrawOneSwing("H0", true,  g_MiddleTrend.idxH0, g_MiddleTrend.h0, clrAqua,        downtrend); // H0 = key level khi downtrend
-  DrawOneSwing("H1", true,  g_MiddleTrend.idxH1, g_MiddleTrend.h1, C'0,140,160',   false);
-  DrawOneSwing("L0", false, g_MiddleTrend.idxL0, g_MiddleTrend.l0, clrYellow,      uptrend);   // L0 = key level khi uptrend
-  DrawOneSwing("L1", false, g_MiddleTrend.idxL1, g_MiddleTrend.l1, C'160,140,0',   false);
+  bool isUp   = (g_MiddleTrend.trend == DIR_UP);
+  bool isDown = (g_MiddleTrend.trend == DIR_DOWN);
+  DrawOneSwingPoint(SW_PREFIX, InpMiddleTF, "H0", true,  g_MiddleTrend.idxH0, g_MiddleTrend.h0, clrAqua,       isDown, 2, 8);
+  DrawOneSwingPoint(SW_PREFIX, InpMiddleTF, "H1", true,  g_MiddleTrend.idxH1, g_MiddleTrend.h1, C'0,140,160',  false,  2, 8);
+  DrawOneSwingPoint(SW_PREFIX, InpMiddleTF, "L0", false, g_MiddleTrend.idxL0, g_MiddleTrend.l0, clrYellow,     isUp,   2, 8);
+  DrawOneSwingPoint(SW_PREFIX, InpMiddleTF, "L1", false, g_MiddleTrend.idxL1, g_MiddleTrend.l1, C'160,140,0',  false,  2, 8);
 }
 
-//====================================================
-// FVG DRAWING
-//
-// Vẽ rectangle vùng FVG + midpoint line + text label
-//
-// Cạnh trái rectangle  = createdTime  (cố định = thời điểm FVG confirmed)
-// Cạnh phải rectangle  = live khi WAIT_TOUCH (kéo đến bar hiện tại mỗi tick)
-//                      = cố định khi WAIT_TRIGGER+ (touchTime + 1 bar MiddleTF)
-// Màu: đậm khi candidate, sáng khi touched
-//   Bullish: xanh dương     Bearish: cam
-//====================================================
+//----------------------------------------------------------------------
+// DrawTriggerSwingPoints – TriggerTF (M5) H0/H1/L0/L1
+// Colors: H=Violet / L=Orange  (smaller, distinct from H1)
+// Key-level line drawn for the active side (L0 in uptrend, H0 in downtrend)
+//----------------------------------------------------------------------
+void DrawTriggerSwingPoints()
+{
+  if (!InpDebugDraw) return;
+  if (g_TriggerTrend.idxH0 <= 0 || g_TriggerTrend.idxH1 <= 0 ||
+      g_TriggerTrend.idxL0 <= 0 || g_TriggerTrend.idxL1 <= 0)
+    { ObjectsDeleteAll(0, TS_PREFIX); return; }
 
-void DrawFVGRectangle()
+  bool isUp   = (g_TriggerTrend.trend == DIR_UP);
+  bool isDown = (g_TriggerTrend.trend == DIR_DOWN);
+  DrawOneSwingPoint(TS_PREFIX, InpTriggerTF, "H0", true,  g_TriggerTrend.idxH0, g_TriggerTrend.h0, C'180,100,255', isDown, 1, 7);
+  DrawOneSwingPoint(TS_PREFIX, InpTriggerTF, "H1", true,  g_TriggerTrend.idxH1, g_TriggerTrend.h1, C'100,60,160',  false,  1, 7);
+  DrawOneSwingPoint(TS_PREFIX, InpTriggerTF, "L0", false, g_TriggerTrend.idxL0, g_TriggerTrend.l0, C'255,160,40',  isUp,   1, 7);
+  DrawOneSwingPoint(TS_PREFIX, InpTriggerTF, "L1", false, g_TriggerTrend.idxL1, g_TriggerTrend.l1, C'160,100,20',  false,  1, 7);
+}
+
+//----------------------------------------------------------------------
+// DrawMSSMarker
+//
+// Draws a single MSS event on the chart. Objects are named with the
+// MSS bar timestamp so they accumulate without overwriting each other.
+//
+// Objects per MSS:
+//   MSS_<id>_ARR  – arrow at close of break candle
+//   MSS_<id>_LBL  – text "▲MSS" or "▼MSS" next to arrow
+//   MSS_<id>_KL   – horizontal dotted line AT the broken key level
+//                   (spans from break candle to current bar[0])
+//
+// mssId     : unique string identifier (e.g. "M_1234567890" for MiddleTF)
+// tf        : timeframe of the MSS candle
+// mssTime   : open time of the break candle (bar[1] when MSS was detected)
+// mssLevel  : key level price that was broken
+// mssBreak  : DIR_UP = broke above (bear→bull) / DIR_DOWN = broke below (bull→bear)
+//----------------------------------------------------------------------
+void DrawMSSMarker(
+  string mssId, ENUM_TIMEFRAMES tf,
+  datetime mssTime, double mssLevel, MarketDir mssBreak)
+{
+  if (!InpDebugDraw || mssTime == 0) return;
+
+  string arrN = MSS_PREFIX + mssId + "_ARR";
+  string lblN = MSS_PREFIX + mssId + "_LBL";
+  string klN  = MSS_PREFIX + mssId + "_KL";
+
+  bool   isBull = (mssBreak == DIR_UP);    // broke UP → bull MSS
+  color  clr    = isBull ? clrLime : clrTomato;
+
+  int    shift     = iBarShift(_Symbol, tf, mssTime);
+  double closeAtMss = iClose(_Symbol, tf, shift);
+
+  // ── Arrow at close price of MSS candle ─────────────────────────────
+  if (ObjectFind(0, arrN) < 0)
+    ObjectCreate(0, arrN, OBJ_ARROW, 0, mssTime, closeAtMss);
+  ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isBull ? 233 : 234); // 233=up 234=down
+  ObjectSetInteger(0, arrN, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, arrN, OBJPROP_WIDTH,     2);
+  ObjectSetInteger(0, arrN, OBJPROP_ANCHOR,    isBull ? ANCHOR_TOP : ANCHOR_BOTTOM);
+  ObjectMove(0, arrN, 0, mssTime, closeAtMss);
+
+  // ── Text label ─────────────────────────────────────────────────────
+  double rng  = iHigh(_Symbol, tf, shift) - iLow(_Symbol, tf, shift);
+  double lblY = isBull ? closeAtMss - rng * 0.4 : closeAtMss + rng * 0.4;
+  if (ObjectFind(0, lblN) < 0)
+    ObjectCreate(0, lblN, OBJ_TEXT, 0, mssTime, lblY);
+  ObjectMove(0, lblN, 0, mssTime, lblY);
+  ObjectSetString (0, lblN, OBJPROP_TEXT,    isBull ? "▲MSS" : "▼MSS");
+  ObjectSetInteger(0, lblN, OBJPROP_COLOR,   clr);
+  ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,  isBull ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+
+  // ── Dotted horizontal line at broken key level ─────────────────────
+  // Shows WHERE the structure broke – extends to current bar
+  datetime tEnd = iTime(_Symbol, tf, 0);
+  if (ObjectFind(0, klN) < 0)
+    ObjectCreate(0, klN, OBJ_TREND, 0, mssTime, mssLevel, tEnd, mssLevel);
+  ObjectSetInteger(0, klN, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, klN, OBJPROP_STYLE,     STYLE_DOT);
+  ObjectSetInteger(0, klN, OBJPROP_WIDTH,     1);
+  ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
+  ObjectMove(0, klN, 0, mssTime, mssLevel);
+  ObjectMove(0, klN, 1, tEnd,    mssLevel);
+}
+
+//----------------------------------------------------------------------
+// DrawMSSMarkers
+//
+// Calls DrawMSSMarker for the last recorded MSS on each TF.
+// Objects are keyed by timestamp so earlier MSS events persist.
+// The key-level line for the most recent MSS updates its right edge
+// to bar[0] on every tick (keeping it "live" until the next MSS).
+//----------------------------------------------------------------------
+void DrawMSSMarkers()
 {
   if (!InpDebugDraw) return;
 
-  if (!g_FVG.active) // Không có FVG active → xóa objects cũ nếu còn
+  // MiddleTF MSS – prefix "M_<timestamp>"
+  if (g_MiddleTrend.lastMssTime > 0)
   {
-    ObjectDelete(0, FVG_RECT_NAME);
-    ObjectDelete(0, FVG_MID_NAME);
-    ObjectDelete(0, FVG_LABEL_NAME);
-    return;
+    string mid = "M_" + IntegerToString((int)g_MiddleTrend.lastMssTime);
+    DrawMSSMarker(mid, InpMiddleTF,
+      g_MiddleTrend.lastMssTime,
+      g_MiddleTrend.lastMssLevel,
+      g_MiddleTrend.lastMssBreak);
   }
 
-  // ── Xác định cạnh phải (điểm kết thúc) của rectangle ───────────
-  datetime rectEnd;
-  if (!g_FVG.touched)
-    rectEnd = iTime(_Symbol, InpMiddleTF, 0); // Chưa touched → live: kéo tới bar hiện tại mỗi tick
-  else
+  // TriggerTF MSS – prefix "T_<timestamp>"
+  if (g_TriggerTrend.lastMssTime > 0)
   {
-    int touchShift = iBarShift(_Symbol, InpMiddleTF, g_FVG.touchTime);  // Bar MiddleTF tại thời điểm touch
-    rectEnd = iTime(_Symbol, InpMiddleTF, MathMax(touchShift - 1, 0));  // Bar tiếp theo sau touch (cố định)
+    string tid = "T_" + IntegerToString((int)g_TriggerTrend.lastMssTime);
+    DrawMSSMarker(tid, InpTriggerTF,
+      g_TriggerTrend.lastMssTime,
+      g_TriggerTrend.lastMssLevel,
+      g_TriggerTrend.lastMssBreak);
   }
-
-  color rectColor = !g_FVG.touched
-    ? (g_FVG.direction == DIR_UP ? C'0,80,160'  : C'140,40,0')  // Màu đậm: FVG candidate chưa touched
-    : (g_FVG.direction == DIR_UP ? C'0,160,255' : C'255,100,0'); // Màu sáng: FVG đã được touched
-
-  // ── Rectangle ───────────────────────────────────────────────────
-  if (ObjectFind(0, FVG_RECT_NAME) < 0)
-    ObjectCreate(0, FVG_RECT_NAME, OBJ_RECTANGLE, 0,
-      g_FVG.createdTime, g_FVG.high, rectEnd, g_FVG.low);
-
-  ObjectSetInteger(0, FVG_RECT_NAME, OBJPROP_COLOR, rectColor);
-  ObjectSetInteger(0, FVG_RECT_NAME, OBJPROP_FILL,  true);  // Fill màu bên trong
-  ObjectSetInteger(0, FVG_RECT_NAME, OBJPROP_BACK,  true);  // Vẽ dưới nến (không che chart)
-  ObjectSetInteger(0, FVG_RECT_NAME, OBJPROP_WIDTH, 1);
-  ObjectMove(0, FVG_RECT_NAME, 0, g_FVG.createdTime, g_FVG.high); // Point 0 = góc trên trái (cố định)
-  ObjectMove(0, FVG_RECT_NAME, 1, rectEnd,            g_FVG.low);  // Point 1 = góc dưới phải (cập nhật)
-
-  // ── Midpoint line (đứt nét) ─────────────────────────────────────
-  if (ObjectFind(0, FVG_MID_NAME) < 0)
-    ObjectCreate(0, FVG_MID_NAME, OBJ_TREND, 0,
-      g_FVG.createdTime, g_FVG.mid, rectEnd, g_FVG.mid);
-
-  ObjectSetInteger(0, FVG_MID_NAME, OBJPROP_COLOR,     clrSilver);
-  ObjectSetInteger(0, FVG_MID_NAME, OBJPROP_STYLE,     STYLE_DOT); // Đường chấm chấm
-  ObjectSetInteger(0, FVG_MID_NAME, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, FVG_MID_NAME, OBJPROP_RAY_RIGHT, false); // Không kéo vô tận
-  ObjectMove(0, FVG_MID_NAME, 0, g_FVG.createdTime, g_FVG.mid);
-  ObjectMove(0, FVG_MID_NAME, 1, rectEnd,            g_FVG.mid);
-
-  // ── Text label ──────────────────────────────────────────────────
-  string labelText = StringFormat("FVG %s%s",
-    (g_FVG.direction == DIR_UP ? "▲" : "▼"),
-    (g_FVG.touched ? " [TOUCHED]" : "")); // Hiển thị trạng thái touched
-
-  if (ObjectFind(0, FVG_LABEL_NAME) < 0)
-    ObjectCreate(0, FVG_LABEL_NAME, OBJ_TEXT, 0, g_FVG.createdTime, g_FVG.high);
-
-  ObjectMove(0, FVG_LABEL_NAME, 0, g_FVG.createdTime, g_FVG.high);
-  ObjectSetString (0, FVG_LABEL_NAME, OBJPROP_TEXT,    labelText);
-  ObjectSetInteger(0, FVG_LABEL_NAME, OBJPROP_COLOR,   rectColor);
-  ObjectSetInteger(0, FVG_LABEL_NAME, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, FVG_LABEL_NAME, OBJPROP_ANCHOR,  ANCHOR_LEFT_LOWER); // Text nằm ngay dưới cạnh trên
 }
 
-//====================================================
-// DEBUG PANEL (góc trên bên TRÁI)
+//----------------------------------------------------------------------
+// DrawFVGPool
 //
-// Hiển thị toàn bộ context quan trọng để debug trực tiếp trên chart:
-//   Bias D1 | MiddleTF Trend + Key Level | Swing H/L values
-//   Daily Risk | Balance | EA State | FVG info | Block Reason
+// Right-edge rules:
+//   PENDING              → live MiddleTF bar[0]
+//   TOUCHED / USED + touchTime > 0 → pin to exact TriggerTF (M5) candle
+//   USED case1 (touchTime = 0)     → pin to MiddleTF broken candle
 //
-// Tất cả objects đều có prefix "DBG_" → xóa 1 lần trong OnDeinit
-// CORNER_LEFT_UPPER + XDISTANCE=10 + YDISTANCE tăng dần = stack từ trên xuống
-//====================================================
+// Colors:
+//   PENDING  bull=C'0,50,110'  bear=C'90,25,0'
+//   TOUCHED  bull=C'0,120,220' bear=C'220,75,0'
+//   USED c2  C'0,100,0'  green
+//   USED c1  C'70,0,0'   red
+//   USED c0  C'50,50,50' grey
+//----------------------------------------------------------------------
+void DrawOneFVGRecord(int idx)
+{
+  if (!InpDebugDraw || idx < 0 || idx >= g_FVGCount) return;
 
+  string sid   = IntegerToString(g_FVGPool[idx].id);
+  string rectN = FVGP_PREFIX + "RECT_" + sid;
+  string midN  = FVGP_PREFIX + "MID_"  + sid;
+  string lblN  = FVGP_PREFIX + "LBL_"  + sid;
+
+  // ── Right edge ────────────────────────────────────────────────────
+  datetime rectEnd;
+  if (g_FVGPool[idx].status == FVG_PENDING)
+    rectEnd = iTime(_Symbol, InpMiddleTF, 0);
+  else if (g_FVGPool[idx].touchTime > 0)
+  {
+    int shift = iBarShift(_Symbol, InpTriggerTF, g_FVGPool[idx].touchTime);
+    rectEnd   = iTime(_Symbol, InpTriggerTF, shift);
+  }
+  else
+  {
+    int shift = iBarShift(_Symbol, InpMiddleTF, g_FVGPool[idx].usedTime);
+    rectEnd   = iTime(_Symbol, InpMiddleTF, shift);
+  }
+  if (rectEnd <= g_FVGPool[idx].createdTime) rectEnd = iTime(_Symbol, InpMiddleTF, 0);
+
+  // ── Fill color ────────────────────────────────────────────────────
+  color fillColor;
+  if      (g_FVGPool[idx].status == FVG_PENDING) fillColor = (g_FVGPool[idx].direction == DIR_UP) ? C'0,50,110'  : C'90,25,0';
+  else if (g_FVGPool[idx].status == FVG_TOUCHED) fillColor = (g_FVGPool[idx].direction == DIR_UP) ? C'0,120,220' : C'220,75,0';
+  else if (g_FVGPool[idx].usedCase == 2)          fillColor = C'0,100,0';
+  else if (g_FVGPool[idx].usedCase == 1)          fillColor = C'70,0,0';
+  else                                             fillColor = C'50,50,50';
+
+  // ── Rectangle ─────────────────────────────────────────────────────
+  if (ObjectFind(0, rectN) < 0)
+    ObjectCreate(0, rectN, OBJ_RECTANGLE, 0,
+      g_FVGPool[idx].createdTime, g_FVGPool[idx].high, rectEnd, g_FVGPool[idx].low);
+  ObjectSetInteger(0, rectN, OBJPROP_COLOR, fillColor);
+  ObjectSetInteger(0, rectN, OBJPROP_FILL,  true);
+  ObjectSetInteger(0, rectN, OBJPROP_BACK,  true);
+  ObjectSetInteger(0, rectN, OBJPROP_WIDTH, 1);
+  ObjectMove(0, rectN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
+  ObjectMove(0, rectN, 1, rectEnd,                    g_FVGPool[idx].low);
+
+  // ── Midpoint dotted line ──────────────────────────────────────────
+  color midColor = (g_FVGPool[idx].status == FVG_USED) ? C'60,60,60' : clrSilver;
+  if (ObjectFind(0, midN) < 0)
+    ObjectCreate(0, midN, OBJ_TREND, 0,
+      g_FVGPool[idx].createdTime, g_FVGPool[idx].mid, rectEnd, g_FVGPool[idx].mid);
+  ObjectSetInteger(0, midN, OBJPROP_COLOR,     midColor);
+  ObjectSetInteger(0, midN, OBJPROP_STYLE,     STYLE_DOT);
+  ObjectSetInteger(0, midN, OBJPROP_WIDTH,     1);
+  ObjectSetInteger(0, midN, OBJPROP_RAY_RIGHT, false);
+  ObjectMove(0, midN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].mid);
+  ObjectMove(0, midN, 1, rectEnd,                    g_FVGPool[idx].mid);
+
+  // ── Label ─────────────────────────────────────────────────────────
+  string sym   = (g_FVGPool[idx].direction == DIR_UP) ? "▲" : "▼";
+  string stTxt = "";
+  if      (g_FVGPool[idx].status == FVG_TOUCHED)  stTxt = " [TOUCHED]";
+  else if (g_FVGPool[idx].usedCase == 2)           stTxt = " [TRIGGERED]";
+  else if (g_FVGPool[idx].usedCase == 1)           stTxt = " [BROKEN]";
+  else if (g_FVGPool[idx].status == FVG_USED)      stTxt = " [EXPIRED]";
+
+  if (ObjectFind(0, lblN) < 0)
+    ObjectCreate(0, lblN, OBJ_TEXT, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
+  ObjectMove(0, lblN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
+  ObjectSetString (0, lblN, OBJPROP_TEXT,
+    StringFormat("FVG#%d %s%s", g_FVGPool[idx].id, sym, stTxt));
+  ObjectSetInteger(0, lblN, OBJPROP_COLOR,    fillColor);
+  ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,   ANCHOR_LEFT_LOWER);
+}
+
+void DrawFVGPool()
+{
+  if (!InpDebugDraw) return;
+  for (int i = 0; i < g_FVGCount; i++) DrawOneFVGRecord(i);
+}
+
+//----------------------------------------------------------------------
+// DrawContextDebug – top-left info panel
+//----------------------------------------------------------------------
 void DrawContextDebug()
 {
   if (!InpDebugDraw) return;
 
-  // Macro tạo hoặc cập nhật 1 OBJ_LABEL tại góc trên trái
-  // Tham số: tên object, text hiển thị, khoảng cách từ trên xuống (px), màu
-  #define SET_LABEL(name, text, ypos, clr)                            \
-    if (ObjectFind(0, name) < 0)                                      \
-      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);                     \
-    ObjectSetInteger(0, name, OBJPROP_CORNER,    CORNER_LEFT_UPPER);  \
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);                 \
-    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, ypos);               \
-    ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  9);                  \
-    ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);                \
-    ObjectSetString (0, name, OBJPROP_TEXT,      text);
+  #define LBL(name,txt,y,clr)                                           \
+    if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);     \
+    ObjectSetInteger(0,name,OBJPROP_CORNER,    CORNER_LEFT_UPPER);      \
+    ObjectSetInteger(0,name,OBJPROP_XDISTANCE, 10);                     \
+    ObjectSetInteger(0,name,OBJPROP_YDISTANCE, y);                      \
+    ObjectSetInteger(0,name,OBJPROP_FONTSIZE,  9);                      \
+    ObjectSetInteger(0,name,OBJPROP_COLOR,     clr);                    \
+    ObjectSetString (0,name,OBJPROP_TEXT,      txt);
 
-  SET_LABEL("DBG_HEADER", "── ICT EA Debug ──", 10, clrSilver)
+  LBL("DBG_HDR",  "── ICT EA ──", 10, clrSilver)
 
-  // ── BIAS D1 ──────────────────────────────── y=30
-  // Màu phản ánh hướng: xanh = up, đỏ = down, cam = sideway, xám = none
-  color biasColor = (g_Bias.bias == BIAS_UP)     ? clrLime   :
-                    (g_Bias.bias == BIAS_DOWN)    ? clrTomato :
-                    (g_Bias.bias == BIAS_SIDEWAY) ? clrOrange : clrGray;
-  SET_LABEL("DBG_BIAS", StringFormat("Bias  : %s", EnumToString(g_Bias.bias)), 42, biasColor)
+  // Bias
+  color cB = (g_Bias.bias==BIAS_UP)?clrLime:(g_Bias.bias==BIAS_DOWN)?clrTomato:(g_Bias.bias==BIAS_SIDEWAY)?clrOrange:clrGray;
+  LBL("DBG_BIAS", StringFormat("Bias : %s", EnumToString(g_Bias.bias)), 34, cB)
 
-  // ── MIDDLE TF TREND + KEY LEVEL ─────────── y=48
-  // KL = Key Level cần theo dõi để phát hiện MSS
-  color trendColor = (g_MiddleTrend.trend == DIR_UP)   ? clrLime   :
-                     (g_MiddleTrend.trend == DIR_DOWN)  ? clrTomato : clrGray;
-  SET_LABEL("DBG_TREND",
-    StringFormat("Trend : %s | KL=%.5f",
-      EnumToString(g_MiddleTrend.trend), g_MiddleTrend.keyLevel),
-    68, trendColor)
-
-  // ── SWING HIGH VALUES ───────────────────── y=66
-  // H1 (cũ) → H0 (mới): thấy rõ Higher High hay Lower High
-  SET_LABEL("DBG_SWING_H",
-    StringFormat("H1=%.5f  H0=%.5f", g_MiddleTrend.h1, g_MiddleTrend.h0),
-    94, clrAqua)
-
-  // ── SWING LOW VALUES ────────────────────── y=84
-  // L1 (cũ) → L0 (mới): thấy rõ Higher Low hay Lower Low
-  SET_LABEL("DBG_SWING_L",
-    StringFormat("L1=%.5f  L0=%.5f", g_MiddleTrend.l1, g_MiddleTrend.l0),
-    120, clrYellow)
-
-  // ── SIDEWAY RANGE (chỉ hiển thị khi bias = SIDEWAY) ─── y=102
-  if (g_Bias.bias == BIAS_SIDEWAY)
+  // H1 trend + last MSS
+  color cMT = (g_MiddleTrend.trend==DIR_UP)?clrLime:(g_MiddleTrend.trend==DIR_DOWN)?clrTomato:clrGray;
+  LBL("DBG_MT",   StringFormat("H1   : %s  KL=%.5f", EnumToString(g_MiddleTrend.trend), g_MiddleTrend.keyLevel), 58, cMT)
+  if (g_MiddleTrend.lastMssTime > 0)
   {
-    SET_LABEL("DBG_BIAS_RANGE",
-    StringFormat("  Range : %.5f – %.5f", g_Bias.rangeLow, g_Bias.rangeHigh),
-    146, clrOrange)
+    color cMSS = (g_MiddleTrend.lastMssBreak==DIR_UP) ? clrLime : clrTomato;
+    LBL("DBG_MMSS", StringFormat("H1MSS: %s @ %s", (g_MiddleTrend.lastMssBreak==DIR_UP)?"▲":"▼", TimeToString(g_MiddleTrend.lastMssTime, TIME_MINUTES)), 82, cMSS)
   }
-  else
-    ObjectDelete(0, "DBG_BIAS_RANGE"); // Ẩn khi không sideway
+  else ObjectDelete(0,"DBG_MMSS");
 
-  // ── DAILY RISK ──────────────────────────── y=102 (hoặc 120 nếu sideway hiện)
+  // M5 trend + last MSS
+  color cTT = (g_TriggerTrend.trend==DIR_UP)?clrLime:(g_TriggerTrend.trend==DIR_DOWN)?clrTomato:clrGray;
+  LBL("DBG_TT",   StringFormat("M5   : %s  KL=%.5f", EnumToString(g_TriggerTrend.trend), g_TriggerTrend.keyLevel), 106, cTT)
+  if (g_TriggerTrend.lastMssTime > 0)
+  {
+    color cMSS2 = (g_TriggerTrend.lastMssBreak==DIR_UP) ? clrLime : clrTomato;
+    LBL("DBG_TMSS", StringFormat("M5MSS: %s @ %s", (g_TriggerTrend.lastMssBreak==DIR_UP)?"▲":"▼", TimeToString(g_TriggerTrend.lastMssTime, TIME_MINUTES)), 130, cMSS2)
+  }
+  else ObjectDelete(0,"DBG_TMSS");
+
+  // Daily risk
   double lostPct = g_DailyRisk.startBalance > 0
-    ? (g_DailyRisk.startBalance - g_DailyRisk.currentBalance)
-       / g_DailyRisk.startBalance * 100.0 // % đã mất so với đầu ngày
-    : 0.0; // Chưa có startBalance (ngày đầu tiên) → hiển thị 0%
+    ? (g_DailyRisk.startBalance - g_DailyRisk.currentBalance) / g_DailyRisk.startBalance * 100.0 : 0.0;
+  color cR = g_DailyRisk.limitHit?clrRed:(lostPct>InpMaxDailyLossPct*0.7?clrOrange:clrLime);
+  LBL("DBG_RISK", StringFormat("Risk : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 154, cR)
+  LBL("DBG_BAL",  StringFormat("Bal  : %.2f (start %.2f)", g_DailyRisk.currentBalance, g_DailyRisk.startBalance), 178, clrSilver)
+  LBL("DBG_LIM",  g_DailyRisk.limitHit?"⛔ DAILY LOSS HIT":"✅ Loss OK", 202, g_DailyRisk.limitHit?clrRed:clrLime)
 
-  // Màu cảnh báo: đỏ khi hit, cam khi gần hit (>70% ngưỡng), xanh khi bình thường
-  color riskColor = g_DailyRisk.limitHit              ? clrRed    :
-                    lostPct > InpMaxDailyLossPct * 0.7 ? clrOrange : clrLime;
+  // State
+  color cS = (g_State==EA_IDLE)?clrSilver:(g_State==EA_WAIT_TOUCH)?clrOrange:(g_State==EA_WAIT_TRIGGER)?clrYellow:clrLime;
+  LBL("DBG_ST",   StringFormat("State: %s", EnumToString(g_State)), 226, cS)
 
-  SET_LABEL("DBG_RISK",  StringFormat("Risk  : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 146, riskColor)
-  SET_LABEL("DBG_BAL",   StringFormat("Bal   : %.2f  (start %.2f)", g_DailyRisk.currentBalance, g_DailyRisk.startBalance), 172, clrSilver)
-  SET_LABEL("DBG_LIMIT", g_DailyRisk.limitHit ? "⛔ DAILY LOSS HIT" : "✅ Loss OK", 198, g_DailyRisk.limitHit ? clrRed : clrLime)
-
-  // ── EA STATE ────────────────────────────── y=156
-  // Màu theo mức độ "hoạt động": xám = idle, cam = chờ, vàng = sắp vào, xanh = trong lệnh
-  color stateColor = (g_State == EA_IDLE)         ? clrSilver :
-                     (g_State == EA_WAIT_TOUCH)   ? clrOrange :
-                     (g_State == EA_WAIT_TRIGGER) ? clrYellow :
-                     (g_State == EA_IN_TRADE)     ? clrLime   : clrGray;
-  SET_LABEL("DBG_STATE", StringFormat("State : %s", EnumToString(g_State)), 224, stateColor)
-
-  // ── FVG ACTIVE INFO ─────────────────────── y=174 (chỉ khi có FVG)
-  if (g_FVG.active)
-  {
-    color fvgColor = g_FVG.touched ? clrDeepSkyBlue : clrDodgerBlue; // Sáng hơn khi touched
-    SET_LABEL("DBG_FVG",
-      StringFormat("FVG   : %s [%.5f – %.5f]",
-        EnumToString(g_FVG.direction), g_FVG.low, g_FVG.high),
-      250, fvgColor)
-  }
-  else
-    ObjectDelete(0, "DBG_FVG"); // Không có FVG → ẩn dòng này
-
-  // ── BLOCK REASON ────────────────────────── y=192 (chỉ khi bị block)
   if (g_BlockReason != BLOCK_NONE)
+    { LBL("DBG_BLK", StringFormat("Block: %s", EnumToString(g_BlockReason)), 250, clrTomato) }
+  else ObjectDelete(0,"DBG_BLK");
+
+  // FVG pool
+  int nP=0,nT=0,nU=0;
+  for(int i=0;i<g_FVGCount;i++)
   {
-    SET_LABEL("DBG_BLOCK",
-      StringFormat("Block : %s", EnumToString(g_BlockReason)),
-      276, clrTomato)
+    if      (g_FVGPool[i].status==FVG_PENDING) nP++;
+    else if (g_FVGPool[i].status==FVG_TOUCHED) nT++;
+    else                                        nU++;
   }
-  else
-    ObjectDelete(0, "DBG_BLOCK"); // Không bị block → ẩn dòng này
+  color cP = (nT>0)?clrDeepSkyBlue:(nP>0)?clrDodgerBlue:clrGray;
+  LBL("DBG_POOL", StringFormat("Pool : P=%d T=%d U=%d (%d/%d)", nP,nT,nU,g_FVGCount,MAX_FVG_POOL), 274, cP)
 
-  #undef SET_LABEL
+  if (g_ActiveFVGIdx >= 0 && g_ActiveFVGIdx < g_FVGCount)
+  {
+    int ai = g_ActiveFVGIdx;
+    color cA = (g_FVGPool[ai].status==FVG_TOUCHED)?clrDeepSkyBlue:clrDodgerBlue;
+    LBL("DBG_ACT", StringFormat("Act  : #%d %s [%.5f–%.5f] %s",
+      g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
+      g_FVGPool[ai].low, g_FVGPool[ai].high,
+      EnumToString(g_FVGPool[ai].status)), 298, cA)
+  }
+  else ObjectDelete(0,"DBG_ACT");
 
-  ChartRedraw(0); // Force redraw để panel hiển thị ngay lập tức
+  #undef LBL
+  ChartRedraw(0);
 }
 
 void DrawVisuals()
 {
-  DrawSwingPoints();   // Vẽ H0/H1/L0/L1 và key level line trên chart
-  DrawFVGRectangle();  // Vẽ FVG zone, midpoint, label
-  DrawContextDebug();  // Cập nhật debug panel góc trên trái
+  DrawMiddleSwingPoints();   // H1 H0/H1/L0/L1 + key level
+  DrawTriggerSwingPoints();  // M5 H0/H1/L0/L1 + key level
+  DrawMSSMarkers();          // MSS markers for both TFs
+  DrawFVGPool();             // FVG rectangles
+  DrawContextDebug();        // Info panel
 }
 
-//====================================================
-// EA LIFECYCLE
-//====================================================
+//+------------------------------------------------------------------+
+//|  SECTION 12 – EA LIFECYCLE                                       |
+//+------------------------------------------------------------------+
 
 int OnInit()
 {
-  // Khởi tạo tất cả context về trạng thái mặc định (tất cả số = 0, bool = false)
-  ZeroMemory(g_Bias);
-  ZeroMemory(g_MiddleTrend);
-  ZeroMemory(g_FVG);
-  ZeroMemory(g_Trigger);
-  ZeroMemory(g_DailyRisk);
+  ZeroMemory(g_Bias); ZeroMemory(g_MiddleTrend); ZeroMemory(g_TriggerTrend);
+  ZeroMemory(g_Trigger); ZeroMemory(g_DailyRisk);
+  for (int i = 0; i < MAX_FVG_POOL; i++) ZeroMemory(g_FVGPool[i]);
+  g_FVGCount = 0; g_NextFVGId = 0;
+  g_ActiveFVGIdx = -1; g_TradeBarIndex = -1;
+  g_State = EA_IDLE; g_BlockReason = BLOCK_NONE;
 
-  g_State         = EA_IDLE;   // Bắt đầu ở trạng thái chờ
-  g_BlockReason   = BLOCK_NONE;
-  g_TradeBarIndex = -1;        // -1 = chưa có lệnh nào
+  UpdateAllContexts();
+  ScanAndRegisterFVGs();
+  DrawVisuals();
 
-  UpdateAllContexts(); // Tính bias + trend ngay khi load (không đợi tick đầu tiên)
-  DrawVisuals();       // Vẽ ngay khi load (không đợi tick đầu tiên → không thấy "trống")
-
-  PrintFormat("✅ EA initialized | Bias=%s | MiddleTrend=%s | State=%s",
-    EnumToString(g_Bias.bias),
-    EnumToString(g_MiddleTrend.trend),
-    EnumToString(g_State));
-
+  PrintFormat("✅ ICT EA init | Bias=%s | H1=%s | M5=%s | FVGPool=%d",
+    EnumToString(g_Bias.bias), EnumToString(g_MiddleTrend.trend),
+    EnumToString(g_TriggerTrend.trend), g_FVGCount);
   return INIT_SUCCEEDED;
 }
 
 void OnTick()
 {
-  UpdateAllContexts(); // Cập nhật bias + trend + daily risk mỗi tick
-
-  if (EvaluateGuards())        // Tất cả điều kiện pass → chạy state machine
+  UpdateAllContexts();
+  if (EvaluateGuards())
     RunStateMachine();
-  else if (g_State != EA_IDLE) // Đang ở state khác IDLE mà bị block → reset về IDLE
-    ResetToIdle(EnumToString(g_BlockReason)); // Chỉ reset 1 lần (lần tiếp theo g_State = IDLE → không reset lại)
-
-  if (InpDebugDraw)
-    DrawVisuals(); // Cập nhật visuals mỗi tick (FVG rect cạnh phải live, debug panel)
+  else if (g_State != EA_IDLE)
+    ResetToIdle(EnumToString(g_BlockReason));
+  if (InpDebugDraw) DrawVisuals();
 }
 
 void OnDeinit(const int reason)
 {
-  // Xóa tất cả objects đã tạo khi EA bị gỡ khỏi chart
-  ObjectDelete(0, FVG_RECT_NAME);
-  ObjectDelete(0, FVG_MID_NAME);
-  ObjectDelete(0, FVG_LABEL_NAME);
-  ObjectsDeleteAll(0, SW_PREFIX);  // Xóa toàn bộ SW_ARR_*, SW_TXT_*, SW_KL_*
-  ObjectsDeleteAll(0, "DBG_");     // Xóa toàn bộ debug panel labels
+  // FVGP_* and MSS_* intentionally kept on chart for post-session review
+  ObjectsDeleteAll(0, SW_PREFIX);
+  ObjectsDeleteAll(0, TS_PREFIX);
+  ObjectsDeleteAll(0, DBG_PREFIX);
   ChartRedraw(0);
-  PrintFormat("EA deinitialized | reason=%d", reason);
+  PrintFormat("ICT EA deinit | reason=%d | pool had %d FVGs", reason, g_FVGCount);
 }
