@@ -1,32 +1,23 @@
 //+------------------------------------------------------------------+
-//| ICT EA – FVG Edition  (MQL5)  v3.0                               |
+//| ICT EA – FVG Edition  (MQL5)  v4.0                               |
 //| Architecture : BiasTF(D1) + MiddleTF(H1) + TriggerTF(M5)       |
 //| State Machine: IDLE → WAIT_TOUCH → WAIT_TRIGGER → IN_TRADE      |
 //|                                                                  |
-//| FVG lifecycle:                                                   |
-//|   PENDING  → hình thành, chưa touch                             |
-//|   TOUCHED  → giá chạm vào gap (bid inside)                      |
-//|   USED     → case0=expired / case1=broken / case2=triggered      |
-//|                                                                  |
-//| MSS (Market Structure Shift) – v3 definition:                    |
-//|   MSS hợp lệ = Liquidity Sweep + Structure Break                |
-//|                                                                  |
-//|   Bullish MSS (MiddleTF UP):                                    |
-//|     1. Sweep: wick < L0, close > L0 (quét sell-side liq)        |
-//|     2. Break: close > H0 (phá vỡ swing high → đảo chiều lên)   |
-//|                                                                  |
-//|   Bearish MSS (MiddleTF DOWN):                                  |
-//|     1. Sweep: wick > H0, close < H0 (quét buy-side liq)        |
-//|     2. Break: close < L0 (phá vỡ swing low → đảo chiều xuống)  |
-//|                                                                  |
-//|   Không có sweep → MSS không hợp lệ, bỏ qua                   |
-//|                                                                  |
-//| TriggerTF MSS chỉ nhận thuận chiều MiddleTF trend              |
+//| Flow tổng thể:                                                   |
+//|   1. D1 bias (UP/DOWN) đồng thuận H1 trend                     |
+//|   2. H1 FVG thuận xu hướng → chờ price retrace vào FVG          |
+//|   3. Giá touch H1 FVG → chờ M5 MSS xác nhận đảo chiều          |
+//|   4. M5 MSS = keyLevel sóng hồi bị phá:                         |
+//|      - H1 UP: M5 đang downtrend (hồi), tH0 bị phá (close>tH0) |
+//|      - H1 DOWN: M5 đang uptrend (hồi), tL0 bị phá (close<tL0) |
+//|   5. Entry = limit tại keyLevel vừa bị phá (tH0 hoặc tL0)      |
+//|   6. SL = swing extreme sóng hồi (tL0 cho buy, tH0 cho sell)   |
+//|   7. TP = Entry ± 2R                                            |
 //|                                                                  |
 //| Drawing: objects KHÔNG BAO GIỜ bị xóa, chỉ update              |
 //+------------------------------------------------------------------+
 #property copyright "Bell's ICT EA"
-#property version   "3.00"
+#property version   "4.00"
 
 #define MAX_FVG_POOL 30
 
@@ -46,7 +37,7 @@ input int    InpLondonEndHour            = 17;         // London close (UTC)
 input int    InpNYStartHour              = 13;         // NY open (UTC)
 input int    InpNYEndHour                = 22;         // NY close (UTC)
 
-input int    InpSwingRange               = 2;          // Bars each side for swing confirm
+input int    InpSwingRange               = 3;          // Bars each side for swing confirm
 input int    InpSwingLookback            = 50;         // MiddleTF swing scan bars
 input int    InpTriggerSwingLookback     = 30;         // TriggerTF swing scan bars
 
@@ -66,10 +57,10 @@ input bool   InpDebugDraw                = true;       // Chart drawing
 //====================================================
 enum EAState
 {
-  EA_IDLE,          // Looking for best FVG
-  EA_WAIT_TOUCH,    // Active FVG = PENDING, waiting price entry
-  EA_WAIT_TRIGGER,  // Active FVG = TOUCHED, waiting TriggerTF MSS
-  EA_IN_TRADE       // Position open
+  EA_IDLE,          // Tìm FVG tốt nhất
+  EA_WAIT_TOUCH,    // Chờ giá retrace vào MiddleTF FVG
+  EA_WAIT_TRIGGER,  // Chờ TriggerTF MSS xác nhận
+  EA_IN_TRADE       // Đang có lệnh / position
 };
 
 enum HTFBias    { BIAS_NONE=0, BIAS_UP=1, BIAS_DOWN=-1, BIAS_SIDEWAY=2 };
@@ -81,9 +72,9 @@ enum BlockReason
 };
 enum FVGStatus
 {
-  FVG_PENDING,  // Formed, not yet touched
-  FVG_TOUCHED,  // Price entered gap zone
-  FVG_USED      // Consumed: 0=expired 1=broken 2=triggered
+  FVG_PENDING,   // Hình thành, chưa touch
+  FVG_TOUCHED,   // Giá đã vào vùng gap
+  FVG_USED       // 0=expired 1=broken 2=triggered
 };
 
 //====================================================
@@ -91,17 +82,22 @@ enum FVGStatus
 //====================================================
 struct BiasContext
 {
-  HTFBias  bias;
-  double   rangeHigh, rangeLow;
-  datetime lastBarTime;
+  HTFBias  bias;                         // Hướng bias: UP/DOWN/SIDEWAY/NONE
+  double   rangeHigh, rangeLow;          // Biên range khi SIDEWAY (dùng b2 H/L)
+  datetime lastBarTime;                  // Guard: chỉ recalc khi D1 bar mới mở
 };
 
 //----------------------------------------------------------------------
-// TFTrendContext – Swing structure + MSS + associated sweep
+// TFTrendContext – Swing structure + MSS
 //
-// v3: MSS hợp lệ yêu cầu có Liquidity Sweep trước đó.
-//     Khi MSS được ghi nhận, sweep info cũng được lưu kèm
-//     để vẽ cả 2 thành 1 pattern hoàn chỉnh.
+// v4 MSS (đơn giản):
+//   MSS = keyLevel sóng hồi trên TriggerTF bị phá vỡ
+//   - H1 UP → M5 đang DOWN (hồi) → tH0 bị phá (close > tH0) = bull MSS
+//   - H1 DOWN → M5 đang UP (hồi) → tL0 bị phá (close < tL0) = bear MSS
+//
+//   Entry = giá keyLevel vừa bị phá (đặt limit chờ giá hồi)
+//   SL    = swing extreme sóng hồi (tL0 cho buy, tH0 cho sell)
+//   Cả 2 được capture TRƯỚC khi re-scan swing.
 //----------------------------------------------------------------------
 struct TFTrendContext
 {
@@ -113,112 +109,67 @@ struct TFTrendContext
   datetime  lastBarTime;                 // Guard: chỉ recalc trên bar mới
 
   // ── MSS tracking ───────────────────────────────────────────────
-  datetime  lastMssTime;                 // Open time cây nến break structure
-  double    lastMssLevel;                // Key level bị phá (giá break qua)
+  datetime  lastMssTime;                 // Open time cây nến phá keyLevel
+  double    lastMssLevel;                // KeyLevel bị phá (= giá entry)
   MarketDir lastMssBreak;                // DIR_UP = bull MSS, DIR_DOWN = bear MSS
-
-  // ── v3: Sweep đi kèm MSS (chỉ có giá trị khi lastMssTime > 0) ─
-  datetime  mssSweepTime;                // Thời gian cây nến sweep
-  double    mssSweepLevel;               // Swing level bị quét (L0 hoặc H0)
-  double    mssSweepWick;                // Wick extreme (low cho bull, high cho bear)
+  double    mssSLSwing;                  // v4: swing SL tại thời điểm MSS
+                                         //     (L0 cho bull, H0 cho bear)
 };
 
 struct FVGRecord
 {
-  int       id;
-  FVGStatus status;
-  int       usedCase;                    // 0=expired 1=broken 2=triggered
-  MarketDir direction;
-  double    high, low, mid;
-  datetime  createdTime;
-  datetime  touchTime;
-  datetime  usedTime;
-  MarketDir triggerTrendAtTouch;         // M5 trend tại thời điểm touch
-};
-
-struct TriggerFVGRecord
-{
-  bool      valid;
-  MarketDir direction;
-  double    high, low, mid;
-  datetime  createdTime;
-};
-
-struct TriggerContext
-{
-  bool      valid;
-  MarketDir direction;
-  double    swingHigh, swingLow;
-  int       idxHigh, idxLow;
-  double    breakLevel;
+  int       id;                          // Unique FVG ID, auto-increment
+  FVGStatus status;                      // PENDING → TOUCHED → USED lifecycle
+  int       usedCase;                    // 0=expired 1=broken(H1 close phá) 2=triggered(MSS)
+  MarketDir direction;                   // DIR_UP=bullish gap, DIR_DOWN=bearish gap
+  double    high, low, mid;              // Biên trên, biên dưới, midpoint của gap
+  datetime  createdTime;                 // Thời gian cây nến bên phải gap (i-1)
+  datetime  touchTime;                   // Thời gian bid đầu tiên vào vùng gap
+  datetime  usedTime;                    // Thời gian FVG bị consumed (broken/expired/triggered)
+  MarketDir triggerTrendAtTouch;         // M5 trend tại thời điểm touch (dùng cho case2 check)
 };
 
 struct OrderPlan
 {
-  bool   valid;
-  int    direction;                      // +1 buy, -1 sell
-  double entry, stopLoss, takeProfit, lot;
-  int    parentFVGId;
+  bool   valid;                          // true khi đã build thành công, sẵn sàng gửi
+  int    direction;                      // +1 = BUY LIMIT, -1 = SELL LIMIT
+  double entry, stopLoss, takeProfit, lot; // Giá entry, SL, TP, lot size
+  int    parentFVGId;                    // ID FVG gốc → ghi vào comment lệnh
 };
 
 struct DailyRiskContext
 {
-  double   startBalance, currentBalance;
-  datetime dayStartTime;
-  bool     limitHit;
-};
-
-//----------------------------------------------------------------------
-// v3: Liquidity Sweep event (internal tracking, KHÔNG vẽ riêng)
-//
-// Sweep = wick quét qua swing rồi close lại phía trong:
-//   Bullish: low < L0 && close > L0  → quét sell-side liquidity
-//   Bearish: high > H0 && close < H0 → quét buy-side liquidity
-//
-// Sweep chỉ dùng làm prerequisite cho valid MSS.
-// Khi MSS xảy ra, sweep info được copy vào TFTrendContext.
-//----------------------------------------------------------------------
-struct LiqSweepEvent
-{
-  bool      valid;
-  MarketDir direction;                   // DIR_UP = bull sweep, DIR_DOWN = bear
-  double    sweptLevel;                  // Swing level bị quét
-  double    extremeWick;                 // Wick thực tế (low cho bull, high cho bear)
-  datetime  time;                        // Open time cây nến sweep
+  double   startBalance, currentBalance; // Balance đầu ngày vs hiện tại
+  datetime dayStartTime;                 // Open time D1 bar hiện tại
+  bool     limitHit;                     // true → dừng trade hết ngày
 };
 
 //====================================================
 // GLOBALS
 //====================================================
-EAState          g_State       = EA_IDLE;
-BlockReason      g_BlockReason = BLOCK_NONE;
+EAState          g_State       = EA_IDLE;  // State machine hiện tại
+BlockReason      g_BlockReason = BLOCK_NONE; // Lý do bị block (nếu có)
 
-BiasContext      g_Bias;
-TFTrendContext   g_MiddleTrend;
-TFTrendContext   g_TriggerTrend;
-TriggerContext   g_Trigger;
-DailyRiskContext g_DailyRisk;
+BiasContext      g_Bias;                   // D1 bias context
+TFTrendContext   g_MiddleTrend;            // H1 trend + swing + MSS
+TFTrendContext   g_TriggerTrend;           // M5 trend + swing + MSS (entry trigger)
+DailyRiskContext g_DailyRisk;              // Daily drawdown tracking
 
-FVGRecord  g_FVGPool[MAX_FVG_POOL];
-int        g_FVGCount      = 0;
-int        g_NextFVGId     = 0;
-int        g_ActiveFVGIdx  = -1;
-int        g_TradeBarIndex = -1;
+FVGRecord  g_FVGPool[MAX_FVG_POOL];       // Pool chứa tối đa 30 FVG records
+int        g_FVGCount      = 0;           // Số FVG hiện có trong pool
+int        g_NextFVGId     = 0;           // ID tiếp theo cho FVG mới
+int        g_ActiveFVGIdx  = -1;          // Index FVG đang theo dõi (-1 = không có)
+int        g_TradeBarIndex = -1;          // Bar index lúc đặt lệnh (dùng cho timeout)
 
-TriggerFVGRecord g_TrigFVG;
-OrderPlan        g_OrderPlan;
-ulong            g_PendingTicket = 0;
+OrderPlan        g_OrderPlan;              // Kế hoạch lệnh hiện tại
+ulong            g_PendingTicket = 0;      // Ticket pending order (0 = không có)
 
-// v3: Sweep tracking (internal, prerequisite cho MSS)
-LiqSweepEvent g_LastLiqSweep;
-
-// Chart object name prefixes
+// Chart object prefixes
 const string SW_PREFIX   = "SW_";        // MiddleTF swing arrows/labels
 const string TS_PREFIX   = "TS_";        // TriggerTF swing arrows/labels
-const string MSS_PREFIX  = "MSS_";       // MSS markers (cả sweep + break)
+const string MSS_PREFIX  = "MSS_";       // MSS markers
 const string FVGP_PREFIX = "FVGP_";      // MiddleTF FVG rectangles
-const string TFVG_PREFIX = "TFVG_";      // TriggerTF FVG rectangles
-const string ORD_PREFIX  = "ORD_";       // v3: Order visualization
+const string ORD_PREFIX  = "ORD_";       // Order visualization (TradingView-style)
 const string DBG_PREFIX  = "DBG_";       // Debug panel labels
 
 //+------------------------------------------------------------------+
@@ -226,17 +177,17 @@ const string DBG_PREFIX  = "DBG_";       // Debug panel labels
 //+------------------------------------------------------------------+
 int MyBarShift(string symbol, ENUM_TIMEFRAMES tf, datetime time, bool exact = false)
 {
-  datetime arr[];
-  int maxCopy = MathMin(Bars(symbol, tf), 5000);       // Giới hạn 5000 bars tránh quá tải
-  int copied = CopyTime(symbol, tf, 0, maxCopy, arr);
-  if (copied <= 0) return -1;
+  datetime arr[];                                      // Mảng chứa open time tất cả bars
+  int maxCopy = MathMin(Bars(symbol, tf), 5000);       // Giới hạn 5000 bars tránh quá tải bộ nhớ
+  int copied = CopyTime(symbol, tf, 0, maxCopy, arr);  // Copy toàn bộ bar times vào arr[]
+  if (copied <= 0) return -1;                          // Không có data → trả -1
 
-  for (int i = copied - 1; i >= 0; i--)               // Duyệt từ mới → cũ
+  for (int i = copied - 1; i >= 0; i--)               // Duyệt từ mới nhất → cũ nhất
   {
-    if (arr[i] <= time)
-      return copied - 1 - i;                           // Chuyển array index → bar shift
+    if (arr[i] <= time)                                // Tìm bar đầu tiên có time <= target
+      return copied - 1 - i;                           // Convert array index → bar shift (0=newest)
   }
-  return exact ? -1 : copied - 1;
+  return exact ? -1 : copied - 1;                     // exact=true: ko tìm thấy→-1, false→bar cũ nhất
 }
 
 //+------------------------------------------------------------------+
@@ -245,18 +196,18 @@ int MyBarShift(string symbol, ENUM_TIMEFRAMES tf, datetime time, bool exact = fa
 
 bool IsSwingHighAt(ENUM_TIMEFRAMES tf, int i)
 {
-  double p = iHigh(_Symbol, tf, i);
-  for (int k = 1; k <= InpSwingRange; k++)
-    if (iHigh(_Symbol, tf, i-k) >= p || iHigh(_Symbol, tf, i+k) >= p) return false;
-  return true;
+  double p = iHigh(_Symbol, tf, i);                    // Giá high tại bar i (ứng viên swing)
+  for (int k = 1; k <= InpSwingRange; k++)             // Kiểm tra InpSwingRange bars 2 bên
+    if (iHigh(_Symbol, tf, i-k) >= p || iHigh(_Symbol, tf, i+k) >= p) return false; // Có bar cao hơn → không phải swing
+  return true;                                         // Bar i là đỉnh cao nhất trong vùng
 }
 
 bool IsSwingLowAt(ENUM_TIMEFRAMES tf, int i)
 {
-  double p = iLow(_Symbol, tf, i);
-  for (int k = 1; k <= InpSwingRange; k++)
-    if (iLow(_Symbol, tf, i-k) <= p || iLow(_Symbol, tf, i+k) <= p) return false;
-  return true;
+  double p = iLow(_Symbol, tf, i);                     // Giá low tại bar i (ứng viên swing)
+  for (int k = 1; k <= InpSwingRange; k++)             // Kiểm tra InpSwingRange bars 2 bên
+    if (iLow(_Symbol, tf, i-k) <= p || iLow(_Symbol, tf, i+k) <= p) return false; // Có bar thấp hơn → không phải swing
+  return true;                                         // Bar i là đáy thấp nhất trong vùng
 }
 
 bool ScanSwingStructure(
@@ -264,22 +215,22 @@ bool ScanSwingStructure(
   double &h0, double &h1, int &idxH0, int &idxH1,
   double &l0, double &l1, int &idxL0, int &idxL1)
 {
-  int maxBar = MathMin(lookback, Bars(_Symbol, tf) - InpSwingRange - 2);
-  double highs[2]; int hiIdx[2]; int hc = 0;
-  double lows [2]; int loIdx[2]; int lc = 0;
+  int maxBar = MathMin(lookback, Bars(_Symbol, tf) - InpSwingRange - 2); // Giới hạn scan range
+  double highs[2]; int hiIdx[2]; int hc = 0;          // 2 swing highs gần nhất (h0=mới, h1=cũ)
+  double lows [2]; int loIdx[2]; int lc = 0;          // 2 swing lows  gần nhất (l0=mới, l1=cũ)
 
-  for (int i = InpSwingRange + 1; i <= maxBar; i++)
+  for (int i = InpSwingRange + 1; i <= maxBar; i++)   // Bắt đầu từ bar đủ xa để có range 2 bên
   {
-    if (hc < 2 && IsSwingHighAt(tf, i)) { highs[hc] = iHigh(_Symbol, tf, i); hiIdx[hc] = i; hc++; }
-    if (lc < 2 && IsSwingLowAt (tf, i)) { lows [lc] = iLow (_Symbol, tf, i); loIdx[lc] = i; lc++; }
-    if (hc == 2 && lc == 2) break;
+    if (hc < 2 && IsSwingHighAt(tf, i)) { highs[hc] = iHigh(_Symbol, tf, i); hiIdx[hc] = i; hc++; } // Thu thập swing high
+    if (lc < 2 && IsSwingLowAt (tf, i)) { lows [lc] = iLow (_Symbol, tf, i); loIdx[lc] = i; lc++; } // Thu thập swing low
+    if (hc == 2 && lc == 2) break;                    // Đủ 2 cặp → dừng scan
   }
-  if (hc < 2 || lc < 2) return false;
+  if (hc < 2 || lc < 2) return false;                 // Thiếu swing → không xác định được trend
 
-  h0 = highs[0]; idxH0 = hiIdx[0];
-  h1 = highs[1]; idxH1 = hiIdx[1];
-  l0 = lows [0]; idxL0 = loIdx[0];
-  l1 = lows [1]; idxL1 = loIdx[1];
+  h0 = highs[0]; idxH0 = hiIdx[0];                    // Swing high gần nhất (most recent)
+  h1 = highs[1]; idxH1 = hiIdx[1];                    // Swing high trước đó (để so sánh HH/LH)
+  l0 = lows [0]; idxL0 = loIdx[0];                    // Swing low gần nhất
+  l1 = lows [1]; idxL1 = loIdx[1];                    // Swing low trước đó (để so sánh HL/LL)
   return true;
 }
 
@@ -289,8 +240,8 @@ void ResolveTrendFromSwings(
   MarketDir &trend, double &keyLevel)
 {
   double c1 = iClose(_Symbol, tf, 1);
-  if      (h0 > h1 && l0 > l1 && c1 > l0) { trend = DIR_UP;   keyLevel = l0; }
-  else if (h0 < h1 && l0 < l1 && c1 < h0) { trend = DIR_DOWN; keyLevel = h0; }
+  if      (h0 > h1 && l0 > l1 && c1 > l0) { trend = DIR_UP;   keyLevel = l0; }  // HH+HL → uptrend, KL=L0
+  else if (h0 < h1 && l0 < l1 && c1 < h0) { trend = DIR_DOWN; keyLevel = h0; }  // LH+LL → downtrend, KL=H0
   else                                      { trend = DIR_NONE; keyLevel = 0;  }
 }
 
@@ -300,31 +251,31 @@ void ResolveTrendFromSwings(
 
 HTFBias ResolveBias(double b1H, double b1L, double b1C, double b2H, double b2L)
 {
-  if (b1C > b2H)               return BIAS_UP;
-  if (b1C < b2L)               return BIAS_DOWN;
-  if (b1H > b2H && b1C < b2H) return BIAS_DOWN;
-  if (b1L < b2L && b1C > b2L) return BIAS_UP;
+  if (b1C > b2H)               return BIAS_UP;          // Close trên high hôm qua
+  if (b1C < b2L)               return BIAS_DOWN;        // Close dưới low hôm qua
+  if (b1H > b2H && b1C < b2H) return BIAS_DOWN;        // False break up → bearish
+  if (b1L < b2L && b1C > b2L) return BIAS_UP;          // False break down → bullish
   return BIAS_SIDEWAY;
 }
 
 void UpdateBiasContext()
 {
-  datetime t0 = iTime(_Symbol, InpBiasTF, 0);
-  if (t0 == g_Bias.lastBarTime) return;
-  g_Bias.lastBarTime = t0;
+  datetime t0 = iTime(_Symbol, InpBiasTF, 0);         // Open time bar D1 hiện tại
+  if (t0 == g_Bias.lastBarTime) return;                // Đã tính rồi → skip (chỉ tính 1 lần/ngày)
+  g_Bias.lastBarTime = t0;                             // Đánh dấu đã xử lý bar này
 
-  if (Bars(_Symbol, InpBiasTF) < 4) { g_Bias.bias = BIAS_NONE; return; }
+  if (Bars(_Symbol, InpBiasTF) < 4) { g_Bias.bias = BIAS_NONE; return; } // Chưa đủ data
 
-  double b1H = iHigh (_Symbol, InpBiasTF, 1);
-  double b1L = iLow  (_Symbol, InpBiasTF, 1);
-  double b1C = iClose(_Symbol, InpBiasTF, 1);
-  double b2H = iHigh (_Symbol, InpBiasTF, 2);
-  double b2L = iLow  (_Symbol, InpBiasTF, 2);
+  double b1H = iHigh (_Symbol, InpBiasTF, 1);         // D1 bar hôm qua: high
+  double b1L = iLow  (_Symbol, InpBiasTF, 1);         //                  low
+  double b1C = iClose(_Symbol, InpBiasTF, 1);         //                  close
+  double b2H = iHigh (_Symbol, InpBiasTF, 2);         // D1 bar hôm kia:  high (reference range)
+  double b2L = iLow  (_Symbol, InpBiasTF, 2);         //                   low  (reference range)
 
-  HTFBias prev = g_Bias.bias;
-  g_Bias.bias  = ResolveBias(b1H, b1L, b1C, b2H, b2L);
-  g_Bias.rangeHigh = (g_Bias.bias == BIAS_SIDEWAY) ? b2H : 0;
-  g_Bias.rangeLow  = (g_Bias.bias == BIAS_SIDEWAY) ? b2L : 0;
+  HTFBias prev = g_Bias.bias;                          // Lưu bias cũ để log khi thay đổi
+  g_Bias.bias  = ResolveBias(b1H, b1L, b1C, b2H, b2L); // So sánh b1 close vs b2 range
+  g_Bias.rangeHigh = (g_Bias.bias == BIAS_SIDEWAY) ? b2H : 0; // SIDEWAY: lưu biên trên
+  g_Bias.rangeLow  = (g_Bias.bias == BIAS_SIDEWAY) ? b2L : 0; // SIDEWAY: lưu biên dưới
 
   if (InpDebugLog && g_Bias.bias != prev)
     PrintFormat("[BIAS] %s → %s | b1[H=%.5f L=%.5f C=%.5f] b2[H=%.5f L=%.5f]",
@@ -334,17 +285,18 @@ void UpdateBiasContext()
 //----------------------------------------------------------------------
 // UpdateTFTrendContext
 //
-// Gọi mỗi bar mới trên tf. Thực hiện 3 việc TRƯỚC khi re-scan swing:
+// Gọi mỗi bar mới. Thực hiện TRƯỚC khi re-scan swing:
 //
-//   1a. TriggerTF: Detect Liquidity Sweep (wick quét swing)
-//   1b. MSS check: close phá keyLevel
-//       - MiddleTF: ghi nhận mọi MSS
-//       - TriggerTF v3: CHỈ ghi nhận nếu:
-//           (a) thuận chiều MiddleTF trend
-//           (b) có Sweep trước đó (g_LastLiqSweep hợp lệ)
-//   2.  Re-scan swing structure → update trend/keyLevel
+//   v4 MSS check (TriggerTF only):
+//     - M5 đang downtrend (hồi khi H1 UP): keyLevel = tH0
+//       → close > tH0 = bull MSS → entry BUY LIMIT tại tH0
+//     - M5 đang uptrend (hồi khi H1 DOWN): keyLevel = tL0
+//       → close < tL0 = bear MSS → entry SELL LIMIT tại tL0
 //
-// Tất cả detection dùng OLD swing levels (trước re-scan).
+//   Chỉ nhận MSS thuận chiều MiddleTF (filter duy nhất).
+//   Entry price = keyLevel bị phá (tH0 hoặc tL0).
+//   SL = swing extreme sóng hồi (tL0 cho buy, tH0 cho sell).
+//   Cả entry + SL capture TRƯỚC re-scan vì sau đó swing thay đổi.
 //----------------------------------------------------------------------
 void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
 {
@@ -355,148 +307,71 @@ void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
   double   bar1C = iClose(_Symbol, tf, 1);             // Bar vừa đóng: close
   double   bar1H = iHigh (_Symbol, tf, 1);             //                high
   double   bar1L = iLow  (_Symbol, tf, 1);             //                low
-  double   bar1O = iOpen (_Symbol, tf, 1);             //                open
   datetime bar1T = iTime (_Symbol, tf, 1);             //                time
 
   // ══════════════════════════════════════════════════════════════════
-  // 1a. TriggerTF: Liquidity Sweep detection (TRƯỚC MSS check)
+  // MSS check (TRƯỚC re-scan, dùng OLD keyLevel + swing)
   //
-  //   Bullish sweep (H1 UP): wick < L0 && close > L0
-  //     → Giá quét dưới swing low, hút stop-loss bên sell
-  //     → Rồi đóng lại phía trên → reversal signal
+  // Logic:
+  //   trend hiện tại có keyLevel → nếu close phá keyLevel:
+  //     breakDir = hướng phá (UP nếu phá lên, DOWN nếu phá xuống)
+  //     Chỉ nhận nếu breakDir == MiddleTF trend (TriggerTF only)
   //
-  //   Bearish sweep (H1 DOWN): wick > H0 && close < H0
-  //     → Giá quét trên swing high, hút stop-loss bên buy
-  //     → Rồi đóng lại phía dưới → reversal signal
-  //
-  //   Sweep KHÔNG được vẽ riêng. Chỉ dùng làm prerequisite cho MSS.
-  // ══════════════════════════════════════════════════════════════════
-  if (tf == InpTriggerTF && g_MiddleTrend.trend != DIR_NONE)
-  {
-    if (g_MiddleTrend.trend == DIR_UP && ctx.l0 > 0)   // Bullish setup
-    {
-      if (bar1L < ctx.l0                                // Wick quét dưới L0
-          && bar1C > ctx.l0                             // Close đóng lại trên L0
-          && bar1T != g_LastLiqSweep.time)              // Chưa ghi nhận cây này
-      {
-        g_LastLiqSweep.valid       = true;
-        g_LastLiqSweep.direction   = DIR_UP;            // Bull sweep = quét sell-side
-        g_LastLiqSweep.sweptLevel  = ctx.l0;            // Mức swing bị quét
-        g_LastLiqSweep.extremeWick = bar1L;             // Wick thấp nhất
-        g_LastLiqSweep.time        = bar1T;
-
-        if (InpDebugLog)
-          PrintFormat("[SWEEP ▲] below L0=%.5f | wick=%.5f close=%.5f | %s",
-            ctx.l0, bar1L, bar1C, TimeToString(bar1T));
-      }
-    }
-    else if (g_MiddleTrend.trend == DIR_DOWN && ctx.h0 > 0)  // Bearish setup
-    {
-      if (bar1H > ctx.h0                                // Wick quét trên H0
-          && bar1C < ctx.h0                             // Close đóng lại dưới H0
-          && bar1T != g_LastLiqSweep.time)
-      {
-        g_LastLiqSweep.valid       = true;
-        g_LastLiqSweep.direction   = DIR_DOWN;          // Bear sweep = quét buy-side
-        g_LastLiqSweep.sweptLevel  = ctx.h0;
-        g_LastLiqSweep.extremeWick = bar1H;             // Wick cao nhất
-        g_LastLiqSweep.time        = bar1T;
-
-        if (InpDebugLog)
-          PrintFormat("[SWEEP ▼] above H0=%.5f | wick=%.5f close=%.5f | %s",
-            ctx.h0, bar1H, bar1C, TimeToString(bar1T));
-      }
-    }
-  }
-
-  // ══════════════════════════════════════════════════════════════════
-  // 1b. MSS check (dùng OLD keyLevel, trước re-scan)
-  //
-  //   Uptrend:   keyLevel = L0 → MSS khi close < L0 (bearish break)
-  //   Downtrend: keyLevel = H0 → MSS khi close > H0 (bullish break)
-  //
-  //   v3 TriggerTF: MSS chỉ hợp lệ khi:
-  //     (a) breakDir thuận chiều MiddleTF (VD: H1 UP → chỉ nhận bull MSS)
-  //     (b) Có Liquidity Sweep trước đó cùng hướng
-  //         (bull MSS cần bull sweep, bear MSS cần bear sweep)
-  //     (c) Sweep xảy ra TRƯỚC cây MSS (sweep.time < bar1T)
-  //
-  //   MiddleTF: ghi nhận mọi MSS (không cần sweep filter)
+  // Capture tại thời điểm MSS:
+  //   lastMssLevel = keyLevel bị phá = ENTRY PRICE cho limit order
+  //   mssSLSwing   = swing extreme phía đối diện = SL level
+  //     Bull MSS: SL = L0 (đáy sóng hồi)
+  //     Bear MSS: SL = H0 (đỉnh sóng hồi)
   // ══════════════════════════════════════════════════════════════════
   if (ctx.trend != DIR_NONE && ctx.keyLevel > 0)
   {
     bool mssHit =
-      (ctx.trend == DIR_UP   && bar1C < ctx.keyLevel) ||  // Bull→Bear: close < L0
-      (ctx.trend == DIR_DOWN && bar1C > ctx.keyLevel);     // Bear→Bull: close > H0
+      (ctx.trend == DIR_UP   && bar1C < ctx.keyLevel) ||  // Uptrend KL=L0 → break below
+      (ctx.trend == DIR_DOWN && bar1C > ctx.keyLevel);     // Downtrend KL=H0 → break above
 
     if (mssHit && bar1T != ctx.lastMssTime)
     {
       MarketDir breakDir = (ctx.trend == DIR_UP) ? DIR_DOWN : DIR_UP;
 
-      // ── Determine if this MSS should be recorded ───────────────
-      bool recordMss = true;
-      string rejectReason = "";
-
-      if (tf == InpTriggerTF)
+      // TriggerTF: chỉ nhận MSS thuận chiều MiddleTF
+      bool accept = true;
+      if (tf == InpTriggerTF && g_MiddleTrend.trend != DIR_NONE)
       {
-        // Filter (a): thuận chiều MiddleTF
-        if (g_MiddleTrend.trend != DIR_NONE && breakDir != (MarketDir)g_MiddleTrend.trend)
-        {
-          recordMss = false;
-          rejectReason = "ngược chiều H1";
-        }
-
-        // Filter (b): phải có sweep trước đó, cùng hướng
-        if (recordMss)
-        {
-          bool hasSweep =
-            g_LastLiqSweep.valid &&                     // Sweep tồn tại
-            g_LastLiqSweep.direction == breakDir &&     // Cùng hướng với MSS
-            g_LastLiqSweep.time < bar1T;                // Sweep xảy ra TRƯỚC MSS
-
-          if (!hasSweep)
-          {
-            recordMss = false;
-            rejectReason = "chưa có sweep";
-          }
-        }
+        if (breakDir != (MarketDir)g_MiddleTrend.trend)
+          accept = false;                              // Ngược chiều → bỏ qua
       }
 
-      // ── Record hoặc skip MSS ──────────────────────────────────
-      if (recordMss)
+      if (accept)
       {
-        ctx.lastMssTime  = bar1T;                       // Thời gian cây nến MSS
-        ctx.lastMssLevel = ctx.keyLevel;                // Key level bị phá
-        ctx.lastMssBreak = breakDir;                    // Hướng break
+        ctx.lastMssTime  = bar1T;                      // Thời gian cây nến MSS
+        ctx.lastMssLevel = ctx.keyLevel;               // KeyLevel bị phá = ENTRY
+        ctx.lastMssBreak = breakDir;                   // Hướng break
 
-        // v3: Lưu sweep info kèm MSS (cho TriggerTF)
-        if (tf == InpTriggerTF && g_LastLiqSweep.valid)
-        {
-          ctx.mssSweepTime  = g_LastLiqSweep.time;      // Copy sweep → MSS context
-          ctx.mssSweepLevel = g_LastLiqSweep.sweptLevel;
-          ctx.mssSweepWick  = g_LastLiqSweep.extremeWick;
-        }
+        // v4: Capture SL swing TRƯỚC re-scan
+        if (breakDir == DIR_UP)
+          ctx.mssSLSwing = ctx.l0;                     // Bull MSS → SL dưới L0 (đáy hồi)
+        else
+          ctx.mssSLSwing = ctx.h0;                     // Bear MSS → SL trên H0 (đỉnh hồi)
 
         if (InpDebugLog)
-          PrintFormat("[%s MSS ✓] %s | KL=%.5f | close=%.5f | sweep@%s | bar=%s",
+          PrintFormat("[%s MSS] %s | entry=%.5f SL_swing=%.5f | close=%.5f | %s",
             EnumToString(tf),
-            (breakDir == DIR_UP) ? "Bear→Bull ▲" : "Bull→Bear ▼",
-            ctx.lastMssLevel, bar1C,
-            (tf == InpTriggerTF) ? TimeToString(g_LastLiqSweep.time, TIME_MINUTES) : "n/a",
-            TimeToString(bar1T));
+            (breakDir == DIR_UP) ? "▲ Bull" : "▼ Bear",
+            ctx.lastMssLevel, ctx.mssSLSwing,
+            bar1C, TimeToString(bar1T));
       }
       else if (InpDebugLog)
       {
-        PrintFormat("[%s MSS ✗] %s bị skip: %s | KL=%.5f | close=%.5f",
+        PrintFormat("[%s MSS skip] %s ngược H1=%s | KL=%.5f",
           EnumToString(tf),
           (breakDir == DIR_UP) ? "▲" : "▼",
-          rejectReason, ctx.keyLevel, bar1C);
+          EnumToString(g_MiddleTrend.trend), ctx.keyLevel);
       }
     }
   }
 
   // ══════════════════════════════════════════════════════════════════
-  // 2. Re-scan swing structure
+  // Re-scan swing structure
   // ══════════════════════════════════════════════════════════════════
   double h0, h1, l0, l1;
   int idxH0, idxH1, idxL0, idxL1;
@@ -519,21 +394,21 @@ void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
 
 void UpdateDailyRiskContext()
 {
-  datetime today = iTime(_Symbol, PERIOD_D1, 0);
-  if (today != g_DailyRisk.dayStartTime)
+  datetime today = iTime(_Symbol, PERIOD_D1, 0);      // Open time ngày hiện tại
+  if (today != g_DailyRisk.dayStartTime)               // Ngày mới → reset tracking
   {
-    g_DailyRisk.dayStartTime = today;
-    g_DailyRisk.startBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-    g_DailyRisk.limitHit     = false;
+    g_DailyRisk.dayStartTime = today;                  // Đánh dấu ngày mới
+    g_DailyRisk.startBalance = AccountInfoDouble(ACCOUNT_BALANCE); // Snapshot balance đầu ngày
+    g_DailyRisk.limitHit     = false;                  // Reset flag daily loss
     if (InpDebugLog) PrintFormat("[DAILY RISK] New day | start=%.2f", g_DailyRisk.startBalance);
   }
-  if (g_DailyRisk.limitHit) return;
-  g_DailyRisk.currentBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-  double lostPct = (g_DailyRisk.startBalance - g_DailyRisk.currentBalance)
+  if (g_DailyRisk.limitHit) return;                    // Đã hit limit → không cần check nữa
+  g_DailyRisk.currentBalance = AccountInfoDouble(ACCOUNT_BALANCE); // Balance hiện tại
+  double lostPct = (g_DailyRisk.startBalance - g_DailyRisk.currentBalance) // Tính % loss trong ngày
                     / g_DailyRisk.startBalance * 100.0;
-  if (lostPct >= InpMaxDailyLossPct)
+  if (lostPct >= InpMaxDailyLossPct)                   // Vượt ngưỡng → dừng trade
   {
-    g_DailyRisk.limitHit = true;
+    g_DailyRisk.limitHit = true;                       // Set flag → EvaluateGuards() sẽ block
     PrintFormat("[DAILY RISK] ⛔ Limit hit | lost=%.2f%% | bal=%.2f",
       lostPct, g_DailyRisk.currentBalance);
   }
@@ -541,34 +416,34 @@ void UpdateDailyRiskContext()
 
 void UpdateAllContexts()
 {
-  UpdateDailyRiskContext();
-  UpdateBiasContext();
-  UpdateTFTrendContext(InpMiddleTF,  InpSwingLookback,        g_MiddleTrend);
-  UpdateTFTrendContext(InpTriggerTF, InpTriggerSwingLookback, g_TriggerTrend);
+  UpdateDailyRiskContext();                             // 1. Check daily drawdown trước tiên
+  UpdateBiasContext();                                 // 2. D1 bias (UP/DOWN/SIDEWAY)
+  UpdateTFTrendContext(InpMiddleTF,  InpSwingLookback,        g_MiddleTrend);  // 3. H1 swing+trend+MSS
+  UpdateTFTrendContext(InpTriggerTF, InpTriggerSwingLookback, g_TriggerTrend); // 4. M5 swing+trend+MSS (entry signal)
 }
 
 //+------------------------------------------------------------------+
 //|  SECTION 3 – GUARDS                                              |
 //+------------------------------------------------------------------+
 
-bool IsSessionAllowed()    { return true; /* TODO: London/NY filter */ }
-bool IsDailyLossOK()       { return !g_DailyRisk.limitHit; }
-bool IsBiasValid()         { return g_Bias.bias == BIAS_UP || g_Bias.bias == BIAS_DOWN; }
-bool IsMiddleTrendAligned()
+bool IsSessionAllowed()    { return true; /* TODO: London/NY session filter dựa trên InpLondon/NYHour */ }
+bool IsDailyLossOK()       { return !g_DailyRisk.limitHit; } // false nếu đã vượt InpMaxDailyLossPct
+bool IsBiasValid()         { return g_Bias.bias == BIAS_UP || g_Bias.bias == BIAS_DOWN; } // Cần direction rõ ràng
+bool IsMiddleTrendAligned()                            // H1 trend phải cùng hướng D1 bias
 {
-  if (g_MiddleTrend.trend == DIR_NONE) return false;
-  return (g_Bias.bias == BIAS_UP   && g_MiddleTrend.trend == DIR_UP) ||
-         (g_Bias.bias == BIAS_DOWN && g_MiddleTrend.trend == DIR_DOWN);
+  if (g_MiddleTrend.trend == DIR_NONE) return false;   // H1 chưa xác định → block
+  return (g_Bias.bias == BIAS_UP   && g_MiddleTrend.trend == DIR_UP) ||   // D1 UP + H1 UP ✓
+         (g_Bias.bias == BIAS_DOWN && g_MiddleTrend.trend == DIR_DOWN);    // D1 DOWN + H1 DOWN ✓
 }
 
-bool EvaluateGuards()
+bool EvaluateGuards()                                  // Kiểm tra tất cả điều kiện trước khi trade
 {
-  g_BlockReason = BLOCK_NONE;
-  if (!IsSessionAllowed())     { g_BlockReason = BLOCK_SESSION;       return false; }
-  if (!IsDailyLossOK())        { g_BlockReason = BLOCK_DAILY_LOSS;    return false; }
-  if (!IsBiasValid())          { g_BlockReason = BLOCK_NO_BIAS;       return false; }
-  if (!IsMiddleTrendAligned()) { g_BlockReason = BLOCK_BIAS_MISMATCH; return false; }
-  return true;
+  g_BlockReason = BLOCK_NONE;                          // Reset reason
+  if (!IsSessionAllowed())     { g_BlockReason = BLOCK_SESSION;       return false; } // Ngoài giờ
+  if (!IsDailyLossOK())        { g_BlockReason = BLOCK_DAILY_LOSS;    return false; } // Vượt loss/ngày
+  if (!IsBiasValid())          { g_BlockReason = BLOCK_NO_BIAS;       return false; } // D1 sideway/none
+  if (!IsMiddleTrendAligned()) { g_BlockReason = BLOCK_BIAS_MISMATCH; return false; } // H1 ngược D1
+  return true;                                         // Tất cả OK → cho phép trade
 }
 
 //+------------------------------------------------------------------+
@@ -586,14 +461,11 @@ void ResetToIdle(string reason = "")
 {
   if (InpDebugLog && reason != "")
     PrintFormat("[RESET→IDLE] %s", reason);
-  g_ActiveFVGIdx  = -1;
-  g_TradeBarIndex = -1;
-  g_PendingTicket = 0;
-  ZeroMemory(g_Trigger);
-  ZeroMemory(g_TrigFVG);
-  ZeroMemory(g_OrderPlan);
-  ZeroMemory(g_LastLiqSweep);                          // v3: reset sweep khi cycle mới
-  TransitionTo(EA_IDLE);
+  g_ActiveFVGIdx  = -1;                               // Bỏ FVG đang theo dõi
+  g_TradeBarIndex = -1;                                // Reset bar index
+  g_PendingTicket = 0;                                 // Không còn pending order
+  ZeroMemory(g_OrderPlan);                             // Xóa order plan
+  TransitionTo(EA_IDLE);                               // Quay về IDLE tìm FVG mới
 }
 
 //+------------------------------------------------------------------+
@@ -602,11 +474,11 @@ void ResetToIdle(string reason = "")
 
 bool IsCandleStrong(ENUM_TIMEFRAMES tf, int i)
 {
-  double h = iHigh(_Symbol, tf, i), l = iLow(_Symbol, tf, i);
-  double o = iOpen(_Symbol, tf, i), c = iClose(_Symbol, tf, i);
-  double range = h - l;
-  if (range < _Point) return false;
-  return (MathAbs(c - o) / range * 100.0) >= InpFVGMinBodyPct;
+  double h = iHigh(_Symbol, tf, i), l = iLow(_Symbol, tf, i); // Range = high - low
+  double o = iOpen(_Symbol, tf, i), c = iClose(_Symbol, tf, i); // Body = |close - open|
+  double range = h - l;                                // Tổng chiều dài nến
+  if (range < _Point) return false;                    // Nến quá nhỏ → bỏ qua
+  return (MathAbs(c - o) / range * 100.0) >= InpFVGMinBodyPct; // Body >= 60% range → strong
 }
 
 bool IsFVGInPool(datetime created)
@@ -622,94 +494,97 @@ bool IsFVGInPool(datetime created)
 
 void ScanAndRegisterFVGs()
 {
-  static datetime s_lastScan = 0;
-  datetime t0 = iTime(_Symbol, InpMiddleTF, 0);
-  if (t0 == s_lastScan) return;
-  s_lastScan = t0;
+  static datetime s_lastScan = 0;                      // Guard: chỉ scan 1 lần mỗi bar H1
+  datetime t0 = iTime(_Symbol, InpMiddleTF, 0);       // Open time bar H1 hiện tại
+  if (t0 == s_lastScan) return;                        // Đã scan bar này rồi → skip
+  s_lastScan = t0;                                     // Đánh dấu đã scan
 
-  MarketDir dir = g_MiddleTrend.trend;
-  if (dir == DIR_NONE) return;
+  MarketDir dir = g_MiddleTrend.trend;                 // Chỉ scan FVG thuận chiều H1 trend
+  if (dir == DIR_NONE) return;                         // Không có trend → không scan
 
-  int maxBar = MathMin(InpFVGScanBars, Bars(_Symbol, InpMiddleTF) - 2);
+  int maxBar = MathMin(InpFVGScanBars, Bars(_Symbol, InpMiddleTF) - 2); // Giới hạn scan range
 
   for (int i = 2; i <= maxBar; i++)
   {
-    double leftH  = iHigh (_Symbol, InpMiddleTF, i + 1);
+    double leftH  = iHigh (_Symbol, InpMiddleTF, i + 1);  // Cây bên trái gap
     double leftL  = iLow  (_Symbol, InpMiddleTF, i + 1);
-    double rightH = iHigh (_Symbol, InpMiddleTF, i - 1);
+    double rightH = iHigh (_Symbol, InpMiddleTF, i - 1);  // Cây bên phải gap
     double rightL = iLow  (_Symbol, InpMiddleTF, i - 1);
-    double midO   = iOpen (_Symbol, InpMiddleTF, i);
+    double midO   = iOpen (_Symbol, InpMiddleTF, i);       // Cây giữa (tạo gap)
     double midC   = iClose(_Symbol, InpMiddleTF, i);
     double gH = 0, gL = 0;
 
-    if (dir == DIR_UP)
+    if (dir == DIR_UP)                                     // Bullish FVG
     {
-      if (leftH >= rightL || midC <= midO || !IsCandleStrong(InpMiddleTF, i)) continue;
-      gL = leftH; gH = rightL;
+      if (leftH >= rightL) continue;                       // Không có gap
+      if (midC <= midO) continue;                          // Cây giữa phải bullish
+      if (!IsCandleStrong(InpMiddleTF, i)) continue;      // Body đủ lớn
+      gL = leftH; gH = rightL;                            // Gap = leftH → rightL
     }
-    else
+    else                                                   // Bearish FVG
     {
-      if (leftL <= rightH || midC >= midO || !IsCandleStrong(InpMiddleTF, i)) continue;
-      gH = leftL; gL = rightH;
+      if (leftL <= rightH) continue;
+      if (midC >= midO) continue;                          // Cây giữa phải bearish
+      if (!IsCandleStrong(InpMiddleTF, i)) continue;
+      gH = leftL; gL = rightH;                            // Gap = rightH → leftL
     }
 
-    datetime created = iTime(_Symbol, InpMiddleTF, i - 1);
-    if (IsFVGInPool(created)) continue;
+    datetime created = iTime(_Symbol, InpMiddleTF, i - 1); // FVG created = open time cây phải
+    if (IsFVGInPool(created)) continue;                // Đã có trong pool → skip trùng
 
     // ── Evict oldest USED if pool full ──────────────────────────────
-    if (g_FVGCount >= MAX_FVG_POOL)
+    if (g_FVGCount >= MAX_FVG_POOL)                    // Pool đầy 30 slot
     {
-      int evict = -1; datetime oldest = TimeCurrent();
+      int evict = -1; datetime oldest = TimeCurrent(); // Tìm USED cũ nhất để xóa
       for (int j = 0; j < g_FVGCount; j++)
         if (g_FVGPool[j].status == FVG_USED && g_FVGPool[j].createdTime < oldest)
-          { oldest = g_FVGPool[j].createdTime; evict = j; }
-      if (evict < 0) { if (InpDebugLog) Print("[FVG POOL] Full – no USED slot"); break; }
-      for (int j = evict; j < g_FVGCount - 1; j++) g_FVGPool[j] = g_FVGPool[j + 1];
-      g_FVGCount--;
-      if      (g_ActiveFVGIdx >  evict) g_ActiveFVGIdx--;
-      else if (g_ActiveFVGIdx == evict) g_ActiveFVGIdx = -1;
+          { oldest = g_FVGPool[j].createdTime; evict = j; } // Ghi nhớ slot cũ nhất
+      if (evict < 0) { if (InpDebugLog) Print("[FVG POOL] Full"); break; } // Không có USED → stop
+      for (int j = evict; j < g_FVGCount - 1; j++) g_FVGPool[j] = g_FVGPool[j + 1]; // Shift array
+      g_FVGCount--;                                    // Giảm count
+      if      (g_ActiveFVGIdx >  evict) g_ActiveFVGIdx--; // Fix active index sau shift
+      else if (g_ActiveFVGIdx == evict) g_ActiveFVGIdx = -1; // Active bị evict → clear
     }
 
     // ── Build record ─────────────────────────────────────────────────
     FVGRecord rec;
-    ZeroMemory(rec);
-    rec.id          = g_NextFVGId++;
-    rec.direction   = dir;
-    rec.high        = gH; rec.low = gL; rec.mid = (gH + gL) / 2.0;
-    rec.createdTime = created;
-    int rightBar    = i - 1;
+    ZeroMemory(rec);                                   // Init tất cả field = 0
+    rec.id = g_NextFVGId++; rec.direction = dir;       // Assign ID tự tăng + hướng
+    rec.high = gH; rec.low = gL; rec.mid = (gH + gL) / 2.0; // Biên gap + midpoint
+    rec.createdTime = created;                         // Thời gian tạo
+    int rightBar = i - 1;                              // Cây bên phải gap (dùng cho scan status)
 
-    // P1: case1 – close punched through gap
-    bool c1Hit = false; datetime c1T = 0;
-    for (int j = rightBar - 1; j >= 1; j--)
+    // P1: case1 – Kiểm tra đã bị phá xuyên chưa (H1 close qua gap)
+    bool c1Hit = false; datetime c1T = 0;              // Flag + thời gian bị phá
+    for (int j = rightBar - 1; j >= 1; j--)             // Scan từ cây phải → hiện tại
     {
-      double cl = iClose(_Symbol, InpMiddleTF, j);
-      if ((rec.direction == DIR_UP   && cl < rec.low) ||
-          (rec.direction == DIR_DOWN && cl > rec.high))
-        { c1Hit = true; c1T = iTime(_Symbol, InpMiddleTF, j); break; }
+      double cl = iClose(_Symbol, InpMiddleTF, j);    // Close mỗi bar H1
+      if ((rec.direction == DIR_UP   && cl < rec.low) || // Bull FVG: close dưới biên dưới = phá
+          (rec.direction == DIR_DOWN && cl > rec.high))   // Bear FVG: close trên biên trên = phá
+        { c1Hit = true; c1T = iTime(_Symbol, InpMiddleTF, j); break; } // Ghi nhận thời gian phá
     }
-    if (c1Hit) { rec.status = FVG_USED; rec.usedCase = 1; rec.usedTime = c1T; }
+    if (c1Hit) { rec.status = FVG_USED; rec.usedCase = 1; rec.usedTime = c1T; } // Case1 = broken
     else
     {
-      // P2: touch – wick entered gap
-      bool tdHit = false; datetime tdT = 0;
-      for (int j = rightBar - 1; j >= 1; j--)
+      // P2: touch – Kiểm tra giá đã wick vào gap chưa
+      bool tdHit = false; datetime tdT = 0;            // Flag + thời gian touch
+      for (int j = rightBar - 1; j >= 1; j--)         // Scan từ cây phải → hiện tại
       {
-        bool inGap = (rec.direction == DIR_UP   && iLow (_Symbol, InpMiddleTF, j) <= rec.high) ||
-                     (rec.direction == DIR_DOWN && iHigh(_Symbol, InpMiddleTF, j) >= rec.low);
-        if (inGap) { tdHit = true; tdT = iTime(_Symbol, InpMiddleTF, j); break; }
+        bool inGap = (rec.direction == DIR_UP   && iLow (_Symbol, InpMiddleTF, j) <= rec.high) || // Bull: low ≤ gap top
+                     (rec.direction == DIR_DOWN && iHigh(_Symbol, InpMiddleTF, j) >= rec.low);     // Bear: high ≥ gap bottom
+        if (inGap) { tdHit = true; tdT = iTime(_Symbol, InpMiddleTF, j); break; } // Đã touch
       }
-      if (tdHit) { rec.status = FVG_TOUCHED; rec.touchTime = tdT; rec.triggerTrendAtTouch = g_TriggerTrend.trend; }
+      if (tdHit) { rec.status = FVG_TOUCHED; rec.touchTime = tdT; rec.triggerTrendAtTouch = g_TriggerTrend.trend; } // Ghi nhận M5 trend lúc touch
       else
       {
-        rec.status = FVG_PENDING;
-        if ((int)(TimeCurrent() - rec.createdTime) > InpFVGMaxAliveMin * 60)
-          { rec.status = FVG_USED; rec.usedCase = 0; rec.usedTime = TimeCurrent(); }
+        rec.status = FVG_PENDING;                      // Chưa touch, chưa bị phá → chờ
+        if ((int)(TimeCurrent() - rec.createdTime) > InpFVGMaxAliveMin * 60) // Quá 72h
+          { rec.status = FVG_USED; rec.usedCase = 0; rec.usedTime = TimeCurrent(); } // Case0 = expired
       }
     }
 
-    g_FVGPool[g_FVGCount] = rec;
-    g_FVGCount++;
+    g_FVGPool[g_FVGCount] = rec;                       // Thêm vào pool
+    g_FVGCount++;                                      // Tăng count
 
     if (InpDebugLog)
       PrintFormat("[FVG +] #%d %s [%.5f–%.5f] %s | %s",
@@ -724,78 +599,75 @@ void ScanAndRegisterFVGs()
 
 void UpdateFVGStatuses()
 {
-  double   bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-  double   midC1 = iClose(_Symbol, InpMiddleTF, 1);
-  datetime midT1 = iTime (_Symbol, InpMiddleTF, 1);
+  double   bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Giá bid hiện tại (dùng cho touch check)
+  double   midC1 = iClose(_Symbol, InpMiddleTF, 1);   // H1 bar vừa đóng: close (dùng cho case1)
+  datetime midT1 = iTime (_Symbol, InpMiddleTF, 1);   // H1 bar vừa đóng: time
 
-  for (int i = 0; i < g_FVGCount; i++)
+  for (int i = 0; i < g_FVGCount; i++)                // Duyệt toàn bộ pool
   {
-    if (g_FVGPool[i].status == FVG_USED) continue;
+    if (g_FVGPool[i].status == FVG_USED) continue;     // Đã consumed → skip
 
-    // ── 1. Case1: H1 close phá xuyên qua FVG → broken ──────────────
-    bool c1 = (g_FVGPool[i].direction == DIR_UP   && midC1 < g_FVGPool[i].low) ||
-              (g_FVGPool[i].direction == DIR_DOWN && midC1 > g_FVGPool[i].high);
+    // ── 1. Case1: H1 close phá xuyên FVG → broken ──────────────────
+    bool c1 = (g_FVGPool[i].direction == DIR_UP   && midC1 < g_FVGPool[i].low) || // Bull: close < bottom
+              (g_FVGPool[i].direction == DIR_DOWN && midC1 > g_FVGPool[i].high);   // Bear: close > top
     if (c1)
     {
       g_FVGPool[i].status   = FVG_USED;
       g_FVGPool[i].usedCase = 1;
       g_FVGPool[i].usedTime = midT1;
       if (InpDebugLog)
-        PrintFormat("[FVG #%d] USED(case1=broken) | close=%.5f vs [%.5f–%.5f]",
-          g_FVGPool[i].id, midC1, g_FVGPool[i].low, g_FVGPool[i].high);
+        PrintFormat("[FVG #%d] BROKEN | close=%.5f", g_FVGPool[i].id, midC1);
       continue;
     }
 
     if (g_FVGPool[i].status == FVG_PENDING)
     {
-      // ── 2. Expire: quá thời hạn ─────────────────────────────────────
+      // ── 2. Expire ────────────────────────────────────────────────────
       int age = (int)(TimeCurrent() - g_FVGPool[i].createdTime);
       if (age > InpFVGMaxAliveMin * 60)
       {
-        g_FVGPool[i].status   = FVG_USED;
-        g_FVGPool[i].usedCase = 0;
+        g_FVGPool[i].status = FVG_USED; g_FVGPool[i].usedCase = 0;
         g_FVGPool[i].usedTime = TimeCurrent();
-        if (InpDebugLog)
-          PrintFormat("[FVG #%d] USED(expired) | age=%dmin", g_FVGPool[i].id, age / 60);
         continue;
       }
+
       // ── 3. Touch: bid vào vùng gap ───────────────────────────────────
-      bool touched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high) ||
-                     (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low);
+      bool touched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high) || // Bull: bid retrace xuống ≤ gap top
+                     (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low);    // Bear: bid retrace lên ≥ gap bottom
       if (touched)
       {
-        g_FVGPool[i].status              = FVG_TOUCHED;
-        g_FVGPool[i].touchTime           = TimeCurrent();
-        g_FVGPool[i].triggerTrendAtTouch = g_TriggerTrend.trend;
+        g_FVGPool[i].status              = FVG_TOUCHED;   // Chuyển sang TOUCHED
+        g_FVGPool[i].touchTime           = TimeCurrent();  // Ghi nhận thời gian touch
+        g_FVGPool[i].triggerTrendAtTouch = g_TriggerTrend.trend; // Snapshot M5 trend lúc touch
         if (InpDebugLog)
-          PrintFormat("[FVG #%d] TOUCHED | bid=%.5f [%.5f–%.5f] TrigTrend=%s",
-            g_FVGPool[i].id, bid, g_FVGPool[i].low, g_FVGPool[i].high,
-            EnumToString(g_FVGPool[i].triggerTrendAtTouch));
+          PrintFormat("[FVG #%d] TOUCHED | bid=%.5f [%.5f–%.5f]",
+            g_FVGPool[i].id, bid, g_FVGPool[i].low, g_FVGPool[i].high);
       }
     }
     else if (g_FVGPool[i].status == FVG_TOUCHED)
     {
-      // ── 4. Case2: TriggerTF MSS confirmed → entry signal ────────────
-      bool wasOpposing, nowAligned;
-      if (g_FVGPool[i].direction == DIR_UP)
-        { wasOpposing = (g_FVGPool[i].triggerTrendAtTouch != DIR_UP);  nowAligned = (g_TriggerTrend.trend == DIR_UP);   }
-      else
-        { wasOpposing = (g_FVGPool[i].triggerTrendAtTouch != DIR_DOWN); nowAligned = (g_TriggerTrend.trend == DIR_DOWN); }
+      // ── 4. Case2: M5 MSS đã xảy ra SAU touch → triggered ───────────
+      //
+      //   v4: Kiểm tra g_TriggerTrend.lastMssTime > touchTime
+      //       VÀ hướng MSS phù hợp FVG direction
+      //
+      bool hasMSS =
+        g_TriggerTrend.lastMssTime > g_FVGPool[i].touchTime &&   // MSS sau touch
+        g_TriggerTrend.lastMssBreak == g_FVGPool[i].direction;   // Cùng hướng
 
-      if (wasOpposing && nowAligned)
+      if (hasMSS)
       {
         g_FVGPool[i].status   = FVG_USED;
-        g_FVGPool[i].usedCase = 2;
+        g_FVGPool[i].usedCase = 2;                    // Case2 = triggered
         g_FVGPool[i].usedTime = TimeCurrent();
         if (InpDebugLog)
-          PrintFormat("[FVG #%d] USED(case2=triggered) | TrigTrend %s→%s [%.5f–%.5f] %s",
+          PrintFormat("[FVG #%d] TRIGGERED | MSS %s @ %s",
             g_FVGPool[i].id,
-            EnumToString(g_FVGPool[i].triggerTrendAtTouch),
-            EnumToString(g_TriggerTrend.trend),
-            g_FVGPool[i].low, g_FVGPool[i].high,
-            EnumToString(g_FVGPool[i].direction));
+            (g_TriggerTrend.lastMssBreak == DIR_UP) ? "▲" : "▼",
+            TimeToString(g_TriggerTrend.lastMssTime, TIME_MINUTES));
         continue;
       }
+
       // ── 5. Trigger timeout ────────────────────────────────────────────
       int bars = (int)((TimeCurrent() - g_FVGPool[i].touchTime) / PeriodSeconds(InpTriggerTF));
       if (bars > InpTriggerMaxBars
@@ -803,7 +675,7 @@ void UpdateFVGStatuses()
           && g_FVGPool[g_ActiveFVGIdx].id == g_FVGPool[i].id)
       {
         if (InpDebugLog)
-          PrintFormat("[FVG #%d] Trigger timeout (%d bars) – release active", g_FVGPool[i].id, bars);
+          PrintFormat("[FVG #%d] Timeout (%d bars)", g_FVGPool[i].id, bars);
         g_ActiveFVGIdx = -1;
       }
     }
@@ -811,137 +683,80 @@ void UpdateFVGStatuses()
 }
 
 //+------------------------------------------------------------------+
-//|  SECTION 7B – TRIGGER TF FVG SCANNER                             |
-//+------------------------------------------------------------------+
-
-bool ScanTriggerTFFVG(datetime touchTime, datetime mssTime, MarketDir dir)
-{
-  ZeroMemory(g_TrigFVG);
-
-  int barTouch = MyBarShift(_Symbol, InpTriggerTF, touchTime);
-  int barMss   = MyBarShift(_Symbol, InpTriggerTF, mssTime);
-
-  if (barTouch < 0 || barMss < 0) return false;
-  if (barTouch <= barMss + 2) return false;            // Cần ít nhất 3 bars giữa 2 mốc
-
-  if (InpDebugLog)
-    PrintFormat("[TFVG SCAN] touchBar=%d mssBar=%d dir=%s | scanning %d bars on %s",
-      barTouch, barMss, EnumToString(dir), barTouch - barMss, EnumToString(InpTriggerTF));
-
-  for (int i = barMss + 2; i < barTouch; i++)          // Scan từ gần MSS về phía touch
-  {
-    double leftH  = iHigh (_Symbol, InpTriggerTF, i + 1);
-    double leftL  = iLow  (_Symbol, InpTriggerTF, i + 1);
-    double rightH = iHigh (_Symbol, InpTriggerTF, i - 1);
-    double rightL = iLow  (_Symbol, InpTriggerTF, i - 1);
-    double midO   = iOpen (_Symbol, InpTriggerTF, i);
-    double midC   = iClose(_Symbol, InpTriggerTF, i);
-    double gH = 0, gL = 0;
-
-    if (dir == DIR_UP)
-    {
-      if (leftH >= rightL) continue;                   // Không có gap
-      if (midC <= midO)    continue;                   // Mid candle phải bullish
-      gL = leftH; gH = rightL;
-    }
-    else
-    {
-      if (leftL <= rightH) continue;
-      if (midC >= midO)    continue;                   // Mid candle phải bearish
-      gH = leftL; gL = rightH;
-    }
-
-    if (gH - gL < _Point) continue;                   // Gap quá nhỏ
-
-    g_TrigFVG.valid       = true;
-    g_TrigFVG.direction   = dir;
-    g_TrigFVG.high        = gH;
-    g_TrigFVG.low         = gL;
-    g_TrigFVG.mid         = (gH + gL) / 2.0;
-    g_TrigFVG.createdTime = iTime(_Symbol, InpTriggerTF, i - 1);
-
-    if (InpDebugLog)
-      PrintFormat("[TFVG FOUND] %s [%.5f–%.5f] mid=%.5f | bar=%d %s",
-        EnumToString(dir), gL, gH, g_TrigFVG.mid, i,
-        TimeToString(g_TrigFVG.createdTime));
-    return true;
-  }
-
-  if (InpDebugLog)
-    Print("[TFVG SCAN] No TriggerTF FVG found between touch and MSS");
-  return false;
-}
-
-//+------------------------------------------------------------------+
-//|  SECTION 7C – ORDER PLAN & EXECUTION  (MQL5 native)              |
+//|  SECTION 7B – ORDER PLAN & EXECUTION                             |
+//|                                                                  |
+//|  v4: Entry = MSS broken keyLevel (tH0 hoặc tL0)                |
+//|       SL   = swing extreme sóng hồi (capture lúc MSS)          |
+//|       TP   = Entry ± InpRiskReward * |Entry - SL|              |
 //+------------------------------------------------------------------+
 
 double CalcLotFromRisk(double entry, double sl)
 {
-  double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-  double riskMoney  = balance * InpRiskPercent / 100.0;
-  double slPips     = MathAbs(entry - sl) / _Point;
-  if (slPips < 1) return 0;
+  double balance    = AccountInfoDouble(ACCOUNT_BALANCE);   // Balance hiện tại
+  double riskMoney  = balance * InpRiskPercent / 100.0;     // Số tiền chấp nhận mất (VD: 1% of 10000 = 100)
+  double slPips     = MathAbs(entry - sl) / _Point;         // SL tính bằng points (VD: 50 points)
+  if (slPips < 1) return 0;                                 // SL quá nhỏ → invalid
 
-  double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-  double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-  if (tickValue <= 0 || tickSize <= 0) return 0;
+  double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE); // Giá trị 1 tick/lot
+  double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);  // Kích thước 1 tick
+  if (tickValue <= 0 || tickSize <= 0) return 0;            // Broker data invalid
 
-  double pipValue   = tickValue * (_Point / tickSize);
-  double rawLot     = riskMoney / (slPips * pipValue);
+  double pipValue   = tickValue * (_Point / tickSize);      // Giá trị 1 point cho 1 lot
+  double rawLot     = riskMoney / (slPips * pipValue);      // Lot = riskMoney / (points × value/point)
 
-  double minLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-  double maxLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-  double lotStep    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-  if (lotStep <= 0) lotStep = 0.01;
+  double minLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);  // VD: 0.01
+  double maxLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);  // VD: 100.0
+  double lotStep    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP); // VD: 0.01
+  if (lotStep <= 0) lotStep = 0.01;                         // Fallback
 
-  rawLot = MathFloor(rawLot / lotStep) * lotStep;
-  rawLot = MathMax(minLot, MathMin(maxLot, rawLot));
-
-  return NormalizeDouble(rawLot, 2);
+  rawLot = MathFloor(rawLot / lotStep) * lotStep;           // Làm tròn xuống theo lotStep
+  rawLot = MathMax(minLot, MathMin(maxLot, rawLot));        // Clamp trong [min, max]
+  return NormalizeDouble(rawLot, 2);                        // Trả về lot 2 chữ số thập phân
 }
 
 bool BuildOrderPlan(int fvgId, MarketDir dir)
 {
-  ZeroMemory(g_OrderPlan);
+  ZeroMemory(g_OrderPlan);                             // Reset plan cũ
 
-  if (!g_TrigFVG.valid) return false;
+  // v4: Entry = keyLevel vừa bị phá (đã capture trong MSS context)
+  double entry = NormalizeDouble(g_TriggerTrend.lastMssLevel, _Digits); // tH0 (buy) hoặc tL0 (sell)
 
-  double entry = NormalizeDouble(g_TrigFVG.mid, _Digits);   // Entry = mid TriggerTF FVG
-  double sl, tp;
+  // v4: SL = swing extreme sóng hồi (đã capture trong MSS context)
+  double sl = g_TriggerTrend.mssSLSwing;               // tL0 (buy) hoặc tH0 (sell), captured TRƯỚC re-scan
 
-  if (dir == DIR_UP)
+  if (entry <= 0 || sl <= 0) return false;             // Data invalid → không đặt lệnh
+
+  double tp;
+  if (dir == DIR_UP)                                   // ── BUY LIMIT setup ──
   {
-    sl = g_TriggerTrend.l0;                            // SL dưới TriggerTF swing low
-    if (sl <= 0 || sl >= entry) return false;
-    sl = NormalizeDouble(sl - 2 * _Point, _Digits);    // Buffer 2 points
-    double riskDist = entry - sl;
-    tp = NormalizeDouble(entry + InpRiskReward * riskDist, _Digits);  // TP = entry + 2R
+    if (sl >= entry) return false;                     // SL phải dưới entry cho buy
+    sl = NormalizeDouble(sl - 2 * _Point, _Digits);    // Buffer 2 points dưới swing low
+    double riskDist = entry - sl;                      // Khoảng cách risk (points)
+    tp = NormalizeDouble(entry + InpRiskReward * riskDist, _Digits); // TP = entry + 2R (mặc định)
   }
-  else
+  else                                                 // ── SELL LIMIT setup ──
   {
-    sl = g_TriggerTrend.h0;                            // SL trên TriggerTF swing high
-    if (sl <= 0 || sl <= entry) return false;
-    sl = NormalizeDouble(sl + 2 * _Point, _Digits);
-    double riskDist = sl - entry;
-    tp = NormalizeDouble(entry - InpRiskReward * riskDist, _Digits);
+    if (sl <= entry) return false;                     // SL phải trên entry cho sell
+    sl = NormalizeDouble(sl + 2 * _Point, _Digits);    // Buffer 2 points trên swing high
+    double riskDist = sl - entry;                      // Khoảng cách risk (points)
+    tp = NormalizeDouble(entry - InpRiskReward * riskDist, _Digits); // TP = entry - 2R
   }
 
-  double lot = CalcLotFromRisk(entry, sl);
-  if (lot <= 0) return false;
+  double lot = CalcLotFromRisk(entry, sl);             // Tính lot từ risk% và SL distance
+  if (lot <= 0) return false;                          // Lot invalid → skip
 
-  g_OrderPlan.valid      = true;
-  g_OrderPlan.direction  = (dir == DIR_UP) ? 1 : -1;
-  g_OrderPlan.entry      = entry;
-  g_OrderPlan.stopLoss   = sl;
-  g_OrderPlan.takeProfit = tp;
-  g_OrderPlan.lot        = lot;
-  g_OrderPlan.parentFVGId = fvgId;
+  g_OrderPlan.valid       = true;                      // Plan sẵn sàng
+  g_OrderPlan.direction   = (dir == DIR_UP) ? 1 : -1;  // +1=buy, -1=sell
+  g_OrderPlan.entry       = entry;                     // Giá đặt limit order
+  g_OrderPlan.stopLoss    = sl;                        // SL đã có buffer
+  g_OrderPlan.takeProfit  = tp;                        // TP theo R:R ratio
+  g_OrderPlan.lot         = lot;                       // Lot size theo risk management
+  g_OrderPlan.parentFVGId = fvgId;                     // Link về FVG gốc
 
   if (InpDebugLog)
-    PrintFormat("[ORDER PLAN] %s | entry=%.5f SL=%.5f TP=%.5f lot=%.2f | R=%.1f%% RR=%.1f | FVG#%d",
+    PrintFormat("[ORDER PLAN] %s | entry=%.5f SL=%.5f TP=%.5f lot=%.2f | FVG#%d",
       (dir == DIR_UP) ? "BUY LIMIT" : "SELL LIMIT",
-      entry, sl, tp, lot, InpRiskPercent, InpRiskReward, fvgId);
+      entry, sl, tp, lot, fvgId);
   return true;
 }
 
@@ -953,89 +768,78 @@ ulong ExecuteLimitOrder()
                          ? ORDER_TYPE_BUY_LIMIT
                          : ORDER_TYPE_SELL_LIMIT;
 
-  string comment = StringFormat("ICT_FVG#%d", g_OrderPlan.parentFVGId);
-
   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
+  // Validate: BUY LIMIT < Ask, SELL LIMIT > Bid
   if (cmd == ORDER_TYPE_BUY_LIMIT && g_OrderPlan.entry >= ask)
   {
-    if (InpDebugLog)
-      PrintFormat("[ORDER] BUY LIMIT rejected: entry %.5f >= ask %.5f → skip",
-        g_OrderPlan.entry, ask);
+    if (InpDebugLog) PrintFormat("[ORDER] BUY LIMIT entry %.5f >= ask %.5f → skip",
+      g_OrderPlan.entry, ask);
     return 0;
   }
   if (cmd == ORDER_TYPE_SELL_LIMIT && g_OrderPlan.entry <= bid)
   {
-    if (InpDebugLog)
-      PrintFormat("[ORDER] SELL LIMIT rejected: entry %.5f <= bid %.5f → skip",
-        g_OrderPlan.entry, bid);
+    if (InpDebugLog) PrintFormat("[ORDER] SELL LIMIT entry %.5f <= bid %.5f → skip",
+      g_OrderPlan.entry, bid);
     return 0;
   }
 
   MqlTradeRequest request;
   MqlTradeResult  result;
-  ZeroMemory(request);
+  ZeroMemory(request);                                 // Init tất cả field = 0
   ZeroMemory(result);
 
-  request.action       = TRADE_ACTION_PENDING;
-  request.symbol       = _Symbol;
-  request.volume       = g_OrderPlan.lot;
-  request.type         = cmd;
-  request.price        = g_OrderPlan.entry;
-  request.sl           = g_OrderPlan.stopLoss;
-  request.tp           = g_OrderPlan.takeProfit;
-  request.deviation    = (ulong)InpSlippage;
-  request.magic        = InpMagicNumber;
-  request.comment      = comment;
-  request.type_filling = ORDER_FILLING_RETURN;
-  request.type_time    = ORDER_TIME_GTC;
+  request.action       = TRADE_ACTION_PENDING;         // Đặt lệnh chờ (không market order)
+  request.symbol       = _Symbol;                      // Symbol hiện tại trên chart
+  request.volume       = g_OrderPlan.lot;              // Lot size đã tính từ risk%
+  request.type         = cmd;                          // BUY_LIMIT hoặc SELL_LIMIT
+  request.price        = g_OrderPlan.entry;            // Giá đặt lệnh = MSS keyLevel
+  request.sl           = g_OrderPlan.stopLoss;         // SL = swing hồi + buffer
+  request.tp           = g_OrderPlan.takeProfit;       // TP = entry ± R:R ratio
+  request.deviation    = (ulong)InpSlippage;           // Slippage tối đa (points)
+  request.magic        = InpMagicNumber;               // Magic number để identify EA's orders
+  request.comment      = StringFormat("ICT#%d", g_OrderPlan.parentFVGId); // Comment link FVG
+  request.type_filling = ORDER_FILLING_RETURN;         // Return unfilled volume (broker-safe)
+  request.type_time    = ORDER_TIME_GTC;               // Good Till Cancel (không hết hạn)
 
   if (!OrderSend(request, result))
   {
-    PrintFormat("[ORDER] ❌ OrderSend failed | retcode=%u | %s %.2f @ %.5f SL=%.5f TP=%.5f",
-      result.retcode,
-      (cmd == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIMIT" : "SELL_LIMIT",
-      g_OrderPlan.lot, g_OrderPlan.entry,
-      g_OrderPlan.stopLoss, g_OrderPlan.takeProfit);
+    PrintFormat("[ORDER] ❌ retcode=%u", result.retcode);
     return 0;
   }
-
   if (result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_PLACED)
   {
-    PrintFormat("[ORDER] ❌ Server rejected | retcode=%u comment=%s",
-      result.retcode, result.comment);
+    PrintFormat("[ORDER] ❌ rejected retcode=%u: %s", result.retcode, result.comment);
     return 0;
   }
 
-  PrintFormat("[ORDER] ✅ %s ticket=%llu | %.2f @ %.5f SL=%.5f TP=%.5f | %s",
-    (cmd == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIMIT" : "SELL_LIMIT",
+  PrintFormat("[ORDER] ✅ %s #%llu | %.2f @ %.5f SL=%.5f TP=%.5f",
+    (cmd == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIM" : "SELL_LIM",
     result.order, g_OrderPlan.lot, g_OrderPlan.entry,
-    g_OrderPlan.stopLoss, g_OrderPlan.takeProfit, comment);
-
+    g_OrderPlan.stopLoss, g_OrderPlan.takeProfit);
   return result.order;
 }
 
 //+------------------------------------------------------------------+
 //|  SECTION 8 – BEST FVG SELECTOR                                   |
-//|  Priority: TOUCHED newest > PENDING newest                       |
 //+------------------------------------------------------------------+
 
 int GetBestActiveFVGIdx()
 {
-  int bestIdx = -1; datetime bestTime = 0; bool foundTouch = false;
+  int bestIdx = -1; datetime bestTime = 0; bool foundTouch = false; // Track best candidate
   for (int i = 0; i < g_FVGCount; i++)
   {
-    if (g_FVGPool[i].status == FVG_USED) continue;
-    if (g_FVGPool[i].status == FVG_TOUCHED)
+    if (g_FVGPool[i].status == FVG_USED) continue;    // Skip FVG đã consumed
+    if (g_FVGPool[i].status == FVG_TOUCHED)            // TOUCHED được ưu tiên hơn PENDING
     {
-      if (!foundTouch || g_FVGPool[i].createdTime > bestTime)
+      if (!foundTouch || g_FVGPool[i].createdTime > bestTime) // Mới nhất trong TOUCHED
         { foundTouch = true; bestIdx = i; bestTime = g_FVGPool[i].createdTime; }
     }
-    else if (!foundTouch && g_FVGPool[i].createdTime > bestTime)
+    else if (!foundTouch && g_FVGPool[i].createdTime > bestTime) // PENDING: chỉ khi chưa có TOUCHED
       { bestIdx = i; bestTime = g_FVGPool[i].createdTime; }
   }
-  return bestIdx;
+  return bestIdx;                                      // -1 nếu không có FVG nào khả dụng
 }
 
 //+------------------------------------------------------------------+
@@ -1060,10 +864,11 @@ void OnStateWaitTouch()
   int ai = g_ActiveFVGIdx;
 
   if (g_FVGPool[ai].status == FVG_USED)
-    { ResetToIdle(StringFormat("FVG #%d used(case%d) before touch", g_FVGPool[ai].id, g_FVGPool[ai].usedCase)); return; }
+    { ResetToIdle(StringFormat("FVG #%d broken/expired", g_FVGPool[ai].id)); return; }
   if (g_FVGPool[ai].status == FVG_TOUCHED)
     { TransitionTo(EA_WAIT_TRIGGER); return; }
 
+  // Kiểm tra FVG mới tốt hơn
   int better = GetBestActiveFVGIdx();
   if (better >= 0 && better != ai)
   {
@@ -1081,24 +886,21 @@ void OnStateWaitTouch()
 
 void OnStateWaitTrigger()
 {
-  if (g_ActiveFVGIdx < 0) { ResetToIdle("trigger timeout / active lost"); return; }
+  if (g_ActiveFVGIdx < 0) { ResetToIdle("active lost"); return; }
   int ai = g_ActiveFVGIdx;
 
   if (g_FVGPool[ai].status == FVG_USED)
   {
-    if (g_FVGPool[ai].usedCase == 2)
+    if (g_FVGPool[ai].usedCase == 2)                   // Case2 = MSS triggered
     {
       if (InpDebugLog)
-        PrintFormat("[ENTRY SIGNAL] FVG #%d %s [%.5f–%.5f]",
+        PrintFormat("[ENTRY SIGNAL] FVG #%d %s [%.5f–%.5f] | MSS entry=%.5f",
           g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
-          g_FVGPool[ai].low, g_FVGPool[ai].high);
+          g_FVGPool[ai].low, g_FVGPool[ai].high,
+          g_TriggerTrend.lastMssLevel);
 
-      bool hasTFVG = ScanTriggerTFFVG(
-        g_FVGPool[ai].touchTime,
-        g_TriggerTrend.lastMssTime,
-        g_FVGPool[ai].direction);
-
-      if (hasTFVG && BuildOrderPlan(g_FVGPool[ai].id, g_FVGPool[ai].direction))
+      // v4: Build order plan dùng MSS data (entry=keyLevel, SL=swing hồi)
+      if (BuildOrderPlan(g_FVGPool[ai].id, g_FVGPool[ai].direction))
       {
         ulong ticket = ExecuteLimitOrder();
         if (ticket > 0)
@@ -1111,10 +913,10 @@ void OnStateWaitTrigger()
           ResetToIdle(StringFormat("FVG #%d order failed", g_FVGPool[ai].id));
       }
       else
-        ResetToIdle(StringFormat("FVG #%d no valid TriggerTF FVG or order plan", g_FVGPool[ai].id));
+        ResetToIdle(StringFormat("FVG #%d invalid plan", g_FVGPool[ai].id));
     }
     else
-      ResetToIdle(StringFormat("FVG #%d used(case%d) during trigger", g_FVGPool[ai].id, g_FVGPool[ai].usedCase));
+      ResetToIdle(StringFormat("FVG #%d case%d", g_FVGPool[ai].id, g_FVGPool[ai].usedCase));
     return;
   }
   if (g_FVGPool[ai].status == FVG_PENDING) { TransitionTo(EA_WAIT_TOUCH); return; }
@@ -1122,35 +924,28 @@ void OnStateWaitTrigger()
 
 void OnStateInTrade()
 {
-  // ── 1. Kiểm tra pending order còn active không ─────────────────
+  // ── 1. Pending order còn active? ───────────────────────────────
   if (g_PendingTicket > 0)
   {
     bool foundPending = false;
     for (int i = OrdersTotal() - 1; i >= 0; i--)
     {
-      ulong ticket = OrderGetTicket(i);
-      if (ticket == g_PendingTicket)
-      {
-        foundPending = true;
-        break;
-      }
+      if (OrderGetTicket(i) == g_PendingTicket) { foundPending = true; break; }
     }
 
     if (!foundPending)
     {
-      // Tìm position tương ứng (limit đã fill)
+      // Kiểm tra đã fill → position
       bool posFound = false;
       for (int i = PositionsTotal() - 1; i >= 0; i--)
       {
-        ulong posTicket = PositionGetTicket(i);
-        if (posTicket == 0) continue;
-        if (PositionGetInteger(POSITION_MAGIC) == InpMagicNumber &&
-            PositionGetString(POSITION_SYMBOL) == _Symbol)
+        ulong pt = PositionGetTicket(i);
+        if (pt > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
+            && PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
           posFound = true;
-          g_PendingTicket = 0;                         // Filled → track position
-          if (InpDebugLog)
-            PrintFormat("[TRADE] Limit filled → position ticket=%llu", posTicket);
+          g_PendingTicket = 0;                         // Filled
+          if (InpDebugLog) PrintFormat("[TRADE] Filled → position #%llu", pt);
           break;
         }
       }
@@ -1159,63 +954,52 @@ void OnStateInTrade()
       {
         HistorySelect(TimeCurrent() - 86400, TimeCurrent());
 
-        // Check: lệnh bị hủy?
-        bool wasCancelled = false;
+        // Cancelled?
+        bool cancelled = false;
         for (int i = HistoryOrdersTotal() - 1; i >= 0; i--)
         {
-          ulong hTicket = HistoryOrderGetTicket(i);
-          if (hTicket == g_PendingTicket)
+          ulong ht = HistoryOrderGetTicket(i);
+          if (ht == g_PendingTicket)
           {
-            long state = HistoryOrderGetInteger(hTicket, ORDER_STATE);
-            if (state == ORDER_STATE_CANCELED || state == ORDER_STATE_EXPIRED ||
-                state == ORDER_STATE_REJECTED)
-              wasCancelled = true;
+            long st = HistoryOrderGetInteger(ht, ORDER_STATE);
+            if (st == ORDER_STATE_CANCELED || st == ORDER_STATE_EXPIRED || st == ORDER_STATE_REJECTED)
+              cancelled = true;
             break;
           }
         }
-        if (wasCancelled) { ResetToIdle("pending order cancelled/expired"); return; }
+        if (cancelled) { ResetToIdle("order cancelled"); return; }
 
-        // Check: position đã đóng?
-        bool dealFound = false;
+        // Position closed?
+        bool closed = false;
         for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
         {
-          ulong dTicket = HistoryDealGetTicket(i);
-          if (HistoryDealGetInteger(dTicket, DEAL_MAGIC) == InpMagicNumber &&
-              HistoryDealGetString(dTicket, DEAL_SYMBOL) == _Symbol &&
-              HistoryDealGetInteger(dTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+          ulong dt = HistoryDealGetTicket(i);
+          if (HistoryDealGetInteger(dt, DEAL_MAGIC) == InpMagicNumber
+              && HistoryDealGetString(dt, DEAL_SYMBOL) == _Symbol
+              && HistoryDealGetInteger(dt, DEAL_ENTRY) == DEAL_ENTRY_OUT)
           {
-            double profit = HistoryDealGetDouble(dTicket, DEAL_PROFIT);
-            if (InpDebugLog)
-              PrintFormat("[TRADE] Position closed | deal=%llu profit=%.2f", dTicket, profit);
-            dealFound = true;
-            break;
+            double profit = HistoryDealGetDouble(dt, DEAL_PROFIT);
+            if (InpDebugLog) PrintFormat("[TRADE] Closed | profit=%.2f", profit);
+            closed = true; break;
           }
         }
-
-        if (dealFound) ResetToIdle("trade closed");
-        else           ResetToIdle("pending order lost");
+        ResetToIdle(closed ? "trade closed" : "order lost");
         return;
       }
     }
-    return;                                            // Pending still alive → wait
+    return;                                            // Pending alive → wait
   }
 
-  // ── 2. Track open position (pending đã fill) ────────────────────
-  bool hasPosition = false;
+  // ── 2. Track position ──────────────────────────────────────────
+  bool hasPos = false;
   for (int i = PositionsTotal() - 1; i >= 0; i--)
   {
-    ulong posTicket = PositionGetTicket(i);
-    if (posTicket == 0) continue;
-    if (PositionGetInteger(POSITION_MAGIC) == InpMagicNumber &&
-        PositionGetString(POSITION_SYMBOL) == _Symbol)
-    {
-      hasPosition = true;
-      break;
-    }
+    ulong pt = PositionGetTicket(i);
+    if (pt > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
+        && PositionGetString(POSITION_SYMBOL) == _Symbol)
+    { hasPos = true; break; }
   }
-
-  if (!hasPosition)
-    ResetToIdle("trade closed – no position");
+  if (!hasPos) ResetToIdle("position closed");
 }
 
 //+------------------------------------------------------------------+
@@ -1224,14 +1008,14 @@ void OnStateInTrade()
 
 void RunStateMachine()
 {
-  UpdateFVGStatuses();
-  ScanAndRegisterFVGs();
-  switch (g_State)
+  UpdateFVGStatuses();                                 // Cập nhật trạng thái FVG pool (mỗi tick)
+  ScanAndRegisterFVGs();                               // Scan H1 bars cho FVG mới (mỗi bar H1)
+  switch (g_State)                                     // Dispatch theo state hiện tại
   {
-    case EA_IDLE:         OnStateIdle();        break;
-    case EA_WAIT_TOUCH:   OnStateWaitTouch();   break;
-    case EA_WAIT_TRIGGER: OnStateWaitTrigger(); break;
-    case EA_IN_TRADE:     OnStateInTrade();     break;
+    case EA_IDLE:         OnStateIdle();        break;  // Tìm FVG tốt nhất → WAIT_TOUCH/TRIGGER
+    case EA_WAIT_TOUCH:   OnStateWaitTouch();   break;  // Chờ giá retrace vào FVG
+    case EA_WAIT_TRIGGER: OnStateWaitTrigger(); break;  // Chờ M5 MSS → đặt limit order
+    case EA_IN_TRADE:     OnStateInTrade();     break;  // Track pending/position → close
   }
 }
 
@@ -1239,9 +1023,6 @@ void RunStateMachine()
 //|  SECTION 11 – DRAWING                                            |
 //+------------------------------------------------------------------+
 
-//----------------------------------------------------------------------
-// DrawOneSwingPoint – generic swing-point drawer
-//----------------------------------------------------------------------
 void DrawOneSwingPoint(
   string prefix, ENUM_TIMEFRAMES tf,
   string tag, bool isHigh, int barIdx, double price,
@@ -1313,22 +1094,14 @@ void DrawTriggerSwingPoints()
 }
 
 //----------------------------------------------------------------------
-// DrawMSSMarker – v3: Vẽ MSS kèm sweep marker
-//
-// Khi MSS hợp lệ trên TriggerTF, vẽ CẢ HAI:
-//   1. Sweep: ◆ diamond tại wick extreme + đường ngang tại swept level
-//   2. Break: ▲/▼ arrow tại close MSS + đường ngang tại broken key level
-//
-// Cả 2 tạo thành 1 pattern hoàn chỉnh trên chart.
+// DrawMSSMarker – MSS arrow + label + keyLevel line
 //----------------------------------------------------------------------
 void DrawMSSMarker(
   string mssId, ENUM_TIMEFRAMES tf,
-  datetime mssTime, double mssLevel, MarketDir mssBreak,
-  datetime sweepTime, double sweepLevel, double sweepWick)
+  datetime mssTime, double mssLevel, MarketDir mssBreak)
 {
   if (!InpDebugDraw || mssTime == 0) return;
 
-  // ── MSS break: arrow + label + key level line ─────────────────
   string arrN = MSS_PREFIX + mssId + "_ARR";
   string lblN = MSS_PREFIX + mssId + "_LBL";
   string klN  = MSS_PREFIX + mssId + "_KL";
@@ -1336,11 +1109,11 @@ void DrawMSSMarker(
   bool   isBull = (mssBreak == DIR_UP);
   color  clr    = isBull ? clrLime : clrTomato;
 
-  int    shift     = MyBarShift(_Symbol, tf, mssTime);
+  int shift = MyBarShift(_Symbol, tf, mssTime);
   if (shift < 0) return;
   double closeAtMss = iClose(_Symbol, tf, shift);
 
-  // Arrow tại close price cây nến MSS
+  // Arrow tại close cây nến MSS
   if (ObjectFind(0, arrN) < 0)
     ObjectCreate(0, arrN, OBJ_ARROW, 0, mssTime, closeAtMss);
   ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isBull ? 233 : 234);
@@ -1360,7 +1133,7 @@ void DrawMSSMarker(
   ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
   ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,  isBull ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
 
-  // Dotted line tại broken key level
+  // Dotted line tại broken keyLevel
   datetime tEnd = iTime(_Symbol, tf, 0);
   if (ObjectFind(0, klN) < 0)
     ObjectCreate(0, klN, OBJ_TREND, 0, mssTime, mssLevel, tEnd, mssLevel);
@@ -1370,92 +1143,25 @@ void DrawMSSMarker(
   ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
   ObjectMove(0, klN, 0, mssTime, mssLevel);
   ObjectMove(0, klN, 1, tEnd,    mssLevel);
-
-  // ── v3: Sweep marker (chỉ vẽ nếu sweep data hợp lệ) ──────────
-  if (sweepTime > 0 && sweepLevel > 0)
-  {
-    string swpArrN = MSS_PREFIX + mssId + "_SWP_ARR";   // ◆ diamond tại wick
-    string swpLblN = MSS_PREFIX + mssId + "_SWP_LBL";   // Label "SWEEP"
-    string swpLvlN = MSS_PREFIX + mssId + "_SWP_LVL";   // Đường ngang tại swept level
-    string swpWkN  = MSS_PREFIX + mssId + "_SWP_WK";    // Vertical wick line
-
-    color swpClr = isBull ? C'0,210,230' : C'230,80,210';  // Cyan / Magenta
-
-    // ◆ Diamond tại wick extreme
-    if (ObjectFind(0, swpArrN) < 0)
-      ObjectCreate(0, swpArrN, OBJ_ARROW, 0, sweepTime, sweepWick);
-    ObjectSetInteger(0, swpArrN, OBJPROP_ARROWCODE, 4);    // 4 = diamond
-    ObjectSetInteger(0, swpArrN, OBJPROP_COLOR,     swpClr);
-    ObjectSetInteger(0, swpArrN, OBJPROP_WIDTH,     2);
-    ObjectMove(0, swpArrN, 0, sweepTime, sweepWick);
-
-    // Label "SWEEP"
-    int swShift = MyBarShift(_Symbol, tf, sweepTime);
-    double swRng = (swShift >= 0) ? iHigh(_Symbol, tf, swShift) - iLow(_Symbol, tf, swShift) : 10 * _Point;
-    double swLblY = isBull ? sweepWick - swRng * 0.7 : sweepWick + swRng * 0.7;
-    if (ObjectFind(0, swpLblN) < 0)
-      ObjectCreate(0, swpLblN, OBJ_TEXT, 0, sweepTime, swLblY);
-    ObjectMove(0, swpLblN, 0, sweepTime, swLblY);
-    ObjectSetString (0, swpLblN, OBJPROP_TEXT,    "SWEEP");
-    ObjectSetInteger(0, swpLblN, OBJPROP_COLOR,   swpClr);
-    ObjectSetInteger(0, swpLblN, OBJPROP_FONTSIZE, 7);
-    ObjectSetInteger(0, swpLblN, OBJPROP_ANCHOR,  isBull ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
-
-    // Đường ngang đứt tại swept swing level (từ sweep đến MSS)
-    if (ObjectFind(0, swpLvlN) < 0)
-      ObjectCreate(0, swpLvlN, OBJ_TREND, 0, sweepTime, sweepLevel, mssTime, sweepLevel);
-    ObjectSetInteger(0, swpLvlN, OBJPROP_COLOR,     swpClr);
-    ObjectSetInteger(0, swpLvlN, OBJPROP_STYLE,     STYLE_DASHDOTDOT);
-    ObjectSetInteger(0, swpLvlN, OBJPROP_WIDTH,     1);
-    ObjectSetInteger(0, swpLvlN, OBJPROP_RAY_RIGHT, false);
-    ObjectMove(0, swpLvlN, 0, sweepTime, sweepLevel);
-    ObjectMove(0, swpLvlN, 1, mssTime, sweepLevel);
-
-    // Vertical wick line: swept level → wick extreme
-    if (ObjectFind(0, swpWkN) < 0)
-      ObjectCreate(0, swpWkN, OBJ_TREND, 0, sweepTime, sweepLevel, sweepTime, sweepWick);
-    ObjectSetInteger(0, swpWkN, OBJPROP_COLOR, swpClr);
-    ObjectSetInteger(0, swpWkN, OBJPROP_STYLE, STYLE_SOLID);
-    ObjectSetInteger(0, swpWkN, OBJPROP_WIDTH, 2);
-    ObjectMove(0, swpWkN, 0, sweepTime, sweepLevel);
-    ObjectMove(0, swpWkN, 1, sweepTime, sweepWick);
-  }
 }
 
 void DrawMSSMarkers()
 {
   if (!InpDebugDraw) return;
-
-  // MiddleTF MSS – vẽ KHÔNG kèm sweep (MiddleTF không cần sweep)
   if (g_MiddleTrend.lastMssTime > 0)
   {
     string mid = "M_" + IntegerToString((long)g_MiddleTrend.lastMssTime);
-    DrawMSSMarker(mid, InpMiddleTF,
-      g_MiddleTrend.lastMssTime, g_MiddleTrend.lastMssLevel, g_MiddleTrend.lastMssBreak,
-      0, 0, 0);                                        // Không có sweep data
+    DrawMSSMarker(mid, InpMiddleTF, g_MiddleTrend.lastMssTime, g_MiddleTrend.lastMssLevel, g_MiddleTrend.lastMssBreak);
   }
-
-  // TriggerTF MSS – vẽ KÈM sweep (đã validate trong UpdateTFTrendContext)
   if (g_TriggerTrend.lastMssTime > 0)
   {
     string tid = "T_" + IntegerToString((long)g_TriggerTrend.lastMssTime);
-    DrawMSSMarker(tid, InpTriggerTF,
-      g_TriggerTrend.lastMssTime, g_TriggerTrend.lastMssLevel, g_TriggerTrend.lastMssBreak,
-      g_TriggerTrend.mssSweepTime,                     // Sweep time đi kèm MSS
-      g_TriggerTrend.mssSweepLevel,                    // Swept swing level
-      g_TriggerTrend.mssSweepWick);                    // Wick extreme
+    DrawMSSMarker(tid, InpTriggerTF, g_TriggerTrend.lastMssTime, g_TriggerTrend.lastMssLevel, g_TriggerTrend.lastMssBreak);
   }
 }
 
 //----------------------------------------------------------------------
-// v3: DrawOrderVisualization – TradingView-style Entry/SL/TP
-//
-// Layout:
-//  ┌───────────────────────────┐  ◎ TP 1.23568  +112p  (2.0R)
-//  │    TP zone (dark green)   │
-//  ├───────────────────────────┤  ▶ BUY LIM 1.23456  |  0.05 lot
-//  │    SL zone (dark red)     │
-//  └───────────────────────────┘  ✕ SL 1.23400  -56p
+// DrawOrderVisualization – TradingView-style Entry/SL/TP
 //----------------------------------------------------------------------
 void DrawOrderVisualization()
 {
@@ -1471,7 +1177,6 @@ void DrawOrderVisualization()
   string tpLblN   = ORD_PREFIX + "TP_LBL";
   string infoLblN = ORD_PREFIX + "INFO_LBL";
 
-  // Nếu không có order plan → xóa tất cả ORD_ objects
   if (!g_OrderPlan.valid || g_State == EA_IDLE)
   {
     ObjectDelete(0, tpZoneN);  ObjectDelete(0, slZoneN);
@@ -1485,181 +1190,78 @@ void DrawOrderVisualization()
   double entry = g_OrderPlan.entry;
   double sl    = g_OrderPlan.stopLoss;
   double tp    = g_OrderPlan.takeProfit;
-  double lot   = g_OrderPlan.lot;
 
-  // Time range cho rectangles
-  datetime tStart = (g_TrigFVG.valid) ? g_TrigFVG.createdTime : iTime(_Symbol, InpTriggerTF, 20);
+  datetime tStart = (g_TriggerTrend.lastMssTime > 0) ? g_TriggerTrend.lastMssTime : iTime(_Symbol, InpTriggerTF, 20);
   datetime tEnd   = iTime(_Symbol, InpTriggerTF, 0) + PeriodSeconds(InpTriggerTF) * 25;
 
-  // Tính pips & R:R
   double slPips = MathAbs(entry - sl) / _Point;
   double tpPips = MathAbs(tp - entry) / _Point;
   double rr     = (slPips > 0) ? tpPips / slPips : 0;
 
-  // Colors
-  color entryClr = isBuy ? C'33,150,243'  : C'255,152,0'; // Blue / Orange
-  color tpFill   = C'15,65,35';                            // Dark green fill
-  color slFill   = C'85,15,15';                            // Dark red fill
-  color tpLine   = C'38,166,91';                            // Green line
-  color slLine   = C'229,57,53';                            // Red line
+  color entryClr = isBuy ? C'33,150,243' : C'255,152,0';
+  color tpFill   = C'15,65,35';
+  color slFill   = C'85,15,15';
+  color tpClr    = C'38,166,91';
+  color slClr    = C'229,57,53';
 
-  // ── TP Zone rectangle ──────────────────────────────────────────
-  double tpTop = (isBuy) ? tp : entry;
-  double tpBot = (isBuy) ? entry : tp;
-  if (ObjectFind(0, tpZoneN) < 0)
-    ObjectCreate(0, tpZoneN, OBJ_RECTANGLE, 0, tStart, tpTop, tEnd, tpBot);
-  ObjectSetInteger(0, tpZoneN, OBJPROP_COLOR, tpFill);
-  ObjectSetInteger(0, tpZoneN, OBJPROP_FILL,  true);
-  ObjectSetInteger(0, tpZoneN, OBJPROP_BACK,  true);
-  ObjectMove(0, tpZoneN, 0, tStart, tpTop);
-  ObjectMove(0, tpZoneN, 1, tEnd, tpBot);
+  // TP zone
+  double tpTop = isBuy ? tp : entry, tpBot = isBuy ? entry : tp;
+  if (ObjectFind(0, tpZoneN) < 0) ObjectCreate(0, tpZoneN, OBJ_RECTANGLE, 0, tStart, tpTop, tEnd, tpBot);
+  ObjectSetInteger(0, tpZoneN, OBJPROP_COLOR, tpFill); ObjectSetInteger(0, tpZoneN, OBJPROP_FILL, true);
+  ObjectSetInteger(0, tpZoneN, OBJPROP_BACK, true);
+  ObjectMove(0, tpZoneN, 0, tStart, tpTop); ObjectMove(0, tpZoneN, 1, tEnd, tpBot);
 
-  // ── SL Zone rectangle ──────────────────────────────────────────
-  double slTop = (isBuy) ? entry : sl;
-  double slBot = (isBuy) ? sl : entry;
-  if (ObjectFind(0, slZoneN) < 0)
-    ObjectCreate(0, slZoneN, OBJ_RECTANGLE, 0, tStart, slTop, tEnd, slBot);
-  ObjectSetInteger(0, slZoneN, OBJPROP_COLOR, slFill);
-  ObjectSetInteger(0, slZoneN, OBJPROP_FILL,  true);
-  ObjectSetInteger(0, slZoneN, OBJPROP_BACK,  true);
-  ObjectMove(0, slZoneN, 0, tStart, slTop);
-  ObjectMove(0, slZoneN, 1, tEnd, slBot);
+  // SL zone
+  double slTop = isBuy ? entry : sl, slBot = isBuy ? sl : entry;
+  if (ObjectFind(0, slZoneN) < 0) ObjectCreate(0, slZoneN, OBJ_RECTANGLE, 0, tStart, slTop, tEnd, slBot);
+  ObjectSetInteger(0, slZoneN, OBJPROP_COLOR, slFill); ObjectSetInteger(0, slZoneN, OBJPROP_FILL, true);
+  ObjectSetInteger(0, slZoneN, OBJPROP_BACK, true);
+  ObjectMove(0, slZoneN, 0, tStart, slTop); ObjectMove(0, slZoneN, 1, tEnd, slBot);
 
-  // ── Entry line (solid 2px, ray right) ──────────────────────────
-  if (ObjectFind(0, entLineN) < 0)
-    ObjectCreate(0, entLineN, OBJ_TREND, 0, tStart, entry, tEnd, entry);
-  ObjectSetInteger(0, entLineN, OBJPROP_COLOR,     entryClr);
-  ObjectSetInteger(0, entLineN, OBJPROP_STYLE,     STYLE_SOLID);
-  ObjectSetInteger(0, entLineN, OBJPROP_WIDTH,     2);
-  ObjectSetInteger(0, entLineN, OBJPROP_RAY_RIGHT, true);
-  ObjectMove(0, entLineN, 0, tStart, entry);
-  ObjectMove(0, entLineN, 1, tEnd, entry);
+  // Entry line
+  if (ObjectFind(0, entLineN) < 0) ObjectCreate(0, entLineN, OBJ_TREND, 0, tStart, entry, tEnd, entry);
+  ObjectSetInteger(0, entLineN, OBJPROP_COLOR, entryClr); ObjectSetInteger(0, entLineN, OBJPROP_STYLE, STYLE_SOLID);
+  ObjectSetInteger(0, entLineN, OBJPROP_WIDTH, 2); ObjectSetInteger(0, entLineN, OBJPROP_RAY_RIGHT, true);
+  ObjectMove(0, entLineN, 0, tStart, entry); ObjectMove(0, entLineN, 1, tEnd, entry);
 
-  // ── TP line (dashed, ray right) ────────────────────────────────
-  if (ObjectFind(0, tpLineN) < 0)
-    ObjectCreate(0, tpLineN, OBJ_TREND, 0, tStart, tp, tEnd, tp);
-  ObjectSetInteger(0, tpLineN, OBJPROP_COLOR,     tpLine);
-  ObjectSetInteger(0, tpLineN, OBJPROP_STYLE,     STYLE_DASH);
-  ObjectSetInteger(0, tpLineN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, tpLineN, OBJPROP_RAY_RIGHT, true);
-  ObjectMove(0, tpLineN, 0, tStart, tp);
-  ObjectMove(0, tpLineN, 1, tEnd, tp);
+  // TP line
+  if (ObjectFind(0, tpLineN) < 0) ObjectCreate(0, tpLineN, OBJ_TREND, 0, tStart, tp, tEnd, tp);
+  ObjectSetInteger(0, tpLineN, OBJPROP_COLOR, tpClr); ObjectSetInteger(0, tpLineN, OBJPROP_STYLE, STYLE_DASH);
+  ObjectSetInteger(0, tpLineN, OBJPROP_WIDTH, 1); ObjectSetInteger(0, tpLineN, OBJPROP_RAY_RIGHT, true);
+  ObjectMove(0, tpLineN, 0, tStart, tp); ObjectMove(0, tpLineN, 1, tEnd, tp);
 
-  // ── SL line (dashed, ray right) ────────────────────────────────
-  if (ObjectFind(0, slLineN) < 0)
-    ObjectCreate(0, slLineN, OBJ_TREND, 0, tStart, sl, tEnd, sl);
-  ObjectSetInteger(0, slLineN, OBJPROP_COLOR,     slLine);
-  ObjectSetInteger(0, slLineN, OBJPROP_STYLE,     STYLE_DASH);
-  ObjectSetInteger(0, slLineN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, slLineN, OBJPROP_RAY_RIGHT, true);
-  ObjectMove(0, slLineN, 0, tStart, sl);
-  ObjectMove(0, slLineN, 1, tEnd, sl);
+  // SL line
+  if (ObjectFind(0, slLineN) < 0) ObjectCreate(0, slLineN, OBJ_TREND, 0, tStart, sl, tEnd, sl);
+  ObjectSetInteger(0, slLineN, OBJPROP_COLOR, slClr); ObjectSetInteger(0, slLineN, OBJPROP_STYLE, STYLE_DASH);
+  ObjectSetInteger(0, slLineN, OBJPROP_WIDTH, 1); ObjectSetInteger(0, slLineN, OBJPROP_RAY_RIGHT, true);
+  ObjectMove(0, slLineN, 0, tStart, sl); ObjectMove(0, slLineN, 1, tEnd, sl);
 
-  // ── Entry label ────────────────────────────────────────────────
-  datetime lblTime = tEnd;
-  string entTxt = StringFormat("%s %s  |  %.2f lot",
-    isBuy ? "▶ BUY LIM" : "▶ SELL LIM",
-    DoubleToString(entry, _Digits), lot);
-  if (ObjectFind(0, entLblN) < 0)
-    ObjectCreate(0, entLblN, OBJ_TEXT, 0, lblTime, entry);
-  ObjectMove(0, entLblN, 0, lblTime, entry);
-  ObjectSetString (0, entLblN, OBJPROP_TEXT,     entTxt);
-  ObjectSetInteger(0, entLblN, OBJPROP_COLOR,    entryClr);
-  ObjectSetInteger(0, entLblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, entLblN, OBJPROP_ANCHOR,   ANCHOR_LEFT);
+  // Labels
+  datetime lblT = tEnd;
 
-  // ── TP label ───────────────────────────────────────────────────
-  string tpTxt = StringFormat("◎ TP %s  +%.0fp  (%.1fR)",
-    DoubleToString(tp, _Digits), tpPips, rr);
-  if (ObjectFind(0, tpLblN) < 0)
-    ObjectCreate(0, tpLblN, OBJ_TEXT, 0, lblTime, tp);
-  ObjectMove(0, tpLblN, 0, lblTime, tp);
-  ObjectSetString (0, tpLblN, OBJPROP_TEXT,     tpTxt);
-  ObjectSetInteger(0, tpLblN, OBJPROP_COLOR,    tpLine);
-  ObjectSetInteger(0, tpLblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, tpLblN, OBJPROP_ANCHOR,   isBuy ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+  string eTxt = StringFormat("%s %s | %.2f lot", isBuy?"▶ BUY LIM":"▶ SELL LIM", DoubleToString(entry,_Digits), g_OrderPlan.lot);
+  if (ObjectFind(0, entLblN) < 0) ObjectCreate(0, entLblN, OBJ_TEXT, 0, lblT, entry);
+  ObjectMove(0, entLblN, 0, lblT, entry); ObjectSetString(0, entLblN, OBJPROP_TEXT, eTxt);
+  ObjectSetInteger(0, entLblN, OBJPROP_COLOR, entryClr); ObjectSetInteger(0, entLblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, entLblN, OBJPROP_ANCHOR, ANCHOR_LEFT);
 
-  // ── SL label ───────────────────────────────────────────────────
-  string slTxt = StringFormat("✕ SL %s  -%.0fp",
-    DoubleToString(sl, _Digits), slPips);
-  if (ObjectFind(0, slLblN) < 0)
-    ObjectCreate(0, slLblN, OBJ_TEXT, 0, lblTime, sl);
-  ObjectMove(0, slLblN, 0, lblTime, sl);
-  ObjectSetString (0, slLblN, OBJPROP_TEXT,     slTxt);
-  ObjectSetInteger(0, slLblN, OBJPROP_COLOR,    slLine);
-  ObjectSetInteger(0, slLblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, slLblN, OBJPROP_ANCHOR,   isBuy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+  string tTxt = StringFormat("◎ TP %s +%.0fp (%.1fR)", DoubleToString(tp,_Digits), tpPips, rr);
+  if (ObjectFind(0, tpLblN) < 0) ObjectCreate(0, tpLblN, OBJ_TEXT, 0, lblT, tp);
+  ObjectMove(0, tpLblN, 0, lblT, tp); ObjectSetString(0, tpLblN, OBJPROP_TEXT, tTxt);
+  ObjectSetInteger(0, tpLblN, OBJPROP_COLOR, tpClr); ObjectSetInteger(0, tpLblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, tpLblN, OBJPROP_ANCHOR, isBuy?ANCHOR_LEFT_LOWER:ANCHOR_LEFT_UPPER);
 
-  // ── Risk info label (giữa entry và SL) ─────────────────────────
-  double infoY = (entry + sl) / 2.0;
-  string infoTxt = StringFormat("Risk %.1f%% | SL %.0fp | TP %.0fp | %.1fR",
-    InpRiskPercent, slPips, tpPips, rr);
-  if (ObjectFind(0, infoLblN) < 0)
-    ObjectCreate(0, infoLblN, OBJ_TEXT, 0, lblTime, infoY);
-  ObjectMove(0, infoLblN, 0, lblTime, infoY);
-  ObjectSetString (0, infoLblN, OBJPROP_TEXT,     infoTxt);
-  ObjectSetInteger(0, infoLblN, OBJPROP_COLOR,    C'160,160,160');
-  ObjectSetInteger(0, infoLblN, OBJPROP_FONTSIZE, 7);
-  ObjectSetInteger(0, infoLblN, OBJPROP_ANCHOR,   ANCHOR_LEFT);
-}
+  string sTxt = StringFormat("✕ SL %s -%.0fp", DoubleToString(sl,_Digits), slPips);
+  if (ObjectFind(0, slLblN) < 0) ObjectCreate(0, slLblN, OBJ_TEXT, 0, lblT, sl);
+  ObjectMove(0, slLblN, 0, lblT, sl); ObjectSetString(0, slLblN, OBJPROP_TEXT, sTxt);
+  ObjectSetInteger(0, slLblN, OBJPROP_COLOR, slClr); ObjectSetInteger(0, slLblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, slLblN, OBJPROP_ANCHOR, isBuy?ANCHOR_LEFT_UPPER:ANCHOR_LEFT_LOWER);
 
-//----------------------------------------------------------------------
-// DrawTriggerFVG – TriggerTF FVG rectangle + midline + label
-//----------------------------------------------------------------------
-void DrawTriggerFVG()
-{
-  if (!InpDebugDraw) return;
-  if (!g_TrigFVG.valid) return;
-
-  string rectN = TFVG_PREFIX + "RECT";
-  string midN  = TFVG_PREFIX + "MID";
-  string lblN  = TFVG_PREFIX + "LBL";
-  string entN  = TFVG_PREFIX + "ENTRY";
-
-  datetime tStart = g_TrigFVG.createdTime;
-  datetime tEnd   = iTime(_Symbol, InpTriggerTF, 0);
-  if (tEnd <= tStart) tEnd = tStart + PeriodSeconds(InpTriggerTF) * 10;
-
-  color fillColor = (g_TrigFVG.direction == DIR_UP) ? C'0,180,100' : C'200,50,80';
-
-  if (ObjectFind(0, rectN) < 0)
-    ObjectCreate(0, rectN, OBJ_RECTANGLE, 0, tStart, g_TrigFVG.high, tEnd, g_TrigFVG.low);
-  ObjectSetInteger(0, rectN, OBJPROP_COLOR, fillColor);
-  ObjectSetInteger(0, rectN, OBJPROP_FILL,  true);
-  ObjectSetInteger(0, rectN, OBJPROP_BACK,  true);
-  ObjectSetInteger(0, rectN, OBJPROP_WIDTH, 1);
-  ObjectMove(0, rectN, 0, tStart, g_TrigFVG.high);
-  ObjectMove(0, rectN, 1, tEnd,   g_TrigFVG.low);
-
-  if (ObjectFind(0, midN) < 0)
-    ObjectCreate(0, midN, OBJ_TREND, 0, tStart, g_TrigFVG.mid, tEnd, g_TrigFVG.mid);
-  ObjectSetInteger(0, midN, OBJPROP_COLOR,     clrWhite);
-  ObjectSetInteger(0, midN, OBJPROP_STYLE,     STYLE_DASHDOT);
-  ObjectSetInteger(0, midN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, midN, OBJPROP_RAY_RIGHT, false);
-  ObjectMove(0, midN, 0, tStart, g_TrigFVG.mid);
-  ObjectMove(0, midN, 1, tEnd,   g_TrigFVG.mid);
-
-  if (ObjectFind(0, lblN) < 0)
-    ObjectCreate(0, lblN, OBJ_TEXT, 0, tStart, g_TrigFVG.high);
-  ObjectMove(0, lblN, 0, tStart, g_TrigFVG.high);
-  string sym = (g_TrigFVG.direction == DIR_UP) ? "▲" : "▼";
-  ObjectSetString (0, lblN, OBJPROP_TEXT, StringFormat("tFVG %s [%.5f]", sym, g_TrigFVG.mid));
-  ObjectSetInteger(0, lblN, OBJPROP_COLOR,    fillColor);
-  ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 7);
-  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,   ANCHOR_LEFT_LOWER);
-
-  if (g_OrderPlan.valid)
-  {
-    if (ObjectFind(0, entN) < 0)
-      ObjectCreate(0, entN, OBJ_TREND, 0, tStart, g_OrderPlan.entry, tEnd, g_OrderPlan.entry);
-    ObjectSetInteger(0, entN, OBJPROP_COLOR,     clrGold);
-    ObjectSetInteger(0, entN, OBJPROP_STYLE,     STYLE_SOLID);
-    ObjectSetInteger(0, entN, OBJPROP_WIDTH,     2);
-    ObjectSetInteger(0, entN, OBJPROP_RAY_RIGHT, true);
-    ObjectMove(0, entN, 0, tStart, g_OrderPlan.entry);
-    ObjectMove(0, entN, 1, tEnd,   g_OrderPlan.entry);
-  }
+  string iTxt = StringFormat("Risk %.1f%% | %.0f:%.0f pips | %.1fR", InpRiskPercent, slPips, tpPips, rr);
+  if (ObjectFind(0, infoLblN) < 0) ObjectCreate(0, infoLblN, OBJ_TEXT, 0, lblT, (entry+sl)/2.0);
+  ObjectMove(0, infoLblN, 0, lblT, (entry+sl)/2.0); ObjectSetString(0, infoLblN, OBJPROP_TEXT, iTxt);
+  ObjectSetInteger(0, infoLblN, OBJPROP_COLOR, C'160,160,160'); ObjectSetInteger(0, infoLblN, OBJPROP_FONTSIZE, 7);
+  ObjectSetInteger(0, infoLblN, OBJPROP_ANCHOR, ANCHOR_LEFT);
 }
 
 //----------------------------------------------------------------------
@@ -1697,41 +1299,33 @@ void DrawOneFVGRecord(int idx)
   else                                             fillColor = C'50,50,50';
 
   if (ObjectFind(0, rectN) < 0)
-    ObjectCreate(0, rectN, OBJ_RECTANGLE, 0,
-      g_FVGPool[idx].createdTime, g_FVGPool[idx].high, rectEnd, g_FVGPool[idx].low);
-  ObjectSetInteger(0, rectN, OBJPROP_COLOR, fillColor);
-  ObjectSetInteger(0, rectN, OBJPROP_FILL,  true);
-  ObjectSetInteger(0, rectN, OBJPROP_BACK,  true);
-  ObjectSetInteger(0, rectN, OBJPROP_WIDTH, 1);
+    ObjectCreate(0, rectN, OBJ_RECTANGLE, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high, rectEnd, g_FVGPool[idx].low);
+  ObjectSetInteger(0, rectN, OBJPROP_COLOR, fillColor); ObjectSetInteger(0, rectN, OBJPROP_FILL, true);
+  ObjectSetInteger(0, rectN, OBJPROP_BACK, true);
   ObjectMove(0, rectN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
-  ObjectMove(0, rectN, 1, rectEnd,                    g_FVGPool[idx].low);
+  ObjectMove(0, rectN, 1, rectEnd, g_FVGPool[idx].low);
 
   color midColor = (g_FVGPool[idx].status == FVG_USED) ? C'60,60,60' : clrSilver;
   if (ObjectFind(0, midN) < 0)
-    ObjectCreate(0, midN, OBJ_TREND, 0,
-      g_FVGPool[idx].createdTime, g_FVGPool[idx].mid, rectEnd, g_FVGPool[idx].mid);
-  ObjectSetInteger(0, midN, OBJPROP_COLOR,     midColor);
-  ObjectSetInteger(0, midN, OBJPROP_STYLE,     STYLE_DOT);
-  ObjectSetInteger(0, midN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, midN, OBJPROP_RAY_RIGHT, false);
+    ObjectCreate(0, midN, OBJ_TREND, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].mid, rectEnd, g_FVGPool[idx].mid);
+  ObjectSetInteger(0, midN, OBJPROP_COLOR, midColor); ObjectSetInteger(0, midN, OBJPROP_STYLE, STYLE_DOT);
+  ObjectSetInteger(0, midN, OBJPROP_WIDTH, 1); ObjectSetInteger(0, midN, OBJPROP_RAY_RIGHT, false);
   ObjectMove(0, midN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].mid);
-  ObjectMove(0, midN, 1, rectEnd,                    g_FVGPool[idx].mid);
+  ObjectMove(0, midN, 1, rectEnd, g_FVGPool[idx].mid);
 
-  string sym   = (g_FVGPool[idx].direction == DIR_UP) ? "▲" : "▼";
+  string sym = (g_FVGPool[idx].direction == DIR_UP) ? "▲" : "▼";
   string stTxt = "";
-  if      (g_FVGPool[idx].status == FVG_TOUCHED)  stTxt = " [TOUCHED]";
-  else if (g_FVGPool[idx].usedCase == 2)           stTxt = " [TRIGGERED]";
-  else if (g_FVGPool[idx].usedCase == 1)           stTxt = " [BROKEN]";
-  else if (g_FVGPool[idx].status == FVG_USED)      stTxt = " [EXPIRED]";
+  if      (g_FVGPool[idx].status == FVG_TOUCHED)  stTxt = " [T]";
+  else if (g_FVGPool[idx].usedCase == 2)           stTxt = " [TRIG]";
+  else if (g_FVGPool[idx].usedCase == 1)           stTxt = " [BRK]";
+  else if (g_FVGPool[idx].status == FVG_USED)      stTxt = " [EXP]";
 
   if (ObjectFind(0, lblN) < 0)
     ObjectCreate(0, lblN, OBJ_TEXT, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
   ObjectMove(0, lblN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
-  ObjectSetString (0, lblN, OBJPROP_TEXT,
-    StringFormat("FVG#%d %s%s", g_FVGPool[idx].id, sym, stTxt));
-  ObjectSetInteger(0, lblN, OBJPROP_COLOR,    fillColor);
-  ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,   ANCHOR_LEFT_LOWER);
+  ObjectSetString(0, lblN, OBJPROP_TEXT, StringFormat("FVG#%d %s%s", g_FVGPool[idx].id, sym, stTxt));
+  ObjectSetInteger(0, lblN, OBJPROP_COLOR, fillColor); ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
 }
 
 void DrawFVGPool()
@@ -1756,110 +1350,60 @@ void DrawContextDebug()
     ObjectSetInteger(0,name,OBJPROP_COLOR,     clr);                    \
     ObjectSetString (0,name,OBJPROP_TEXT,      txt);
 
-  LBL("DBG_HDR",  "── ICT EA v3 ──", 10, clrSilver)
+  LBL("DBG_HDR",  "── ICT EA v4 ──", 10, clrSilver)
 
-  // Bias
   color cB = (g_Bias.bias==BIAS_UP)?clrLime:(g_Bias.bias==BIAS_DOWN)?clrTomato:(g_Bias.bias==BIAS_SIDEWAY)?clrOrange:clrGray;
   LBL("DBG_BIAS", StringFormat("Bias : %s", EnumToString(g_Bias.bias)), 34, cB)
 
-  // H1 trend
   color cMT = (g_MiddleTrend.trend==DIR_UP)?clrLime:(g_MiddleTrend.trend==DIR_DOWN)?clrTomato:clrGray;
-  LBL("DBG_MT",   StringFormat("H1   : %s  KL=%.5f", EnumToString(g_MiddleTrend.trend), g_MiddleTrend.keyLevel), 58, cMT)
+  LBL("DBG_MT", StringFormat("H1   : %s  KL=%.5f", EnumToString(g_MiddleTrend.trend), g_MiddleTrend.keyLevel), 58, cMT)
 
-  // H1 MSS
-  if (g_MiddleTrend.lastMssTime > 0)
-  {
-    color cMSS = (g_MiddleTrend.lastMssBreak==DIR_UP) ? clrLime : clrTomato;
-    LBL("DBG_MMSS", StringFormat("H1MSS: %s @ %s", (g_MiddleTrend.lastMssBreak==DIR_UP)?"▲":"▼",
-      TimeToString(g_MiddleTrend.lastMssTime, TIME_MINUTES)), 82, cMSS)
-  }
-  else ObjectDelete(0,"DBG_MMSS");
-
-  // M5 trend
   color cTT = (g_TriggerTrend.trend==DIR_UP)?clrLime:(g_TriggerTrend.trend==DIR_DOWN)?clrTomato:clrGray;
-  LBL("DBG_TT",   StringFormat("M5   : %s  KL=%.5f", EnumToString(g_TriggerTrend.trend), g_TriggerTrend.keyLevel), 106, cTT)
+  LBL("DBG_TT", StringFormat("M5   : %s  KL=%.5f", EnumToString(g_TriggerTrend.trend), g_TriggerTrend.keyLevel), 82, cTT)
 
-  // M5 MSS (v3: đã bao gồm sweep validation)
   if (g_TriggerTrend.lastMssTime > 0)
   {
-    color cMSS2 = (g_TriggerTrend.lastMssBreak==DIR_UP) ? clrLime : clrTomato;
-    string sweepInfo = (g_TriggerTrend.mssSweepTime > 0)
-      ? StringFormat(" sweep@%s", TimeToString(g_TriggerTrend.mssSweepTime, TIME_MINUTES))
-      : "";
-    LBL("DBG_TMSS", StringFormat("M5MSS: %s @ %s%s",
+    color cM = (g_TriggerTrend.lastMssBreak==DIR_UP)?clrLime:clrTomato;
+    LBL("DBG_MSS", StringFormat("M5MSS: %s entry=%.5f SL=%.5f @ %s",
       (g_TriggerTrend.lastMssBreak==DIR_UP)?"▲":"▼",
-      TimeToString(g_TriggerTrend.lastMssTime, TIME_MINUTES),
-      sweepInfo), 130, cMSS2)
+      g_TriggerTrend.lastMssLevel, g_TriggerTrend.mssSLSwing,
+      TimeToString(g_TriggerTrend.lastMssTime, TIME_MINUTES)), 106, cM)
   }
-  else ObjectDelete(0,"DBG_TMSS");
+  else ObjectDelete(0,"DBG_MSS");
 
-  // Sweep status (internal, không vẽ riêng nhưng show trong panel)
-  if (g_LastLiqSweep.valid)
-  {
-    color cSw = (g_LastLiqSweep.direction == DIR_UP) ? C'0,210,230' : C'230,80,210';
-    LBL("DBG_SWEEP", StringFormat("Sweep: %s @%.5f (pending)",
-      (g_LastLiqSweep.direction==DIR_UP)?"▲":"▼",
-      g_LastLiqSweep.sweptLevel), 154, cSw)
-  }
-  else ObjectDelete(0,"DBG_SWEEP");
-
-  // Daily risk
   double lostPct = g_DailyRisk.startBalance > 0
     ? (g_DailyRisk.startBalance - g_DailyRisk.currentBalance) / g_DailyRisk.startBalance * 100.0 : 0.0;
   color cR = g_DailyRisk.limitHit?clrRed:(lostPct>InpMaxDailyLossPct*0.7?clrOrange:clrLime);
-  LBL("DBG_RISK", StringFormat("Risk : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 178, cR)
-  LBL("DBG_BAL",  StringFormat("Bal  : %.2f (start %.2f)", g_DailyRisk.currentBalance, g_DailyRisk.startBalance), 202, clrSilver)
-  LBL("DBG_LIM",  g_DailyRisk.limitHit?"⛔ DAILY LOSS HIT":"✅ Loss OK", 226, g_DailyRisk.limitHit?clrRed:clrLime)
+  LBL("DBG_RISK", StringFormat("Risk : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 130, cR)
 
-  // State
   color cS = (g_State==EA_IDLE)?clrSilver:(g_State==EA_WAIT_TOUCH)?clrOrange:(g_State==EA_WAIT_TRIGGER)?clrYellow:clrLime;
-  LBL("DBG_ST",   StringFormat("State: %s", EnumToString(g_State)), 250, cS)
+  LBL("DBG_ST", StringFormat("State: %s", EnumToString(g_State)), 154, cS)
 
   if (g_BlockReason != BLOCK_NONE)
-    { LBL("DBG_BLK", StringFormat("Block: %s", EnumToString(g_BlockReason)), 274, clrTomato) }
+    { LBL("DBG_BLK", StringFormat("Block: %s", EnumToString(g_BlockReason)), 178, clrTomato) }
   else ObjectDelete(0,"DBG_BLK");
 
-  // FVG pool
   int nP=0,nT=0,nU=0;
   for(int i=0;i<g_FVGCount;i++)
-  {
-    if      (g_FVGPool[i].status==FVG_PENDING) nP++;
-    else if (g_FVGPool[i].status==FVG_TOUCHED) nT++;
-    else                                        nU++;
-  }
-  color cP = (nT>0)?clrDeepSkyBlue:(nP>0)?clrDodgerBlue:clrGray;
-  LBL("DBG_POOL", StringFormat("Pool : P=%d T=%d U=%d (%d/%d)", nP,nT,nU,g_FVGCount,MAX_FVG_POOL), 298, cP)
+    { if(g_FVGPool[i].status==FVG_PENDING) nP++; else if(g_FVGPool[i].status==FVG_TOUCHED) nT++; else nU++; }
+  LBL("DBG_POOL", StringFormat("Pool : P=%d T=%d U=%d (%d/%d)", nP,nT,nU,g_FVGCount,MAX_FVG_POOL), 202, clrDodgerBlue)
 
-  // Active FVG
   if (g_ActiveFVGIdx >= 0 && g_ActiveFVGIdx < g_FVGCount)
   {
     int ai = g_ActiveFVGIdx;
-    color cA = (g_FVGPool[ai].status==FVG_TOUCHED)?clrDeepSkyBlue:clrDodgerBlue;
     LBL("DBG_ACT", StringFormat("Act  : #%d %s [%.5f–%.5f] %s",
       g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
-      g_FVGPool[ai].low, g_FVGPool[ai].high,
-      EnumToString(g_FVGPool[ai].status)), 322, cA)
+      g_FVGPool[ai].low, g_FVGPool[ai].high, EnumToString(g_FVGPool[ai].status)), 226, clrDeepSkyBlue)
   }
   else ObjectDelete(0,"DBG_ACT");
 
-  // Pending order
   if (g_PendingTicket > 0 && g_OrderPlan.valid)
   {
-    string ordDir = (g_OrderPlan.direction > 0) ? "BUY_LIM" : "SELL_LIM";
     LBL("DBG_ORD", StringFormat("Order: %s #%llu @ %.5f SL=%.5f TP=%.5f",
-      ordDir, g_PendingTicket, g_OrderPlan.entry,
-      g_OrderPlan.stopLoss, g_OrderPlan.takeProfit), 346, clrGold)
+      (g_OrderPlan.direction>0)?"BUY":"SELL", g_PendingTicket,
+      g_OrderPlan.entry, g_OrderPlan.stopLoss, g_OrderPlan.takeProfit), 250, clrGold)
   }
   else ObjectDelete(0,"DBG_ORD");
-
-  // TriggerTF FVG
-  if (g_TrigFVG.valid)
-  {
-    string tDir = (g_TrigFVG.direction == DIR_UP) ? "▲" : "▼";
-    LBL("DBG_TFVG", StringFormat("tFVG : %s [%.5f–%.5f] mid=%.5f",
-      tDir, g_TrigFVG.low, g_TrigFVG.high, g_TrigFVG.mid), 370, C'0,220,150')
-  }
-  else ObjectDelete(0,"DBG_TFVG");
 
   #undef LBL
   ChartRedraw(0);
@@ -1870,13 +1414,12 @@ void DrawContextDebug()
 //----------------------------------------------------------------------
 void DrawVisuals()
 {
-  DrawMiddleSwingPoints();     // H1 swing H0/H1/L0/L1
-  DrawTriggerSwingPoints();    // M5 swing tH0/tH1/tL0/tL1
-  DrawMSSMarkers();            // MSS + sweep (combined, v3)
-  DrawFVGPool();               // MiddleTF FVG rectangles
-  DrawTriggerFVG();            // TriggerTF FVG rectangle
-  DrawOrderVisualization();    // TradingView-style Entry/SL/TP
-  DrawContextDebug();          // Info panel
+  DrawMiddleSwingPoints();     // H1 swing H0/H1/L0/L1 + keyLevel dashed line
+  DrawTriggerSwingPoints();    // M5 swing tH0/tH1/tL0/tL1 + keyLevel dashed line
+  DrawMSSMarkers();            // MSS arrow + label + broken keyLevel line (cả H1 và M5)
+  DrawFVGPool();               // MiddleTF FVG rectangles (PENDING=dark, TOUCHED=bright, USED=status color)
+  DrawOrderVisualization();    // TradingView-style: TP zone (green) + SL zone (red) + entry/SL/TP lines
+  DrawContextDebug();          // Top-left info panel: bias, trend, MSS, risk, state, pool, order
 }
 
 //+------------------------------------------------------------------+
@@ -1886,20 +1429,17 @@ void DrawVisuals()
 int OnInit()
 {
   ZeroMemory(g_Bias); ZeroMemory(g_MiddleTrend); ZeroMemory(g_TriggerTrend);
-  ZeroMemory(g_Trigger); ZeroMemory(g_DailyRisk);
-  ZeroMemory(g_TrigFVG); ZeroMemory(g_OrderPlan);
-  ZeroMemory(g_LastLiqSweep);
+  ZeroMemory(g_DailyRisk); ZeroMemory(g_OrderPlan);
   for (int i = 0; i < MAX_FVG_POOL; i++) ZeroMemory(g_FVGPool[i]);
   g_FVGCount = 0; g_NextFVGId = 0;
-  g_ActiveFVGIdx = -1; g_TradeBarIndex = -1;
-  g_PendingTicket = 0;
+  g_ActiveFVGIdx = -1; g_TradeBarIndex = -1; g_PendingTicket = 0;
   g_State = EA_IDLE; g_BlockReason = BLOCK_NONE;
 
   UpdateAllContexts();
   ScanAndRegisterFVGs();
   DrawVisuals();
 
-  PrintFormat("✅ ICT EA v3 init | Bias=%s | H1=%s | M5=%s | FVGPool=%d",
+  PrintFormat("✅ ICT EA v4 | Bias=%s | H1=%s | M5=%s | Pool=%d",
     EnumToString(g_Bias.bias), EnumToString(g_MiddleTrend.trend),
     EnumToString(g_TriggerTrend.trend), g_FVGCount);
   return INIT_SUCCEEDED;
@@ -1907,20 +1447,19 @@ int OnInit()
 
 void OnTick()
 {
-  UpdateAllContexts();
-  if (EvaluateGuards())
-    RunStateMachine();
-  else if (g_State != EA_IDLE)
-    ResetToIdle(EnumToString(g_BlockReason));
-  if (InpDebugDraw) DrawVisuals();
+  UpdateAllContexts();                                 // 1. Cập nhật D1 bias, H1/M5 swing+MSS
+  if (EvaluateGuards())                                // 2. Check guards (session, risk, alignment)
+    RunStateMachine();                                 //    Pass → chạy state machine
+  else if (g_State != EA_IDLE)                         //    Fail + đang active → reset
+    ResetToIdle(EnumToString(g_BlockReason));           //    Log lý do block rồi về IDLE
+  if (InpDebugDraw) DrawVisuals();                     // 3. Vẽ chart objects (nếu enabled)
 }
 
 void OnDeinit(const int reason)
 {
-  // Giữ lại trên chart: FVGP_, TFVG_, MSS_, ORD_ (post-session review)
-  ObjectsDeleteAll(0, SW_PREFIX);
-  ObjectsDeleteAll(0, TS_PREFIX);
-  ObjectsDeleteAll(0, DBG_PREFIX);
-  ChartRedraw(0);
-  PrintFormat("ICT EA v3 deinit | reason=%d | pool had %d FVGs", reason, g_FVGCount);
+  ObjectsDeleteAll(0, SW_PREFIX);                      // Xóa H1 swing objects (tạm thời)
+  ObjectsDeleteAll(0, TS_PREFIX);                      // Xóa M5 swing objects (tạm thời)
+  ObjectsDeleteAll(0, DBG_PREFIX);                     // Xóa debug panel (giữ lại: FVGP_, MSS_, ORD_)
+  ChartRedraw(0);                                      // Force redraw chart
+  PrintFormat("ICT EA v4 deinit | reason=%d | pool=%d", reason, g_FVGCount);
 }
