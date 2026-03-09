@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| ICT EA – FVG Edition  (MQL5)  v4.0                               |
+//| ICT EA – FVG Edition  (MQL5)  v4.3                               |
 //| Architecture : BiasTF(D1) + MiddleTF(H1) + TriggerTF(M5)       |
 //| State Machine: IDLE → WAIT_TOUCH → WAIT_TRIGGER → IN_TRADE      |
 //|                                                                  |
@@ -7,17 +7,18 @@
 //|   1. D1 bias (UP/DOWN) đồng thuận H1 trend                     |
 //|   2. H1 FVG thuận xu hướng → chờ price retrace vào FVG          |
 //|   3. Giá touch H1 FVG → chờ M5 MSS xác nhận đảo chiều          |
-//|   4. M5 MSS = keyLevel sóng hồi bị phá:                         |
-//|      - H1 UP: M5 đang downtrend (hồi), tH0 bị phá (close>tH0) |
-//|      - H1 DOWN: M5 đang uptrend (hồi), tL0 bị phá (close<tL0) |
-//|   5. Entry = limit tại keyLevel vừa bị phá (tH0 hoặc tL0)      |
-//|   6. SL = swing extreme sóng hồi (tL0 cho buy, tH0 cho sell)   |
+//|   4. M5 MSS = swing break thuận chiều H1:                       |
+//|      - H1 UP  → close > tH0 (phá swing high) = bull MSS        |
+//|      - H1 DOWN → close < tL0 (phá swing low)  = bear MSS       |
+//|      v4.3: MSS chỉ detect khi WAIT_TRIGGER, không vẽ/detect khác |
+//|   5. Entry = limit tại swing level vừa bị phá (tH0 hoặc tL0)   |
+//|   6. SL = swing đối diện (tL0 cho buy, tH0 cho sell)           |
 //|   7. TP = Entry ± 2R                                            |
 //|                                                                  |
 //| Drawing: objects KHÔNG BAO GIỜ bị xóa, chỉ update              |
 //+------------------------------------------------------------------+
 #property copyright "Bell's ICT EA"
-#property version   "4.00"
+#property version   "4.30"
 
 #define MAX_FVG_POOL 30
 
@@ -41,10 +42,10 @@ input int    InpSwingRange               = 3;          // Bars each side for swi
 input int    InpSwingLookback            = 50;         // MiddleTF swing scan bars
 input int    InpTriggerSwingLookback     = 30;         // TriggerTF swing scan bars
 
-input int    InpFVGMaxAliveMin           = 4320;       // Max PENDING lifetime (min) = 72h
+input int    InpFVGMaxAliveMin           = 4320;       // Max FVG lifetime (min) = 72h (cả PENDING + TOUCHED)
 input int    InpFVGScanBars              = 50;         // MiddleTF bars to scan for FVGs
 input double InpFVGMinBodyPct            = 60.0;       // Mid-candle min body %
-input int    InpTriggerMaxBars           = 30;         // Trigger timeout (TriggerTF bars)
+input int    InpMSSMinDepthPts           = 30;         // MSS min swing depth (points): |tH0-tL0| phải >= giá trị này
 
 input long   InpMagicNumber              = 20250308;   // EA magic number
 input int    InpSlippage                 = 5;          // Max slippage (points)
@@ -90,14 +91,11 @@ struct BiasContext
 //----------------------------------------------------------------------
 // TFTrendContext – Swing structure + MSS
 //
-// v4 MSS (đơn giản):
-//   MSS = keyLevel sóng hồi trên TriggerTF bị phá vỡ
-//   - H1 UP → M5 đang DOWN (hồi) → tH0 bị phá (close > tH0) = bull MSS
-//   - H1 DOWN → M5 đang UP (hồi) → tL0 bị phá (close < tL0) = bear MSS
-//
-//   Entry = giá keyLevel vừa bị phá (đặt limit chờ giá hồi)
-//   SL    = swing extreme sóng hồi (tL0 cho buy, tH0 cho sell)
-//   Cả 2 được capture TRƯỚC khi re-scan swing.
+// v4.3: MSS CHỈ detect cho TriggerTF, CHỈ khi WAIT_TRIGGER state.
+//   Không detect MSS cho MiddleTF (không dùng cho entry).
+//   MSS check chạy TRƯỚC re-scan → dùng OLD swing values:
+//   - H1 UP  → close > OLD tH0 = bull MSS → entry=tH0, SL=tL0
+//   - H1 DOWN → close < OLD tL0 = bear MSS → entry=tL0, SL=tH0
 //----------------------------------------------------------------------
 struct TFTrendContext
 {
@@ -127,6 +125,11 @@ struct FVGRecord
   datetime  touchTime;                   // Thời gian bid đầu tiên vào vùng gap
   datetime  usedTime;                    // Thời gian FVG bị consumed (broken/expired/triggered)
   MarketDir triggerTrendAtTouch;         // M5 trend tại thời điểm touch (dùng cho case2 check)
+
+  // v4.3: MSS info lưu khi triggered (case2) → dùng cho vẽ + order
+  datetime  mssTime;                     // Thời gian cây nến MSS
+  double    mssEntry;                    // Entry = swing bị phá (tH0 hoặc tL0)
+  double    mssSL;                       // SL = swing đối diện (tL0 hoặc tH0)
 };
 
 struct OrderPlan
@@ -151,8 +154,8 @@ EAState          g_State       = EA_IDLE;  // State machine hiện tại
 BlockReason      g_BlockReason = BLOCK_NONE; // Lý do bị block (nếu có)
 
 BiasContext      g_Bias;                   // D1 bias context
-TFTrendContext   g_MiddleTrend;            // H1 trend + swing + MSS
-TFTrendContext   g_TriggerTrend;           // M5 trend + swing + MSS (entry trigger)
+TFTrendContext   g_MiddleTrend;            // H1 trend + swing (không MSS)
+TFTrendContext   g_TriggerTrend;           // M5 swing + MSS (chỉ khi WAIT_TRIGGER)
 DailyRiskContext g_DailyRisk;              // Daily drawdown tracking
 
 FVGRecord  g_FVGPool[MAX_FVG_POOL];       // Pool chứa tối đa 30 FVG records
@@ -285,18 +288,10 @@ void UpdateBiasContext()
 //----------------------------------------------------------------------
 // UpdateTFTrendContext
 //
-// Gọi mỗi bar mới. Thực hiện TRƯỚC khi re-scan swing:
-//
-//   v4 MSS check (TriggerTF only):
-//     - M5 đang downtrend (hồi khi H1 UP): keyLevel = tH0
-//       → close > tH0 = bull MSS → entry BUY LIMIT tại tH0
-//     - M5 đang uptrend (hồi khi H1 DOWN): keyLevel = tL0
-//       → close < tL0 = bear MSS → entry SELL LIMIT tại tL0
-//
-//   Chỉ nhận MSS thuận chiều MiddleTF (filter duy nhất).
-//   Entry price = keyLevel bị phá (tH0 hoặc tL0).
-//   SL = swing extreme sóng hồi (tL0 cho buy, tH0 cho sell).
-//   Cả entry + SL capture TRƯỚC re-scan vì sau đó swing thay đổi.
+// v4.3: MSS check CHỈ cho TriggerTF + CHỈ khi EA_WAIT_TRIGGER.
+//   MiddleTF: chỉ scan swing + resolve trend, KHÔNG check MSS.
+//   TriggerTF: check MSS TRƯỚC re-scan (dùng OLD swing).
+//     Gate: g_State == EA_WAIT_TRIGGER (có TOUCHED FVG đang chờ).
 //----------------------------------------------------------------------
 void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
 {
@@ -305,67 +300,66 @@ void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
   ctx.lastBarTime = t0;
 
   double   bar1C = iClose(_Symbol, tf, 1);             // Bar vừa đóng: close
-  double   bar1H = iHigh (_Symbol, tf, 1);             //                high
-  double   bar1L = iLow  (_Symbol, tf, 1);             //                low
   datetime bar1T = iTime (_Symbol, tf, 1);             //                time
 
   // ══════════════════════════════════════════════════════════════════
-  // MSS check (TRƯỚC re-scan, dùng OLD keyLevel + swing)
+  // MSS check – CHỈ TriggerTF + CHỈ khi WAIT_TRIGGER
   //
-  // Logic:
-  //   trend hiện tại có keyLevel → nếu close phá keyLevel:
-  //     breakDir = hướng phá (UP nếu phá lên, DOWN nếu phá xuống)
-  //     Chỉ nhận nếu breakDir == MiddleTF trend (TriggerTF only)
+  // Chạy TRƯỚC re-scan → ctx.h0/l0 là OLD values (swing chưa cập nhật)
+  // → Entry = OLD tH0 (buy) hoặc OLD tL0 (sell) = swing vừa bị phá
+  // → SL = OLD tL0 (buy) hoặc OLD tH0 (sell) = swing đối diện
   //
-  // Capture tại thời điểm MSS:
-  //   lastMssLevel = keyLevel bị phá = ENTRY PRICE cho limit order
-  //   mssSLSwing   = swing extreme phía đối diện = SL level
-  //     Bull MSS: SL = L0 (đáy sóng hồi)
-  //     Bear MSS: SL = H0 (đỉnh sóng hồi)
+  // Khi không ở WAIT_TRIGGER → skip hoàn toàn (không detect, không vẽ)
   // ══════════════════════════════════════════════════════════════════
-  if (ctx.trend != DIR_NONE && ctx.keyLevel > 0)
+  if (tf == InpTriggerTF                               // Chỉ TriggerTF (M5)
+      && g_State == EA_WAIT_TRIGGER                    // Chỉ khi đang chờ MSS
+      && ctx.h0 > 0 && ctx.l0 > 0                     // Có swing points
+      && g_MiddleTrend.trend != DIR_NONE)              // H1 có hướng
   {
-    bool mssHit =
-      (ctx.trend == DIR_UP   && bar1C < ctx.keyLevel) ||  // Uptrend KL=L0 → break below
-      (ctx.trend == DIR_DOWN && bar1C > ctx.keyLevel);     // Downtrend KL=H0 → break above
+    bool mssHit = false;
+    MarketDir breakDir = DIR_NONE;
+    double entryLevel = 0, slLevel = 0;
 
-    if (mssHit && bar1T != ctx.lastMssTime)
+    if (g_MiddleTrend.trend == DIR_UP                  // H1 UP → tìm bull MSS
+        && bar1C > ctx.h0)                             // M5 close > OLD tH0 → phá swing high
     {
-      MarketDir breakDir = (ctx.trend == DIR_UP) ? DIR_DOWN : DIR_UP;
+      mssHit     = true;
+      breakDir   = DIR_UP;
+      entryLevel = ctx.h0;                             // Entry = tH0 vừa bị phá
+      slLevel    = ctx.l0;                             // SL = tL0 (đáy gần nhất)
+    }
+    else if (g_MiddleTrend.trend == DIR_DOWN           // H1 DOWN → tìm bear MSS
+             && bar1C < ctx.l0)                        // M5 close < OLD tL0 → phá swing low
+    {
+      mssHit     = true;
+      breakDir   = DIR_DOWN;
+      entryLevel = ctx.l0;                             // Entry = tL0 vừa bị phá
+      slLevel    = ctx.h0;                             // SL = tH0 (đỉnh gần nhất)
+    }
 
-      // TriggerTF: chỉ nhận MSS thuận chiều MiddleTF
-      bool accept = true;
-      if (tf == InpTriggerTF && g_MiddleTrend.trend != DIR_NONE)
+    if (mssHit && bar1T != ctx.lastMssTime)            // Break detected + chưa ghi nhận bar này
+    {
+      // v4.3: Check minimum swing depth — |tH0 - tL0| phải đủ lớn
+      //   Ngăn MSS fire trên swing quá nông (dao động bình thường)
+      double swingDepth = MathAbs(ctx.h0 - ctx.l0) / _Point;  // Depth tính bằng points
+      if (swingDepth < InpMSSMinDepthPts)
       {
-        if (breakDir != (MarketDir)g_MiddleTrend.trend)
-          accept = false;                              // Ngược chiều → bỏ qua
+        if (InpDebugLog)
+          PrintFormat("[M5 MSS SKIP] depth=%.0f pts < %d | H0=%.5f L0=%.5f | %s",
+            swingDepth, InpMSSMinDepthPts, ctx.h0, ctx.l0, TimeToString(bar1T));
       }
-
-      if (accept)
+      else
       {
-        ctx.lastMssTime  = bar1T;                      // Thời gian cây nến MSS
-        ctx.lastMssLevel = ctx.keyLevel;               // KeyLevel bị phá = ENTRY
-        ctx.lastMssBreak = breakDir;                   // Hướng break
-
-        // v4: Capture SL swing TRƯỚC re-scan
-        if (breakDir == DIR_UP)
-          ctx.mssSLSwing = ctx.l0;                     // Bull MSS → SL dưới L0 (đáy hồi)
-        else
-          ctx.mssSLSwing = ctx.h0;                     // Bear MSS → SL trên H0 (đỉnh hồi)
+        ctx.lastMssTime  = bar1T;                        // Lưu vào context (dùng cho case2 check)
+        ctx.lastMssLevel = entryLevel;
+        ctx.lastMssBreak = breakDir;
+        ctx.mssSLSwing   = slLevel;
 
         if (InpDebugLog)
-          PrintFormat("[%s MSS] %s | entry=%.5f SL_swing=%.5f | close=%.5f | %s",
-            EnumToString(tf),
+          PrintFormat("[M5 MSS] %s | entry=%.5f SL=%.5f depth=%.0fpts | close=%.5f | H0=%.5f L0=%.5f | %s",
             (breakDir == DIR_UP) ? "▲ Bull" : "▼ Bear",
-            ctx.lastMssLevel, ctx.mssSLSwing,
-            bar1C, TimeToString(bar1T));
-      }
-      else if (InpDebugLog)
-      {
-        PrintFormat("[%s MSS skip] %s ngược H1=%s | KL=%.5f",
-          EnumToString(tf),
-          (breakDir == DIR_UP) ? "▲" : "▼",
-          EnumToString(g_MiddleTrend.trend), ctx.keyLevel);
+            entryLevel, slLevel, swingDepth, bar1C,
+            ctx.h0, ctx.l0, TimeToString(bar1T));
       }
     }
   }
@@ -418,8 +412,8 @@ void UpdateAllContexts()
 {
   UpdateDailyRiskContext();                             // 1. Check daily drawdown trước tiên
   UpdateBiasContext();                                 // 2. D1 bias (UP/DOWN/SIDEWAY)
-  UpdateTFTrendContext(InpMiddleTF,  InpSwingLookback,        g_MiddleTrend);  // 3. H1 swing+trend+MSS
-  UpdateTFTrendContext(InpTriggerTF, InpTriggerSwingLookback, g_TriggerTrend); // 4. M5 swing+trend+MSS (entry signal)
+  UpdateTFTrendContext(InpMiddleTF,  InpSwingLookback,        g_MiddleTrend);  // 3. H1 swing+trend (no MSS)
+  UpdateTFTrendContext(InpTriggerTF, InpTriggerSwingLookback, g_TriggerTrend); // 4. M5 swing + MSS (if WAIT_TRIGGER)
 }
 
 //+------------------------------------------------------------------+
@@ -648,8 +642,8 @@ void UpdateFVGStatuses()
     {
       // ── 4. Case2: M5 MSS đã xảy ra SAU touch → triggered ───────────
       //
-      //   v4: Kiểm tra g_TriggerTrend.lastMssTime > touchTime
-      //       VÀ hướng MSS phù hợp FVG direction
+      //   Check: g_TriggerTrend.lastMssTime > touchTime + cùng hướng
+      //   v4.3: Lưu MSS info vào FVG record (cho vẽ + order)
       //
       bool hasMSS =
         g_TriggerTrend.lastMssTime > g_FVGPool[i].touchTime &&   // MSS sau touch
@@ -660,23 +654,40 @@ void UpdateFVGStatuses()
         g_FVGPool[i].status   = FVG_USED;
         g_FVGPool[i].usedCase = 2;                    // Case2 = triggered
         g_FVGPool[i].usedTime = TimeCurrent();
+
+        // v4.3: Copy MSS info vào FVG (dùng cho vẽ MSS marker + order plan)
+        g_FVGPool[i].mssTime  = g_TriggerTrend.lastMssTime;
+        g_FVGPool[i].mssEntry = g_TriggerTrend.lastMssLevel;
+        g_FVGPool[i].mssSL    = g_TriggerTrend.mssSLSwing;
+
         if (InpDebugLog)
-          PrintFormat("[FVG #%d] TRIGGERED | MSS %s @ %s",
+          PrintFormat("[FVG #%d] TRIGGERED | MSS %s entry=%.5f SL=%.5f @ %s",
             g_FVGPool[i].id,
             (g_TriggerTrend.lastMssBreak == DIR_UP) ? "▲" : "▼",
-            TimeToString(g_TriggerTrend.lastMssTime, TIME_MINUTES));
+            g_FVGPool[i].mssEntry, g_FVGPool[i].mssSL,
+            TimeToString(g_FVGPool[i].mssTime, TIME_MINUTES));
         continue;
       }
 
-      // ── 5. Trigger timeout ────────────────────────────────────────────
-      int bars = (int)((TimeCurrent() - g_FVGPool[i].touchTime) / PeriodSeconds(InpTriggerTF));
-      if (bars > InpTriggerMaxBars
-          && g_ActiveFVGIdx >= 0
-          && g_FVGPool[g_ActiveFVGIdx].id == g_FVGPool[i].id)
+      // ── 5. TOUCHED lifetime expire ──────────────────────────────────
+      //   v4.3: Dùng chung InpFVGMaxAliveMin cho cả PENDING và TOUCHED.
+      //   Tính từ createdTime (không phải touchTime) → FVG sống tối đa 72h.
+      //   Không dùng InpTriggerMaxBars nữa (quá ngắn, miss entry).
+      //
+      int ageMin = (int)((TimeCurrent() - g_FVGPool[i].createdTime) / 60);
+      if (ageMin > InpFVGMaxAliveMin)                  // Quá lifetime
       {
+        g_FVGPool[i].status   = FVG_USED;
+        g_FVGPool[i].usedCase = 0;                    // Case0 = expired
+        g_FVGPool[i].usedTime = TimeCurrent();
+
+        if (g_ActiveFVGIdx >= 0
+            && g_FVGPool[g_ActiveFVGIdx].id == g_FVGPool[i].id)
+          g_ActiveFVGIdx = -1;
+
         if (InpDebugLog)
-          PrintFormat("[FVG #%d] Timeout (%d bars)", g_FVGPool[i].id, bars);
-        g_ActiveFVGIdx = -1;
+          PrintFormat("[FVG #%d] TOUCHED EXPIRED (age=%dmin > %d) → USED",
+            g_FVGPool[i].id, ageMin, InpFVGMaxAliveMin);
       }
     }
   }
@@ -714,15 +725,13 @@ double CalcLotFromRisk(double entry, double sl)
   return NormalizeDouble(rawLot, 2);                        // Trả về lot 2 chữ số thập phân
 }
 
-bool BuildOrderPlan(int fvgId, MarketDir dir)
+bool BuildOrderPlan(int fvgId, MarketDir dir, double mssEntry, double mssSL)
 {
   ZeroMemory(g_OrderPlan);                             // Reset plan cũ
 
-  // v4: Entry = keyLevel vừa bị phá (đã capture trong MSS context)
-  double entry = NormalizeDouble(g_TriggerTrend.lastMssLevel, _Digits); // tH0 (buy) hoặc tL0 (sell)
-
-  // v4: SL = swing extreme sóng hồi (đã capture trong MSS context)
-  double sl = g_TriggerTrend.mssSLSwing;               // tL0 (buy) hoặc tH0 (sell), captured TRƯỚC re-scan
+  // v4.3: Entry + SL đã capture trong FVG record khi triggered
+  double entry = NormalizeDouble(mssEntry, _Digits);   // tH0 (buy) hoặc tL0 (sell)
+  double sl = mssSL;                                   // tL0 (buy) hoặc tH0 (sell)
 
   if (entry <= 0 || sl <= 0) return false;             // Data invalid → không đặt lệnh
 
@@ -894,13 +903,14 @@ void OnStateWaitTrigger()
     if (g_FVGPool[ai].usedCase == 2)                   // Case2 = MSS triggered
     {
       if (InpDebugLog)
-        PrintFormat("[ENTRY SIGNAL] FVG #%d %s [%.5f–%.5f] | MSS entry=%.5f",
+        PrintFormat("[ENTRY SIGNAL] FVG #%d %s [%.5f–%.5f] | MSS entry=%.5f SL=%.5f",
           g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
           g_FVGPool[ai].low, g_FVGPool[ai].high,
-          g_TriggerTrend.lastMssLevel);
+          g_FVGPool[ai].mssEntry, g_FVGPool[ai].mssSL);
 
-      // v4: Build order plan dùng MSS data (entry=keyLevel, SL=swing hồi)
-      if (BuildOrderPlan(g_FVGPool[ai].id, g_FVGPool[ai].direction))
+      // v4.3: Build order plan dùng FVG's MSS data (đã capture lúc triggered)
+      if (BuildOrderPlan(g_FVGPool[ai].id, g_FVGPool[ai].direction,
+                         g_FVGPool[ai].mssEntry, g_FVGPool[ai].mssSL))
       {
         ulong ticket = ExecuteLimitOrder();
         if (ticket > 0)
@@ -1148,15 +1158,19 @@ void DrawMSSMarker(
 void DrawMSSMarkers()
 {
   if (!InpDebugDraw) return;
-  if (g_MiddleTrend.lastMssTime > 0)
+
+  // v4.3: CHỈ vẽ MSS cho FVG đã triggered (case2)
+  // Không vẽ MSS riêng lẻ từ global context nữa
+  for (int i = 0; i < g_FVGCount; i++)
   {
-    string mid = "M_" + IntegerToString((long)g_MiddleTrend.lastMssTime);
-    DrawMSSMarker(mid, InpMiddleTF, g_MiddleTrend.lastMssTime, g_MiddleTrend.lastMssLevel, g_MiddleTrend.lastMssBreak);
-  }
-  if (g_TriggerTrend.lastMssTime > 0)
-  {
-    string tid = "T_" + IntegerToString((long)g_TriggerTrend.lastMssTime);
-    DrawMSSMarker(tid, InpTriggerTF, g_TriggerTrend.lastMssTime, g_TriggerTrend.lastMssLevel, g_TriggerTrend.lastMssBreak);
+    if (g_FVGPool[i].status != FVG_USED || g_FVGPool[i].usedCase != 2) continue; // Chỉ case2
+    if (g_FVGPool[i].mssTime == 0) continue;           // Không có MSS data
+
+    string tid = "T_" + IntegerToString(g_FVGPool[i].id); // Dùng FVG ID làm MSS object ID
+    DrawMSSMarker(tid, InpTriggerTF,
+      g_FVGPool[i].mssTime,                            // Thời gian cây nến MSS
+      g_FVGPool[i].mssEntry,                           // Swing bị phá (entry level)
+      g_FVGPool[i].direction == DIR_UP ? DIR_UP : DIR_DOWN); // Hướng MSS = hướng FVG
   }
 }
 
@@ -1350,7 +1364,7 @@ void DrawContextDebug()
     ObjectSetInteger(0,name,OBJPROP_COLOR,     clr);                    \
     ObjectSetString (0,name,OBJPROP_TEXT,      txt);
 
-  LBL("DBG_HDR",  "── ICT EA v4 ──", 10, clrSilver)
+  LBL("DBG_HDR",  "── ICT EA v4.3 ──", 10, clrSilver)
 
   color cB = (g_Bias.bias==BIAS_UP)?clrLime:(g_Bias.bias==BIAS_DOWN)?clrTomato:(g_Bias.bias==BIAS_SIDEWAY)?clrOrange:clrGray;
   LBL("DBG_BIAS", StringFormat("Bias : %s", EnumToString(g_Bias.bias)), 34, cB)
@@ -1361,13 +1375,17 @@ void DrawContextDebug()
   color cTT = (g_TriggerTrend.trend==DIR_UP)?clrLime:(g_TriggerTrend.trend==DIR_DOWN)?clrTomato:clrGray;
   LBL("DBG_TT", StringFormat("M5   : %s  KL=%.5f", EnumToString(g_TriggerTrend.trend), g_TriggerTrend.keyLevel), 82, cTT)
 
-  if (g_TriggerTrend.lastMssTime > 0)
+  if (g_ActiveFVGIdx >= 0 && g_ActiveFVGIdx < g_FVGCount   // Có active FVG
+      && g_FVGPool[g_ActiveFVGIdx].usedCase == 2            // Đã triggered
+      && g_FVGPool[g_ActiveFVGIdx].mssTime > 0)             // Có MSS data
   {
-    color cM = (g_TriggerTrend.lastMssBreak==DIR_UP)?clrLime:clrTomato;
-    LBL("DBG_MSS", StringFormat("M5MSS: %s entry=%.5f SL=%.5f @ %s",
-      (g_TriggerTrend.lastMssBreak==DIR_UP)?"▲":"▼",
-      g_TriggerTrend.lastMssLevel, g_TriggerTrend.mssSLSwing,
-      TimeToString(g_TriggerTrend.lastMssTime, TIME_MINUTES)), 106, cM)
+    int ai = g_ActiveFVGIdx;
+    color cM = (g_FVGPool[ai].direction==DIR_UP)?clrLime:clrTomato;
+    LBL("DBG_MSS", StringFormat("MSS  : %s entry=%.5f SL=%.5f @ %s (FVG#%d)",
+      (g_FVGPool[ai].direction==DIR_UP)?"▲":"▼",
+      g_FVGPool[ai].mssEntry, g_FVGPool[ai].mssSL,
+      TimeToString(g_FVGPool[ai].mssTime, TIME_MINUTES),
+      g_FVGPool[ai].id), 106, cM)
   }
   else ObjectDelete(0,"DBG_MSS");
 
@@ -1416,7 +1434,7 @@ void DrawVisuals()
 {
   DrawMiddleSwingPoints();     // H1 swing H0/H1/L0/L1 + keyLevel dashed line
   DrawTriggerSwingPoints();    // M5 swing tH0/tH1/tL0/tL1 + keyLevel dashed line
-  DrawMSSMarkers();            // MSS arrow + label + broken keyLevel line (cả H1 và M5)
+  DrawMSSMarkers();            // MSS markers (chỉ cho triggered FVGs)
   DrawFVGPool();               // MiddleTF FVG rectangles (PENDING=dark, TOUCHED=bright, USED=status color)
   DrawOrderVisualization();    // TradingView-style: TP zone (green) + SL zone (red) + entry/SL/TP lines
   DrawContextDebug();          // Top-left info panel: bias, trend, MSS, risk, state, pool, order
@@ -1439,7 +1457,7 @@ int OnInit()
   ScanAndRegisterFVGs();
   DrawVisuals();
 
-  PrintFormat("✅ ICT EA v4 | Bias=%s | H1=%s | M5=%s | Pool=%d",
+  PrintFormat("✅ ICT EA v4.3 | Bias=%s | H1=%s | M5=%s | Pool=%d",
     EnumToString(g_Bias.bias), EnumToString(g_MiddleTrend.trend),
     EnumToString(g_TriggerTrend.trend), g_FVGCount);
   return INIT_SUCCEEDED;
@@ -1447,7 +1465,7 @@ int OnInit()
 
 void OnTick()
 {
-  UpdateAllContexts();                                 // 1. Cập nhật D1 bias, H1/M5 swing+MSS
+  UpdateAllContexts();                                 // 1. Cập nhật D1 bias, H1/M5 swing (MSS nếu WAIT_TRIGGER)
   if (EvaluateGuards())                                // 2. Check guards (session, risk, alignment)
     RunStateMachine();                                 //    Pass → chạy state machine
   else if (g_State != EA_IDLE)                         //    Fail + đang active → reset
@@ -1461,5 +1479,5 @@ void OnDeinit(const int reason)
   ObjectsDeleteAll(0, TS_PREFIX);                      // Xóa M5 swing objects (tạm thời)
   ObjectsDeleteAll(0, DBG_PREFIX);                     // Xóa debug panel (giữ lại: FVGP_, MSS_, ORD_)
   ChartRedraw(0);                                      // Force redraw chart
-  PrintFormat("ICT EA v4 deinit | reason=%d | pool=%d", reason, g_FVGCount);
+  PrintFormat("ICT EA v4.3 deinit | reason=%d | pool=%d", reason, g_FVGCount);
 }
