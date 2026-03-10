@@ -56,22 +56,22 @@ inline void DrawMiddleSwingPoints()
   bool isUp   = (g_MiddleTrend.trend == DIR_UP);
   bool isDown = (g_MiddleTrend.trend == DIR_DOWN);
   DrawOneSwingPoint(
-    PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleH0",
+    PREFIX_SWING_MIDDLE, InpMiddleTF, "H0",
     true, g_MiddleTrend.idxH0, g_MiddleTrend.h0,
     clrAqua, isDown, 2, 8
   );
   DrawOneSwingPoint(
-    PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleH1",
+    PREFIX_SWING_MIDDLE, InpMiddleTF, "H1",
     true, g_MiddleTrend.idxH1, g_MiddleTrend.h1,
     C'0,140,160', false, 2, 8
   );
   DrawOneSwingPoint(
-    PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleL0",
+    PREFIX_SWING_MIDDLE, InpMiddleTF, "L0",
     false, g_MiddleTrend.idxL0, g_MiddleTrend.l0,
     clrYellow, isUp, 2, 8
   );
   DrawOneSwingPoint(
-    PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleL1",
+    PREFIX_SWING_MIDDLE, InpMiddleTF, "L1",
     false, g_MiddleTrend.idxL1, g_MiddleTrend.l1,
     C'160,140,0', false, 2, 8
   );
@@ -88,22 +88,22 @@ inline void DrawTriggerSwingPoints()
   bool isUp   = (g_TriggerTrend.trend == DIR_UP);
   bool isDown = (g_TriggerTrend.trend == DIR_DOWN);
   DrawOneSwingPoint(
-    PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerH0",
+    PREFIX_SWING_TRIGGER, InpTriggerTF, "h0",
     true, g_TriggerTrend.idxH0, g_TriggerTrend.h0,
     C'180,100,255', isDown, 1, 7
   );
   DrawOneSwingPoint(
-    PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerH1",
+    PREFIX_SWING_TRIGGER, InpTriggerTF, "h1",
     true, g_TriggerTrend.idxH1, g_TriggerTrend.h1,
     C'100,60,160', false, 1, 7
   );
   DrawOneSwingPoint(
-    PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerL0",
+    PREFIX_SWING_TRIGGER, InpTriggerTF, "l0",
     false, g_TriggerTrend.idxL0, g_TriggerTrend.l0,
     C'255,160,40', isUp, 1, 7
   );
   DrawOneSwingPoint(
-    PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerL1",
+    PREFIX_SWING_TRIGGER, InpTriggerTF, "l1",
     false, g_TriggerTrend.idxL1, g_TriggerTrend.l1,
     C'160,100,20', false, 1, 7
   );
