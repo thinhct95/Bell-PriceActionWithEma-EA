@@ -1,21 +1,17 @@
 //+------------------------------------------------------------------+
 //| ICT EA – FVG Edition  (MQL5)  v4.3                               |
-//| Architecture : BiasTF(D1) + MiddleTF(H1) + TriggerTF(M5)       |
+//| Architecture : MiddleTF(H1) + TriggerTF(M5)                     |
 //| State Machine: IDLE → WAIT_TOUCH → WAIT_TRIGGER → IN_TRADE      |
 //|                                                                  |
 //| Flow tổng thể:                                                   |
-//|   1. D1 bias (UP/DOWN) đồng thuận H1 trend                     |
-//|   2. H1 FVG thuận xu hướng → chờ price retrace vào FVG          |
-//|   3. Giá touch H1 FVG → chờ M5 MSS xác nhận đảo chiều          |
-//|   4. M5 MSS = swing break thuận chiều H1:                       |
+//|   1. H1 trend xác định hướng, tìm FVG thuận xu hướng            |
+//|   2. Giá touch H1 FVG → chờ M5 MSS xác nhận                    |
+//|   3. M5 MSS = swing break thuận chiều H1:                       |
 //|      - H1 UP  → close > tH0 (phá swing high) = bull MSS        |
 //|      - H1 DOWN → close < tL0 (phá swing low)  = bear MSS       |
-//|      v4.3: MSS chỉ detect khi WAIT_TRIGGER, không vẽ/detect khác |
-//|   5. Entry = limit tại swing level vừa bị phá (tH0 hoặc tL0)   |
-//|   6. SL = swing đối diện (tL0 cho buy, tH0 cho sell)           |
-//|   7. TP = Entry ± 2R                                            |
-//|                                                                  |
-//| Drawing: objects KHÔNG BAO GIỜ bị xóa, chỉ update              |
+//|   4. Entry = limit tại swing level vừa bị phá (tH0 hoặc tL0)   |
+//|   5. SL = swing đối diện (tL0 cho buy, tH0 cho sell)           |
+//|   6. TP = Entry ± 2R                                            |
 //+------------------------------------------------------------------+
 #property copyright "Bell's ICT EA"
 #property version   "4.30"
@@ -39,7 +35,6 @@
 EAState          g_State       = EA_IDLE;
 BlockReason      g_BlockReason = BLOCK_NONE;
 
-BiasContext      g_Bias;
 TFTrendContext   g_MiddleTrend;
 TFTrendContext   g_TriggerTrend;
 DailyRiskContext g_DailyRisk;
@@ -71,7 +66,7 @@ const string PREFIX_SESSION        = "Session_";
 /** Initializes globals, contexts, FVG pool and first draw. */
 int OnInit()
 {
-  ZeroMemory(g_Bias); ZeroMemory(g_MiddleTrend); ZeroMemory(g_TriggerTrend);
+  ZeroMemory(g_MiddleTrend); ZeroMemory(g_TriggerTrend);
   ZeroMemory(g_DailyRisk); ZeroMemory(g_OrderPlan);
   for (int i = 0; i < MAX_FVG_POOL; i++) ZeroMemory(g_FVGPool[i]);
   g_FVGCount = 0; g_NextFVGId = 0;
@@ -82,8 +77,8 @@ int OnInit()
   ScanAndRegisterFVGs();
   DrawVisuals();
 
-  PrintFormat("✅ ICT EA v4.3 | Bias=%s | H1=%s | M5=%s | Pool=%d",
-    EnumToString(g_Bias.bias), EnumToString(g_MiddleTrend.trend),
+  PrintFormat("✅ ICT EA v4.3 | H1=%s | M5=%s | Pool=%d",
+    EnumToString(g_MiddleTrend.trend),
     EnumToString(g_TriggerTrend.trend), g_FVGCount);
   return INIT_SUCCEEDED;
 }

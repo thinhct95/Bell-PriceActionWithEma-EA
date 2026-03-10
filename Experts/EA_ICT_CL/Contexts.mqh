@@ -1,66 +1,6 @@
 #ifndef EA_ICT_CL__CONTEXTS_MQH
 #define EA_ICT_CL__CONTEXTS_MQH
 
-/** Resolves D1 bias from two consecutive daily bars (bar1 = last closed, bar2 = prior). */
-inline HTFBias ResolveBias(double bar1High, double bar1Low, double bar1Close,
-                           double bar2High, double bar2Low)
-{
-  if (bar1Close > bar2High)                       return BIAS_UP;
-  if (bar1Close < bar2Low)                        return BIAS_DOWN;
-
-  bool sweptHigh = (bar1High > bar2High);
-  bool sweptLow  = (bar1Low  < bar2Low);
-
-  // Trường hợp quét cả hai đầu: so sánh độ dài râu vượt khỏi range bar2.
-  // Râu nào dài hơn → ưu tiên chiều NGƯỢC LẠI (stop run –> đi ngược sweep mạnh hơn).
-  if (sweptHigh && sweptLow)
-  {
-    double upperSweep = bar1High - bar2High;  // khoảng quét lên trên đỉnh cũ
-    double lowerSweep = bar2Low  - bar1Low;   // khoảng quét xuống dưới đáy cũ
-
-    if (upperSweep > lowerSweep) return BIAS_DOWN; // quét đỉnh mạnh hơn → bearish
-    if (lowerSweep > upperSweep) return BIAS_UP;   // quét đáy mạnh hơn → bullish
-
-    // Nếu hai râu gần như bằng nhau → dùng close tương đối với mid-range để phân định
-    double mid = (bar2High + bar2Low) * 0.5;
-    if (bar1Close > mid) return BIAS_UP;
-    if (bar1Close < mid) return BIAS_DOWN;
-    return BIAS_SIDEWAY;
-  }
-
-  // Chỉ quét 1 đầu: giữ logic cũ với điều kiện close quay lại trong range.
-  if (sweptLow  && bar1Close > bar2Low)  return BIAS_UP;
-  if (sweptHigh && bar1Close < bar2High) return BIAS_DOWN;
-
-  return BIAS_SIDEWAY;
-}
-
-/** Updates global D1 bias context once per new bias-TF bar. */
-inline void UpdateBiasContext()
-{
-  datetime currentBiasBarTime = iTime(_Symbol, InpBiasTF, 0);
-  if (currentBiasBarTime == g_Bias.lastBarTime) return;
-  g_Bias.lastBarTime = currentBiasBarTime;
-
-  if (Bars(_Symbol, InpBiasTF) < 4) { g_Bias.bias = BIAS_NONE; return; }
-
-  double bar1High  = iHigh (_Symbol, InpBiasTF, 1);
-  double bar1Low   = iLow  (_Symbol, InpBiasTF, 1);
-  double bar1Close = iClose(_Symbol, InpBiasTF, 1);
-  double bar2High  = iHigh (_Symbol, InpBiasTF, 2);
-  double bar2Low   = iLow  (_Symbol, InpBiasTF, 2);
-
-  HTFBias prev = g_Bias.bias;
-  g_Bias.bias  = ResolveBias(bar1High, bar1Low, bar1Close, bar2High, bar2Low);
-  g_Bias.rangeHigh = (g_Bias.bias == BIAS_SIDEWAY) ? bar2High : 0;
-  g_Bias.rangeLow  = (g_Bias.bias == BIAS_SIDEWAY) ? bar2Low  : 0;
-
-  if (InpDebugLog && g_Bias.bias != prev)
-    PrintFormat("[BIAS] %s → %s | b1[H=%.5f L=%.5f C=%.5f] b2[H=%.5f L=%.5f]",
-      EnumToString(prev), EnumToString(g_Bias.bias),
-      bar1High, bar1Low, bar1Close, bar2High, bar2Low);
-}
-
 /** Updates TF trend context (swing + trend + MSS detection when on trigger TF). */
 inline void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContext &ctx)
 {
@@ -85,8 +25,8 @@ inline void UpdateTFTrendContext(ENUM_TIMEFRAMES tf, int lookback, TFTrendContex
     {
       isMssTriggered   = true;
       mssBreakDirection = DIR_UP;
-      entryLevel       = ctx.h0;  // Entry = tH0
-      slLevel          = ctx.l0;  // SL = tL0
+      entryLevel       = ctx.h0;
+      slLevel          = ctx.l0;
     }
     else if (g_MiddleTrend.trend == DIR_DOWN && lastBarClose < ctx.l0)
     {
@@ -164,14 +104,12 @@ inline void UpdateDailyRiskContext()
   }
 }
 
-/** Updates all contexts: daily risk, bias, middle TF trend, trigger TF trend. */
+/** Updates all contexts: daily risk, middle TF trend, trigger TF trend. */
 inline void UpdateAllContexts()
 {
   UpdateDailyRiskContext();
-  UpdateBiasContext();
   UpdateTFTrendContext(InpMiddleTF,  InpSwingLookback,        g_MiddleTrend);
   UpdateTFTrendContext(InpTriggerTF, InpTriggerSwingLookback, g_TriggerTrend);
 }
 
-#endif // EA_ICT_CL__CONTEXTS_MQH
-
+#endif

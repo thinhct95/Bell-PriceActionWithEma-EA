@@ -489,18 +489,6 @@ inline void DrawContextDebug()
 
   LBL(PREFIX_DEBUG_PANEL + "HDR",  "── ICT EA v4.3 ──", 10, clrSilver)
 
-  color cB = (g_Bias.bias == BIAS_UP)
-    ? clrLime
-    : (g_Bias.bias == BIAS_DOWN)
-      ? clrTomato
-      : (g_Bias.bias == BIAS_SIDEWAY) ? clrOrange : clrGray;
-  LBL(
-    PREFIX_DEBUG_PANEL + "BIAS",
-    StringFormat("Bias : %s", EnumToString(g_Bias.bias)),
-    34,
-    cB
-  )
-
   color cMT = (g_MiddleTrend.trend == DIR_UP)
     ? clrLime
     : (g_MiddleTrend.trend == DIR_DOWN) ? clrTomato : clrGray;
@@ -511,7 +499,7 @@ inline void DrawContextDebug()
       EnumToString(g_MiddleTrend.trend),
       g_MiddleTrend.keyLevel
     ),
-    58,
+    34,
     cMT
   )
 
@@ -525,7 +513,7 @@ inline void DrawContextDebug()
       EnumToString(g_TriggerTrend.trend),
       g_TriggerTrend.keyLevel
     ),
-    82,
+    58,
     cTT
   )
 
@@ -545,7 +533,7 @@ inline void DrawContextDebug()
         TimeToString(g_FVGPool[ai].mssTime, TIME_MINUTES),
         g_FVGPool[ai].id
       ),
-      106,
+      82,
       cM
     )
   }
@@ -561,7 +549,7 @@ inline void DrawContextDebug()
   LBL(
     PREFIX_DEBUG_PANEL + "RISK",
     StringFormat("Risk : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct),
-    130,
+    106,
     cR
   )
 
@@ -573,7 +561,7 @@ inline void DrawContextDebug()
   LBL(
     PREFIX_DEBUG_PANEL + "ST",
     StringFormat("State: %s", EnumToString(g_State)),
-    154,
+    130,
     cS
   )
 
@@ -582,7 +570,7 @@ inline void DrawContextDebug()
     LBL(
       PREFIX_DEBUG_PANEL + "BLK",
       StringFormat("Block: %s", EnumToString(g_BlockReason)),
-      178,
+      154,
       clrTomato
     )
   }
@@ -610,7 +598,7 @@ inline void DrawContextDebug()
       g_FVGCount,
       MAX_FVG_POOL
     ),
-    202,
+    178,
     clrDodgerBlue
   )
 
@@ -627,7 +615,7 @@ inline void DrawContextDebug()
         g_FVGPool[ai].high,
         EnumToString(g_FVGPool[ai].status)
       ),
-      226,
+      202,
       clrDeepSkyBlue
     )
   }
@@ -645,7 +633,7 @@ inline void DrawContextDebug()
         g_OrderPlan.stopLoss,
         g_OrderPlan.takeProfit
       ),
-      250,
+      226,
       clrGold
     )
   }
@@ -703,8 +691,8 @@ inline void DrawSessionMarkers()
 
     if (InpLondonStartHour < InpLondonEndHour)
     {
-      datetime t1 = dayStart + startL;
-      datetime t2 = dayStart + endL;
+      datetime t1 = (datetime)(dayStart + startL);
+      datetime t2 = (datetime)(dayStart + endL);
       if (t2 > firstTime && t1 < lastTime)
       {
         string name = PREFIX_SESSION + "L_" + IntegerToString(d);
@@ -719,8 +707,8 @@ inline void DrawSessionMarkers()
     }
     else
     {
-      datetime t1 = dayStart + startL;
-      datetime t2 = dayStart + 86400 + endL;
+      datetime t1 = (datetime)(dayStart + startL);
+      datetime t2 = (datetime)(dayStart + 86400 + endL);
       if (t2 > firstTime && t1 < lastTime)
       {
         string name = PREFIX_SESSION + "L_" + IntegerToString(d);
@@ -736,8 +724,8 @@ inline void DrawSessionMarkers()
 
     if (InpNYStartHour < InpNYEndHour)
     {
-      datetime t1 = dayStart + startN;
-      datetime t2 = dayStart + endN;
+      datetime t1 = (datetime)(dayStart + startN);
+      datetime t2 = (datetime)(dayStart + endN);
       if (t2 > firstTime && t1 < lastTime)
       {
         string name = PREFIX_SESSION + "N_" + IntegerToString(d);
@@ -752,8 +740,8 @@ inline void DrawSessionMarkers()
     }
     else
     {
-      datetime t1 = dayStart + startN;
-      datetime t2 = dayStart + 86400 + endN;
+      datetime t1 = (datetime)(dayStart + startN);
+      datetime t2 = (datetime)(dayStart + 86400 + endN);
       if (t2 > firstTime && t1 < lastTime)
       {
         string name = PREFIX_SESSION + "N_" + IntegerToString(d);
@@ -776,7 +764,6 @@ inline void DrawVisuals()
   DrawContextDebug();
   DrawMiddleSwingPoints();
   DrawFVGPool();
-  return; // TESTING ONLY
   DrawTriggerSwingPoints();
   DrawMSSMarkers();
   DrawOrderVisualization();

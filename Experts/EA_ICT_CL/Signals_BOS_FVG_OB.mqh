@@ -127,7 +127,7 @@ inline void ScanAndRegisterFVGs()
   }
 }
 
-/** Updates status of each FVG in pool (broken, touched, expired, MSS-triggered). */
+/** Updates status of each FVG in pool (broken, touched, MSS-triggered). TOUCHED chỉ chuyển USED khi broke hoặc MSS, không expire. */
 inline void UpdateFVGStatuses()
 {
   double bid            = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -194,24 +194,8 @@ inline void UpdateFVGStatuses()
             (g_TriggerTrend.lastMssBreak == DIR_UP) ? "▲" : "▼",
             g_FVGPool[i].mssEntry, g_FVGPool[i].mssSL,
             TimeToString(g_FVGPool[i].mssTime, TIME_MINUTES));
-        continue;
       }
-
-      int ageMinutes = (int)((TimeCurrent() - g_FVGPool[i].createdTime) / 60);
-      if (ageMinutes > InpFVGMaxAliveMin)
-      {
-        g_FVGPool[i].status   = FVG_USED;
-        g_FVGPool[i].usedCase = 0;
-        g_FVGPool[i].usedTime = TimeCurrent();
-
-        if (g_ActiveFVGIdx >= 0
-            && g_FVGPool[g_ActiveFVGIdx].id == g_FVGPool[i].id)
-          g_ActiveFVGIdx = -1;
-
-        if (InpDebugLog)
-          PrintFormat("[FVG #%d] TOUCHED EXPIRED (age=%dmin > %d) → USED",
-            g_FVGPool[i].id, ageMinutes, InpFVGMaxAliveMin);
-      }
+      // TOUCHED chỉ kết thúc khi BROKE (usedCase 1) hoặc MSS (usedCase 2); không expire theo thời gian.
     }
   }
 }

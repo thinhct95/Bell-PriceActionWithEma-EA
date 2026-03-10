@@ -18,7 +18,7 @@
 | File | Chức năng |
 |------|-----------|
 | **`Config.mqh`** | Toàn bộ **input** của EA: timeframe (Bias/Middle/Trigger), risk %, session giờ (London/NY), swing/FVG/MSS params, magic, slippage, debug flags. |
-| **`State.mqh`** | **Enums** và **struct**: `EAState`, `HTFBias`, `MarketDir`, `BlockReason`, `FVGStatus`; struct `BiasContext`, `TFTrendContext`, `FVGRecord`, `OrderPlan`, `DailyRiskContext`. Không chứa biến global. |
+| **`State.mqh`** | **Enums** và **struct**: `EAState`, `MarketDir`, `BlockReason`, `FVGStatus`; struct `TFTrendContext`, `FVGRecord`, `OrderPlan`, `DailyRiskContext`. Không chứa biến global. |
 
 ### Layer 2 – Tiện ích (sau Config + State)
 
@@ -39,8 +39,8 @@
 
 | File | Chức năng |
 |------|-----------|
-| **`Contexts.mqh`** | Cập nhật context: `ResolveBias`, `UpdateBiasContext`, `UpdateTFTrendContext`, `UpdateDailyRiskContext`, `UpdateAllContexts`. Dùng globals `g_Bias`, `g_MiddleTrend`, `g_TriggerTrend`, `g_DailyRisk`. |
-| **`Guards.mqh`** | Điều kiện trước khi trade: `IsSessionAllowed`, `IsDailyLossOK`, `IsBiasValid`, `IsMiddleTrendAligned`, `EvaluateGuards`. Set `g_BlockReason` khi block. |
+| **`Contexts.mqh`** | Cập nhật context: `UpdateTFTrendContext`, `UpdateDailyRiskContext`, `UpdateAllContexts`. Dùng globals `g_MiddleTrend`, `g_TriggerTrend`, `g_DailyRisk`. |
+| **`Guards.mqh`** | Điều kiện trước khi trade: `IsSessionAllowed`, `IsDailyLossOK`, `IsMiddleTrendValid`, `EvaluateGuards`. Set `g_BlockReason` khi block. |
 | **`Signals_BOS_FVG_OB.mqh`** | **FVG**: `IsCandleStrong`, `IsFVGInPool`, `ScanAndRegisterFVGs`, `UpdateFVGStatuses`, `GetBestActiveFVGIdx`. Quản lý pool FVG và trạng thái PENDING/TOUCHED/USED. |
 | **`Trade.mqh`** | **Order plan & execution**: `CalcLotFromRisk`, `BuildOrderPlan`, `ExecuteLimitOrder`. Gửi lệnh pending limit, dùng `g_OrderPlan`. |
 | **`StateMachine.mqh`** | **State machine**: `TransitionTo`, `ResetToIdle`, `OnStateIdle`, `OnStateWaitTouch`, `OnStateWaitTrigger`, `OnStateInTrade`, `RunStateMachine`. Điều phối theo `g_State`. |
@@ -53,7 +53,7 @@
 ```
 Layer 1:  Config.mqh  →  State.mqh
 Layer 2:  Utils, Logging, Market, Indicators, Sessions, Filters, Risk, Orders, Swing, Trailing
-Globals:  g_State, g_Bias, g_MiddleTrend, g_TriggerTrend, g_DailyRisk, g_FVGPool, g_OrderPlan, PREFIX_*
+Globals:  g_State, g_MiddleTrend, g_TriggerTrend, g_DailyRisk, g_FVGPool, g_OrderPlan, PREFIX_*
 Layer 3:  Contexts.mqh  →  Guards.mqh  →  Signals_BOS_FVG_OB.mqh  →  Trade.mqh  →  StateMachine.mqh  →  Drawing.mqh
 ```
 
@@ -65,7 +65,6 @@ Layer 3 phải include **sau** khi globals và prefix đã được khai báo tr
 
 ### Timeframe
 
-- **BiasTF (D1):** xác định bias (UP/DOWN/SIDEWAY/NONE).
 - **MiddleTF (H1):** trend + quét FVG thuận xu hướng.
 - **TriggerTF (M5):** xác nhận entry bằng MSS (market structure shift).
 
@@ -80,8 +79,8 @@ Layer 3 phải include **sau** khi globals và prefix đã được khai báo tr
 
 ### Luồng quyết định (mỗi tick)
 
-1. **UpdateAllContexts()** – Cập nhật D1 bias, H1/M5 swing (và MSS nếu đang WAIT_TRIGGER).
-2. **EvaluateGuards()** – Kiểm tra session, daily loss, bias, alignment H1/D1.
+1. **UpdateAllContexts()** – Cập nhật H1/M5 swing (và MSS nếu đang WAIT_TRIGGER).
+2. **EvaluateGuards()** – Kiểm tra session, daily loss, H1 trend.
 3. Nếu pass → **RunStateMachine()**: `UpdateFVGStatuses()` + `ScanAndRegisterFVGs()` + xử lý theo state (Idle → chọn FVG; WaitTouch → chờ touch/switch FVG; WaitTrigger → khi FVG triggered thì BuildOrderPlan + ExecuteLimitOrder; InTrade → theo dõi order/position).
 4. Nếu **InpDebugDraw** bật → **DrawVisuals()** (swing, MSS, FVG pool, order, debug panel).
 
@@ -102,7 +101,7 @@ Các hằng trong `EA_ICT_CL.mq5` dùng cho Drawing:
 - `PREFIX_MSS_MARKER` – Điểm đánh dấu MSS.
 - `PREFIX_FVG_POOL` – Các hình chữ nhật FVG.
 - `PREFIX_ORDER_VISUAL` – Vùng/label Entry/SL/TP.
-- `PREFIX_DEBUG_PANEL` – Bảng thông tin góc trái (Bias, H1/M5, Risk, State, Pool, Order).
+- `PREFIX_DEBUG_PANEL` – Bảng thông tin góc trái (H1/M5, Risk, State, Pool, Order).
 
 ---
 

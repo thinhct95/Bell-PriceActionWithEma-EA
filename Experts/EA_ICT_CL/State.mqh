@@ -9,25 +9,16 @@ enum EAState
   EA_IN_TRADE
 };
 
-enum HTFBias    { BIAS_NONE=0, BIAS_UP=1, BIAS_DOWN=-1, BIAS_SIDEWAY=2 };
-enum MarketDir  { DIR_NONE=0,  DIR_UP=1,  DIR_DOWN=-1                  };
+enum MarketDir  { DIR_NONE=0,  DIR_UP=1,  DIR_DOWN=-1 };
 enum BlockReason
 {
-  BLOCK_NONE, BLOCK_SESSION, BLOCK_DAILY_LOSS,
-  BLOCK_BIAS_MISMATCH, BLOCK_NO_BIAS
+  BLOCK_NONE, BLOCK_SESSION, BLOCK_DAILY_LOSS, BLOCK_NO_TREND
 };
 enum FVGStatus
 {
   FVG_PENDING,
   FVG_TOUCHED,
   FVG_USED
-};
-
-struct BiasContext
-{
-  HTFBias  bias;
-  double   rangeHigh, rangeLow;
-  datetime lastBarTime;
 };
 
 struct TFTrendContext
