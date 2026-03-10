@@ -1,19 +1,18 @@
 #ifndef EA_ICT_CL__LOGGING_MQH
-#define EA_ICT_CL__LOGGING_MQH  // Tránh include trùng
+#define EA_ICT_CL__LOGGING_MQH
 
-// Module: Logging – in log ra Journal khi bật InpDebugLog
-
+/** Prints message to Journal when enabled. */
 inline void LogPrint(const bool enabled, const string msg)
 {
-  if (!enabled) return;  // Tắt log thì thoát
-  Print(msg);             // In chuỗi ra Experts/Journal
+  if (!enabled) return;
+  Print(msg);
 }
 
+/** Prints formatted string (up to 3 string args) to Journal when enabled. */
 inline void LogPrintF(const bool enabled, const string fmt, const string a0 = "", const string a1 = "", const string a2 = "")
 {
-  if (!enabled) return;  // Tắt log thì thoát
-  Print(StringFormat(fmt, a0, a1, a2));  // Format rồi in (tối đa 3 tham số string)
+  if (!enabled) return;
+  Print(StringFormat(fmt, a0, a1, a2));
 }
 
-#endif // EA_ICT_CL__LOGGING_MQH
-
+#endif

@@ -1,22 +1,20 @@
 #ifndef EA_ICT_CL__SESSIONS_MQH
-#define EA_ICT_CL__SESSIONS_MQH  // Tránh include trùng
+#define EA_ICT_CL__SESSIONS_MQH
 
-// Module: Sessions – kiểm tra giờ trong khoảng (UTC), dùng cho London/NY
-
-inline bool IsHourInRange(const int hour, const int start_hour, const int end_hour)
+/** True if hour (0–23) falls in [startHour, endHour); supports overnight range. */
+inline bool IsHourInRange(const int hour, const int startHour, const int endHour)
 {
-  // start < end: [start, end); start > end: qua đêm [start,24) U [0,end)
-  if (start_hour == end_hour) return true;  // Cả ngày
-  if (start_hour < end_hour)  return (hour >= start_hour && hour < end_hour);  // Cùng ngày
-  return (hour >= start_hour || hour < end_hour);  // Qua nửa đêm
+  if (startHour == endHour) return true;
+  if (startHour < endHour)  return (hour >= startHour && hour < endHour);
+  return (hour >= startHour || hour < endHour);
 }
 
+/** Returns hour (0–23) in UTC for given datetime. */
 inline int GetUTCHour(const datetime t)
 {
   MqlDateTime dt;
-  TimeToStruct(t, dt);  // Chuyển datetime sang struct (năm, tháng, giờ...)
-  return dt.hour;      // Trả về giờ (0–23)
+  TimeToStruct(t, dt);
+  return dt.hour;
 }
 
-#endif // EA_ICT_CL__SESSIONS_MQH
-
+#endif

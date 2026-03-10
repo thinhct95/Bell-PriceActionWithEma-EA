@@ -1,32 +1,33 @@
 #ifndef EA_ICT_CL__UTILS_MQH
-#define EA_ICT_CL__UTILS_MQH  // Tránh include trùng
+#define EA_ICT_CL__UTILS_MQH
 
-// Module: Utils – helper không phụ thuộc logic EA (clamp, round, new bar)
-
-inline double ClampDouble(const double v, const double lo, const double hi)
+/** Clamps value to [lo, hi]. */
+inline double ClampDouble(const double value, const double lo, const double hi)
 {
-  if (v < lo) return lo;   // Nhỏ hơn min → trả về min
-  if (v > hi) return hi;   // Lớn hơn max → trả về max
-  return v;                // Nằm trong [lo,hi] → giữ nguyên
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
 }
 
-inline int ClampInt(const int v, const int lo, const int hi)
+/** Clamps integer value to [lo, hi]. */
+inline int ClampInt(const int value, const int lo, const int hi)
 {
-  if (v < lo) return lo;
-  if (v > hi) return hi;
-  return v;
+  if (value < lo) return lo;
+  if (value > hi) return hi;
+  return value;
 }
 
+/** Rounds value to nearest step (step must be > 0). */
 inline double RoundToStep(const double value, const double step)
 {
-  if (step <= 0.0) return value;  // Step không hợp lệ → không làm tròn
-  return MathRound(value / step) * step;  // Làm tròn theo bước step
+  if (step <= 0.0) return value;
+  return MathRound(value / step) * step;
 }
 
-inline bool IsNewBar(const datetime last_bar_time, const datetime current_bar_time)
+/** Returns true when current bar time differs from last processed bar time (new bar). */
+inline bool IsNewBar(const datetime lastBarTime, const datetime currentBarTime)
 {
-  return (current_bar_time != 0 && current_bar_time != last_bar_time);  // Bar mới khi thời gian bar đổi
+  return (currentBarTime != 0 && currentBarTime != lastBarTime);
 }
 
-#endif // EA_ICT_CL__UTILS_MQH
-
+#endif

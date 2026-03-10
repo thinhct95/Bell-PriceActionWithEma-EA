@@ -1,28 +1,24 @@
 #ifndef EA_ICT_CL__TRADE_MQH
 #define EA_ICT_CL__TRADE_MQH
 
-// Module: Trade
-// Order plan building + limit order execution.
-// Extracted from EA_ICT_CL.mq5 (Section 7B – Order plan & execution).
-// NOTE: Uses EA globals (g_*) and inputs. Include AFTER globals exist.
-
+/** Calculates lot size from account risk percent and entry–SL distance. */
 inline double CalcLotFromRisk(double entry, double sl)
 {
-  double balance    = AccountInfoDouble(ACCOUNT_BALANCE);
-  double riskMoney  = balance * InpRiskPercent / 100.0;
-  double slPips     = MathAbs(entry - sl) / _Point;
+  double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+  double riskMoney = balance * InpRiskPercent / 100.0;
+  double slPips    = MathAbs(entry - sl) / _Point;
   if (slPips < 1) return 0;
 
-  double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-  double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+  double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+  double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
   if (tickValue <= 0 || tickSize <= 0) return 0;
 
-  double pipValue   = tickValue * (_Point / tickSize);
-  double rawLot     = riskMoney / (slPips * pipValue);
+  double pipValue = tickValue * (_Point / tickSize);
+  double rawLot   = riskMoney / (slPips * pipValue);
 
-  double minLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-  double maxLot     = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-  double lotStep    = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+  double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+  double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+  double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
   if (lotStep <= 0) lotStep = 0.01;
 
   rawLot = MathFloor(rawLot / lotStep) * lotStep;
@@ -30,12 +26,13 @@ inline double CalcLotFromRisk(double entry, double sl)
   return NormalizeDouble(rawLot, 2);
 }
 
+/** Fills g_OrderPlan from FVG id, direction, MSS entry and SL; returns true if valid. */
 inline bool BuildOrderPlan(int fvgId, MarketDir dir, double mssEntry, double mssSL)
 {
   ZeroMemory(g_OrderPlan);
 
   double entry = NormalizeDouble(mssEntry, _Digits);
-  double sl = mssSL;
+  double sl    = mssSL;
 
   if (entry <= 0 || sl <= 0) return false;
 
@@ -73,24 +70,25 @@ inline bool BuildOrderPlan(int fvgId, MarketDir dir, double mssEntry, double mss
   return true;
 }
 
+/** Sends limit order from g_OrderPlan; returns ticket or 0 on failure. */
 inline ulong ExecuteLimitOrder()
 {
   if (!g_OrderPlan.valid) return 0;
 
-  ENUM_ORDER_TYPE cmd = (g_OrderPlan.direction > 0)
-                         ? ORDER_TYPE_BUY_LIMIT
-                         : ORDER_TYPE_SELL_LIMIT;
+  ENUM_ORDER_TYPE orderType = (g_OrderPlan.direction > 0)
+                                ? ORDER_TYPE_BUY_LIMIT
+                                : ORDER_TYPE_SELL_LIMIT;
 
   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-  if (cmd == ORDER_TYPE_BUY_LIMIT && g_OrderPlan.entry >= ask)
+  if (orderType == ORDER_TYPE_BUY_LIMIT && g_OrderPlan.entry >= ask)
   {
     if (InpDebugLog) PrintFormat("[ORDER] BUY LIMIT entry %.5f >= ask %.5f → skip",
       g_OrderPlan.entry, ask);
     return 0;
   }
-  if (cmd == ORDER_TYPE_SELL_LIMIT && g_OrderPlan.entry <= bid)
+  if (orderType == ORDER_TYPE_SELL_LIMIT && g_OrderPlan.entry <= bid)
   {
     if (InpDebugLog) PrintFormat("[ORDER] SELL LIMIT entry %.5f <= bid %.5f → skip",
       g_OrderPlan.entry, bid);
@@ -105,7 +103,7 @@ inline ulong ExecuteLimitOrder()
   request.action       = TRADE_ACTION_PENDING;
   request.symbol       = _Symbol;
   request.volume       = g_OrderPlan.lot;
-  request.type         = cmd;
+  request.type         = orderType;
   request.price        = g_OrderPlan.entry;
   request.sl           = g_OrderPlan.stopLoss;
   request.tp           = g_OrderPlan.takeProfit;
@@ -127,10 +125,10 @@ inline ulong ExecuteLimitOrder()
   }
 
   PrintFormat("[ORDER] ✅ %s #%llu | %.2f @ %.5f SL=%.5f TP=%.5f",
-    (cmd == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIM" : "SELL_LIM",
+    (orderType == ORDER_TYPE_BUY_LIMIT) ? "BUY_LIM" : "SELL_LIM",
     result.order, g_OrderPlan.lot, g_OrderPlan.entry,
     g_OrderPlan.stopLoss, g_OrderPlan.takeProfit);
   return result.order;
 }
 
-#endif // EA_ICT_CL__TRADE_MQH
+#endif

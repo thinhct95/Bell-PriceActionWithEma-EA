@@ -1,18 +1,17 @@
 #ifndef EA_ICT_CL__ORDERS_MQH
-#define EA_ICT_CL__ORDERS_MQH  // Tránh include trùng
+#define EA_ICT_CL__ORDERS_MQH
 
-// Module: Orders – chuẩn hóa giá, tạo comment lệnh (magic, fvg_id)
-
+/** Normalizes price to symbol digits. */
 inline double NormalizePrice(const string symbol, const double price)
 {
-  const int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);  // Số chữ số thập phân của symbol
-  return NormalizeDouble(price, digits);  // Làm tròn giá theo digits
+  const int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+  return NormalizeDouble(price, digits);
 }
 
-inline string BuildOrderComment(const long magic, const int fvg_id, const string tag = "ICT")
+/** Builds order comment string for tracing (magic, FVG id, optional tag). */
+inline string BuildOrderComment(const long magic, const int fvgId, const string tag = "ICT")
 {
-  return StringFormat("%s|mg=%I64d|fvg=%d", tag, magic, fvg_id);  // Comment để trace EA + FVG
+  return StringFormat("%s|mg=%I64d|fvg=%d", tag, magic, fvgId);
 }
 
-#endif // EA_ICT_CL__ORDERS_MQH
-
+#endif

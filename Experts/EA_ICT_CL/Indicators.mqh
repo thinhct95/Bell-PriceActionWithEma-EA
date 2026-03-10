@@ -1,22 +1,21 @@
 #ifndef EA_ICT_CL__INDICATORS_MQH
-#define EA_ICT_CL__INDICATORS_MQH  // Tránh include trùng
+#define EA_ICT_CL__INDICATORS_MQH
 
-// Module: Indicators – copy dữ liệu buffer/time an toàn (series index 0 = mới nhất)
-
-inline bool CopyBufferSafe(const int handle, const int buffer, const int start_pos, const int count, double &out[])
+/** Copies indicator buffer into out[] (series); returns true only if copied count equals requested. */
+inline bool CopyBufferSafe(const int handle, const int buffer, const int startPos, const int count, double &out[])
 {
-  if (handle == INVALID_HANDLE) return false;  // Handle không hợp lệ
-  ArraySetAsSeries(out, true);                 // Index 0 = bar mới nhất
-  const int copied = CopyBuffer(handle, buffer, start_pos, count, out);  // Copy dữ liệu indicator
-  return (copied == count);  // Thành công khi copy đủ count phần tử
+  if (handle == INVALID_HANDLE) return false;
+  ArraySetAsSeries(out, true);
+  const int copiedCount = CopyBuffer(handle, buffer, startPos, count, out);
+  return (copiedCount == count);
 }
 
-inline bool CopyTimeSafe(const string symbol, const ENUM_TIMEFRAMES tf, const int start_pos, const int count, datetime &out[])
+/** Copies bar times into out[] (series); returns true only if copied count equals requested. */
+inline bool CopyTimeSafe(const string symbol, const ENUM_TIMEFRAMES tf, const int startPos, const int count, datetime &out[])
 {
-  ArraySetAsSeries(out, true);  // Index 0 = bar mới nhất
-  const int copied = CopyTime(symbol, tf, start_pos, count, out);  // Copy thời gian mở bar
-  return (copied == count);     // Thành công khi copy đủ count
+  ArraySetAsSeries(out, true);
+  const int copiedCount = CopyTime(symbol, tf, startPos, count, out);
+  return (copiedCount == count);
 }
 
-#endif // EA_ICT_CL__INDICATORS_MQH
-
+#endif

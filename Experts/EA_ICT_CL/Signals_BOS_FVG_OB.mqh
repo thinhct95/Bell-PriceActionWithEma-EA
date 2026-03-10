@@ -1,168 +1,169 @@
 #ifndef EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH
-#define EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH  // Tránh include trùng
+#define EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH
 
-// Module: Signals (FVG) – helper FVG, quét/đăng ký pool, cập nhật trạng thái, chọn FVG tốt nhất
-
-//+------------------------------------------------------------------+
-//|  SECTION 5 – FVG HELPERS                                         |
-//+------------------------------------------------------------------+
-
-inline bool IsCandleStrong(ENUM_TIMEFRAMES tf, int i)
+/** True if candle at bar index has body % of range >= InpFVGMinBodyPct. */
+inline bool IsCandleStrong(ENUM_TIMEFRAMES tf, int barIndex)
 {
-  double h = iHigh(_Symbol, tf, i), l = iLow(_Symbol, tf, i);
-  double o = iOpen(_Symbol, tf, i), c = iClose(_Symbol, tf, i);
-  double range = h - l;
-  if (range < _Point) return false;  // Tránh chia 0
-  return (MathAbs(c - o) / range * 100.0) >= InpFVGMinBodyPct;  // Body % >= ngưỡng = nến mạnh
+  double high   = iHigh(_Symbol, tf, barIndex);
+  double low    = iLow(_Symbol, tf, barIndex);
+  double open   = iOpen(_Symbol, tf, barIndex);
+  double close  = iClose(_Symbol, tf, barIndex);
+  double range  = high - low;
+  if (range < _Point) return false;
+  return (MathAbs(close - open) / range * 100.0) >= InpFVGMinBodyPct;
 }
 
-inline bool IsFVGInPool(datetime created)
+/** True if an FVG with given created time already exists in pool. */
+inline bool IsFVGInPool(datetime createdTime)
 {
   for (int j = 0; j < g_FVGCount; j++)
-    if (g_FVGPool[j].createdTime == created) return true;  // Đã có FVG cùng thời điểm tạo
+    if (g_FVGPool[j].createdTime == createdTime) return true;
   return false;
 }
 
-//+------------------------------------------------------------------+
-//|  SECTION 6 – FVG POOL: SCAN & REGISTER                          |
-//+------------------------------------------------------------------+
-
+/** Scans middle TF for FVGs and registers them into g_FVGPool (once per new bar). */
 inline void ScanAndRegisterFVGs()
 {
-  static datetime s_lastScan = 0;
-  datetime t0 = iTime(_Symbol, InpMiddleTF, 0);
-  if (t0 == s_lastScan) return;
-  s_lastScan = t0;
+  static datetime lastScanBarTime = 0;
+  datetime currentBarTime = iTime(_Symbol, InpMiddleTF, 0);
+  if (currentBarTime == lastScanBarTime) return;
+  lastScanBarTime = currentBarTime;
 
-  MarketDir dir = g_MiddleTrend.trend;
-  if (dir == DIR_NONE) return;
+  MarketDir trendDir = g_MiddleTrend.trend;
+  if (trendDir == DIR_NONE) return;
 
-  int maxBar = MathMin(InpFVGScanBars, Bars(_Symbol, InpMiddleTF) - 2);
+  int maxBarIndex = MathMin(InpFVGScanBars, Bars(_Symbol, InpMiddleTF) - 2);
 
-  for (int i = 2; i <= maxBar; i++)
+  for (int i = 2; i <= maxBarIndex; i++)
   {
-    double leftH  = iHigh (_Symbol, InpMiddleTF, i + 1);
-    double leftL  = iLow  (_Symbol, InpMiddleTF, i + 1);
-    double rightH = iHigh (_Symbol, InpMiddleTF, i - 1);
-    double rightL = iLow  (_Symbol, InpMiddleTF, i - 1);
-    double midO   = iOpen (_Symbol, InpMiddleTF, i);
-    double midC   = iClose(_Symbol, InpMiddleTF, i);
-    double gH = 0, gL = 0;
+    double leftBarHigh  = iHigh (_Symbol, InpMiddleTF, i + 1);
+    double leftBarLow   = iLow  (_Symbol, InpMiddleTF, i + 1);
+    double rightBarHigh = iHigh (_Symbol, InpMiddleTF, i - 1);
+    double rightBarLow  = iLow  (_Symbol, InpMiddleTF, i - 1);
+    double midOpen      = iOpen (_Symbol, InpMiddleTF, i);
+    double midClose     = iClose(_Symbol, InpMiddleTF, i);
+    double gapHigh = 0, gapLow = 0;
 
-    if (dir == DIR_UP)
+    if (trendDir == DIR_UP)
     {
-      if (leftH >= rightL) continue;
-      if (midC <= midO) continue;
+      if (leftBarHigh >= rightBarLow) continue;
+      if (midClose <= midOpen) continue;
       if (!IsCandleStrong(InpMiddleTF, i)) continue;
-      gL = leftH; gH = rightL;
+      gapLow = leftBarHigh;
+      gapHigh = rightBarLow;
     }
     else
     {
-      if (leftL <= rightH) continue;
-      if (midC >= midO) continue;
+      if (leftBarLow <= rightBarHigh) continue;
+      if (midClose >= midOpen) continue;
       if (!IsCandleStrong(InpMiddleTF, i)) continue;
-      gH = leftL; gL = rightH;
+      gapHigh = leftBarLow;
+      gapLow = rightBarHigh;
     }
 
-    datetime created = iTime(_Symbol, InpMiddleTF, i - 1);
-    if (IsFVGInPool(created)) continue;
+    datetime createdTime = iTime(_Symbol, InpMiddleTF, i - 1);
+    if (IsFVGInPool(createdTime)) continue;
 
     if (g_FVGCount >= MAX_FVG_POOL)
     {
-      int evict = -1; datetime oldest = TimeCurrent();
+      int evictIndex = -1;
+      datetime oldestTime = TimeCurrent();
       for (int j = 0; j < g_FVGCount; j++)
-        if (g_FVGPool[j].status == FVG_USED && g_FVGPool[j].createdTime < oldest)
-          { oldest = g_FVGPool[j].createdTime; evict = j; }
-      if (evict < 0) { if (InpDebugLog) Print("[FVG POOL] Full"); break; }
-      for (int j = evict; j < g_FVGCount - 1; j++) g_FVGPool[j] = g_FVGPool[j + 1];
+        if (g_FVGPool[j].status == FVG_USED && g_FVGPool[j].createdTime < oldestTime)
+          { oldestTime = g_FVGPool[j].createdTime; evictIndex = j; }
+      if (evictIndex < 0) { if (InpDebugLog) Print("[FVG POOL] Full"); break; }
+      for (int j = evictIndex; j < g_FVGCount - 1; j++) g_FVGPool[j] = g_FVGPool[j + 1];
       g_FVGCount--;
-      if      (g_ActiveFVGIdx >  evict) g_ActiveFVGIdx--;
-      else if (g_ActiveFVGIdx == evict) g_ActiveFVGIdx = -1;
+      if      (g_ActiveFVGIdx >  evictIndex) g_ActiveFVGIdx--;
+      else if (g_ActiveFVGIdx == evictIndex) g_ActiveFVGIdx = -1;
     }
 
-    FVGRecord rec;
-    ZeroMemory(rec);
-    rec.id = g_NextFVGId++; rec.direction = dir;
-    rec.high = gH; rec.low = gL; rec.mid = (gH + gL) / 2.0;
-    rec.createdTime = created;
-    int rightBar = i - 1;
+    FVGRecord record;
+    ZeroMemory(record);
+    record.id = g_NextFVGId++;
+    record.direction = trendDir;
+    record.high = gapHigh;
+    record.low = gapLow;
+    record.mid = (gapHigh + gapLow) / 2.0;
+    record.createdTime = createdTime;
+    int rightBarIndex = i - 1;
 
-    bool c1Hit = false; datetime c1T = 0;
-    for (int j = rightBar - 1; j >= 1; j--)
+    bool isBrokenByClose = false;
+    datetime breakTime = 0;
+    for (int j = rightBarIndex - 1; j >= 1; j--)
     {
-      double cl = iClose(_Symbol, InpMiddleTF, j);
-      if ((rec.direction == DIR_UP   && cl < rec.low) ||
-          (rec.direction == DIR_DOWN && cl > rec.high))
-        { c1Hit = true; c1T = iTime(_Symbol, InpMiddleTF, j); break; }
+      double closeAtJ = iClose(_Symbol, InpMiddleTF, j);
+      if ((record.direction == DIR_UP   && closeAtJ < record.low) ||
+          (record.direction == DIR_DOWN && closeAtJ > record.high))
+        { isBrokenByClose = true; breakTime = iTime(_Symbol, InpMiddleTF, j); break; }
     }
-    if (c1Hit) { rec.status = FVG_USED; rec.usedCase = 1; rec.usedTime = c1T; }
+    if (isBrokenByClose) { record.status = FVG_USED; record.usedCase = 1; record.usedTime = breakTime; }
     else
     {
-      bool tdHit = false; datetime tdT = 0;
-      for (int j = rightBar - 1; j >= 1; j--)
+      bool isTouchedInGap = false;
+      datetime touchTimeInGap = 0;
+      for (int j = rightBarIndex - 1; j >= 1; j--)
       {
-        bool inGap = (rec.direction == DIR_UP   && iLow (_Symbol, InpMiddleTF, j) <= rec.high) ||
-                     (rec.direction == DIR_DOWN && iHigh(_Symbol, InpMiddleTF, j) >= rec.low);
-        if (inGap) { tdHit = true; tdT = iTime(_Symbol, InpMiddleTF, j); break; }
+        bool inGap = (record.direction == DIR_UP   && iLow (_Symbol, InpMiddleTF, j) <= record.high) ||
+                     (record.direction == DIR_DOWN && iHigh(_Symbol, InpMiddleTF, j) >= record.low);
+        if (inGap) { isTouchedInGap = true; touchTimeInGap = iTime(_Symbol, InpMiddleTF, j); break; }
       }
-      if (tdHit) { rec.status = FVG_TOUCHED; rec.touchTime = tdT; rec.triggerTrendAtTouch = g_TriggerTrend.trend; }
+      if (isTouchedInGap) { record.status = FVG_TOUCHED; record.touchTime = touchTimeInGap; record.triggerTrendAtTouch = g_TriggerTrend.trend; }
       else
       {
-        rec.status = FVG_PENDING;
-        if ((int)(TimeCurrent() - rec.createdTime) > InpFVGMaxAliveMin * 60)
-          { rec.status = FVG_USED; rec.usedCase = 0; rec.usedTime = TimeCurrent(); }
+        record.status = FVG_PENDING;
+        if ((int)(TimeCurrent() - record.createdTime) > InpFVGMaxAliveMin * 60)
+          { record.status = FVG_USED; record.usedCase = 0; record.usedTime = TimeCurrent(); }
       }
     }
 
-    g_FVGPool[g_FVGCount] = rec;
+    g_FVGPool[g_FVGCount] = record;
     g_FVGCount++;
 
     if (InpDebugLog)
       PrintFormat("[FVG +] #%d %s [%.5f–%.5f] %s | %s",
-        rec.id, EnumToString(rec.direction), rec.low, rec.high,
-        EnumToString(rec.status), TimeToString(rec.createdTime));
+        record.id, EnumToString(record.direction), record.low, record.high,
+        EnumToString(record.status), TimeToString(record.createdTime));
   }
 }
 
-//+------------------------------------------------------------------+
-//|  SECTION 7 – FVG POOL: UPDATE STATUSES (every tick)             |
-//+------------------------------------------------------------------+
-
+/** Updates status of each FVG in pool (broken, touched, expired, MSS-triggered). */
 inline void UpdateFVGStatuses()
 {
-  double   bid   = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-  double   midC1 = iClose(_Symbol, InpMiddleTF, 1);
-  datetime midT1 = iTime (_Symbol, InpMiddleTF, 1);
+  double bid            = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  double lastBarClose   = iClose(_Symbol, InpMiddleTF, 1);
+  datetime lastBarTime  = iTime (_Symbol, InpMiddleTF, 1);
 
   for (int i = 0; i < g_FVGCount; i++)
   {
     if (g_FVGPool[i].status == FVG_USED) continue;
 
-    bool c1 = (g_FVGPool[i].direction == DIR_UP   && midC1 < g_FVGPool[i].low) ||
-              (g_FVGPool[i].direction == DIR_DOWN && midC1 > g_FVGPool[i].high);
-    if (c1)
+    bool isBroken = (g_FVGPool[i].direction == DIR_UP   && lastBarClose < g_FVGPool[i].low) ||
+                    (g_FVGPool[i].direction == DIR_DOWN && lastBarClose > g_FVGPool[i].high);
+    if (isBroken)
     {
       g_FVGPool[i].status   = FVG_USED;
       g_FVGPool[i].usedCase = 1;
-      g_FVGPool[i].usedTime = midT1;
+      g_FVGPool[i].usedTime = lastBarTime;
       if (InpDebugLog)
-        PrintFormat("[FVG #%d] BROKEN | close=%.5f", g_FVGPool[i].id, midC1);
+        PrintFormat("[FVG #%d] BROKEN | close=%.5f", g_FVGPool[i].id, lastBarClose);
       continue;
     }
 
     if (g_FVGPool[i].status == FVG_PENDING)
     {
-      int age = (int)(TimeCurrent() - g_FVGPool[i].createdTime);
-      if (age > InpFVGMaxAliveMin * 60)
+      int ageSeconds = (int)(TimeCurrent() - g_FVGPool[i].createdTime);
+      if (ageSeconds > InpFVGMaxAliveMin * 60)
       {
-        g_FVGPool[i].status = FVG_USED; g_FVGPool[i].usedCase = 0;
+        g_FVGPool[i].status = FVG_USED;
+        g_FVGPool[i].usedCase = 0;
         g_FVGPool[i].usedTime = TimeCurrent();
         continue;
       }
 
-      bool touched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high) ||
-                     (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low);
-      if (touched)
+      bool isTouched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high) ||
+                       (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low);
+      if (isTouched)
       {
         g_FVGPool[i].status              = FVG_TOUCHED;
         g_FVGPool[i].touchTime           = TimeCurrent();
@@ -174,11 +175,11 @@ inline void UpdateFVGStatuses()
     }
     else if (g_FVGPool[i].status == FVG_TOUCHED)
     {
-      bool hasMSS =
+      bool hasMssAfterTouch =
         g_TriggerTrend.lastMssTime > g_FVGPool[i].touchTime &&
         g_TriggerTrend.lastMssBreak == g_FVGPool[i].direction;
 
-      if (hasMSS)
+      if (hasMssAfterTouch)
       {
         g_FVGPool[i].status   = FVG_USED;
         g_FVGPool[i].usedCase = 2;
@@ -196,8 +197,8 @@ inline void UpdateFVGStatuses()
         continue;
       }
 
-      int ageMin = (int)((TimeCurrent() - g_FVGPool[i].createdTime) / 60);
-      if (ageMin > InpFVGMaxAliveMin)
+      int ageMinutes = (int)((TimeCurrent() - g_FVGPool[i].createdTime) / 60);
+      if (ageMinutes > InpFVGMaxAliveMin)
       {
         g_FVGPool[i].status   = FVG_USED;
         g_FVGPool[i].usedCase = 0;
@@ -209,31 +210,30 @@ inline void UpdateFVGStatuses()
 
         if (InpDebugLog)
           PrintFormat("[FVG #%d] TOUCHED EXPIRED (age=%dmin > %d) → USED",
-            g_FVGPool[i].id, ageMin, InpFVGMaxAliveMin);
+            g_FVGPool[i].id, ageMinutes, InpFVGMaxAliveMin);
       }
     }
   }
 }
 
-//+------------------------------------------------------------------+
-//|  SECTION 8 – BEST FVG SELECTOR                                   |
-//+------------------------------------------------------------------+
-
+/** Returns index of best active FVG (prefer TOUCHED, then newest by created time). */
 inline int GetBestActiveFVGIdx()
 {
-  int bestIdx = -1; datetime bestTime = 0; bool foundTouch = false;
+  int bestIndex = -1;
+  datetime bestCreatedTime = 0;
+  bool foundTouched = false;
   for (int i = 0; i < g_FVGCount; i++)
   {
     if (g_FVGPool[i].status == FVG_USED) continue;
     if (g_FVGPool[i].status == FVG_TOUCHED)
     {
-      if (!foundTouch || g_FVGPool[i].createdTime > bestTime)
-        { foundTouch = true; bestIdx = i; bestTime = g_FVGPool[i].createdTime; }
+      if (!foundTouched || g_FVGPool[i].createdTime > bestCreatedTime)
+        { foundTouched = true; bestIndex = i; bestCreatedTime = g_FVGPool[i].createdTime; }
     }
-    else if (!foundTouch && g_FVGPool[i].createdTime > bestTime)
-      { bestIdx = i; bestTime = g_FVGPool[i].createdTime; }
+    else if (!foundTouched && g_FVGPool[i].createdTime > bestCreatedTime)
+      { bestIndex = i; bestCreatedTime = g_FVGPool[i].createdTime; }
   }
-  return bestIdx;
+  return bestIndex;
 }
 
-#endif // EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH
+#endif

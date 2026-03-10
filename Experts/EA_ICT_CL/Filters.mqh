@@ -1,16 +1,14 @@
 #ifndef EA_ICT_CL__FILTERS_MQH
-#define EA_ICT_CL__FILTERS_MQH  // Tránh include trùng
+#define EA_ICT_CL__FILTERS_MQH
 
-// Module: Filters – lọc spread (có thể mở rộng news, max trades...)
-
-inline bool Filter_MaxSpreadPoints(const string symbol, const double max_spread_points)
+/** Returns true if symbol spread in points is within max allowed (or no limit). */
+inline bool Filter_MaxSpreadPoints(const string symbol, const double maxSpreadPoints)
 {
-  if (max_spread_points <= 0) return true;  // Không giới hạn → luôn pass
-  const double pt = SymbolInfoDouble(symbol, SYMBOL_POINT);
-  if (pt <= 0.0) return true;  // Point lỗi → bỏ qua check
-  const double spread_pts = (SymbolInfoDouble(symbol, SYMBOL_ASK) - SymbolInfoDouble(symbol, SYMBOL_BID)) / pt;  // Spread theo point
-  return (spread_pts <= max_spread_points);  // Pass khi spread <= ngưỡng
+  if (maxSpreadPoints <= 0) return true;
+  const double pointSize = SymbolInfoDouble(symbol, SYMBOL_POINT);
+  if (pointSize <= 0.0) return true;
+  const double spreadInPoints = (SymbolInfoDouble(symbol, SYMBOL_ASK) - SymbolInfoDouble(symbol, SYMBOL_BID)) / pointSize;
+  return (spreadInPoints <= maxSpreadPoints);
 }
 
-#endif // EA_ICT_CL__FILTERS_MQH
-
+#endif

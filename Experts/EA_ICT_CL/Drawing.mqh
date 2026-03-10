@@ -1,51 +1,48 @@
 #ifndef EA_ICT_CL__DRAWING_MQH
 #define EA_ICT_CL__DRAWING_MQH
 
-// Module: Drawing
-// Extracted from EA_ICT_CL.mq5 (Section 11 – Drawing).
-// NOTE: Uses EA globals (g_*), prefix constants (PREFIX_SWING_MIDDLE, PREFIX_ORDER_VISUAL, etc.), and inputs.
-//       Include AFTER structs + globals + prefixes are declared in EA_ICT_CL.mq5.
-
+/** Draws one swing point (arrow + label + optional key-level line) on chart. */
 inline void DrawOneSwingPoint(
   string prefix, ENUM_TIMEFRAMES tf,
   string tag, bool isHigh, int barIdx, double price,
   color clr, bool isKL, int arrowSz = 2, int fontSize = 8)
 {
-  string arrN = prefix + "ARR_" + tag;
-  string txtN = prefix + "TXT_" + tag;
-  string klN  = prefix + "KL_"  + tag;
-  datetime t  = iTime(_Symbol, tf, barIdx);
+  string arrowObjName = prefix + "ARR_" + tag;
+  string textObjName  = prefix + "TXT_" + tag;
+  string keyLevelObjName = prefix + "KL_"  + tag;
+  datetime barTime   = iTime(_Symbol, tf, barIdx);
 
-  if (ObjectFind(0, arrN) < 0) ObjectCreate(0, arrN, OBJ_ARROW, 0, t, price);
-  ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isHigh ? 234 : 233);
-  ObjectSetInteger(0, arrN, OBJPROP_COLOR,     clr);
-  ObjectSetInteger(0, arrN, OBJPROP_WIDTH,     arrowSz);
-  ObjectSetInteger(0, arrN, OBJPROP_ANCHOR,    isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
-  ObjectMove(0, arrN, 0, t, price);
+  if (ObjectFind(0, arrowObjName) < 0) ObjectCreate(0, arrowObjName, OBJ_ARROW, 0, barTime, price);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_ARROWCODE, isHigh ? 234 : 233);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_WIDTH,     arrowSz);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_ANCHOR,    isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
+  ObjectMove(0, arrowObjName, 0, barTime, price);
 
-  double rng  = iHigh(_Symbol, tf, barIdx) - iLow(_Symbol, tf, barIdx);
-  double txtY = isHigh ? price + rng * 0.3 : price - rng * 0.3;
-  if (ObjectFind(0, txtN) < 0) ObjectCreate(0, txtN, OBJ_TEXT, 0, t, txtY);
-  ObjectMove(0, txtN, 0, t, txtY);
-  ObjectSetString (0, txtN, OBJPROP_TEXT,    tag);
-  ObjectSetInteger(0, txtN, OBJPROP_COLOR,   clr);
-  ObjectSetInteger(0, txtN, OBJPROP_FONTSIZE, fontSize);
-  ObjectSetInteger(0, txtN, OBJPROP_ANCHOR,  isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+  double barRange = iHigh(_Symbol, tf, barIdx) - iLow(_Symbol, tf, barIdx);
+  double textY    = isHigh ? price + barRange * 0.3 : price - barRange * 0.3;
+  if (ObjectFind(0, textObjName) < 0) ObjectCreate(0, textObjName, OBJ_TEXT, 0, barTime, textY);
+  ObjectMove(0, textObjName, 0, barTime, textY);
+  ObjectSetString (0, textObjName, OBJPROP_TEXT,    tag);
+  ObjectSetInteger(0, textObjName, OBJPROP_COLOR,   clr);
+  ObjectSetInteger(0, textObjName, OBJPROP_FONTSIZE, fontSize);
+  ObjectSetInteger(0, textObjName, OBJPROP_ANCHOR,  isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
 
   if (isKL)
   {
-    datetime tEnd = iTime(_Symbol, tf, 0);
-    if (ObjectFind(0, klN) < 0) ObjectCreate(0, klN, OBJ_TREND, 0, t, price, tEnd, price);
-    ObjectSetInteger(0, klN, OBJPROP_COLOR,     clr);
-    ObjectSetInteger(0, klN, OBJPROP_STYLE,     STYLE_DASH);
-    ObjectSetInteger(0, klN, OBJPROP_WIDTH,     1);
-    ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
-    ObjectMove(0, klN, 0, t, price);
-    ObjectMove(0, klN, 1, tEnd, price);
+    datetime endTime = iTime(_Symbol, tf, 0);
+    if (ObjectFind(0, keyLevelObjName) < 0) ObjectCreate(0, keyLevelObjName, OBJ_TREND, 0, barTime, price, endTime, price);
+    ObjectSetInteger(0, keyLevelObjName, OBJPROP_COLOR,     clr);
+    ObjectSetInteger(0, keyLevelObjName, OBJPROP_STYLE,     STYLE_DASH);
+    ObjectSetInteger(0, keyLevelObjName, OBJPROP_WIDTH,     1);
+    ObjectSetInteger(0, keyLevelObjName, OBJPROP_RAY_RIGHT, false);
+    ObjectMove(0, keyLevelObjName, 0, barTime, price);
+    ObjectMove(0, keyLevelObjName, 1, endTime, price);
   }
-  else ObjectDelete(0, klN);
+  else ObjectDelete(0, keyLevelObjName);
 }
 
+/** Draws H1 swing points (H0/H1/L0/L1) when debug draw enabled. */
 inline void DrawMiddleSwingPoints()
 {
   if (!InpDebugDraw) return;
@@ -61,6 +58,7 @@ inline void DrawMiddleSwingPoints()
   DrawOneSwingPoint(PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleL1", false, g_MiddleTrend.idxL1, g_MiddleTrend.l1, C'160,140,0',  false,  2, 8);
 }
 
+/** Draws M5 swing points when debug draw enabled. */
 inline void DrawTriggerSwingPoints()
 {
   if (!InpDebugDraw) return;
@@ -76,52 +74,54 @@ inline void DrawTriggerSwingPoints()
   DrawOneSwingPoint(PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerL1", false, g_TriggerTrend.idxL1, g_TriggerTrend.l1, C'160,100,20',  false,  1, 7);
 }
 
+/** Draws one MSS marker (arrow + label + horizontal level) at given time/level. */
 inline void DrawMSSMarker(
   string mssId, ENUM_TIMEFRAMES tf,
   datetime mssTime, double mssLevel, MarketDir mssBreak)
 {
   if (!InpDebugDraw || mssTime == 0) return;
 
-  string arrN = PREFIX_MSS_MARKER + mssId + "_ARR";
-  string lblN = PREFIX_MSS_MARKER + mssId + "_LBL";
-  string klN  = PREFIX_MSS_MARKER + mssId + "_KL";
+  string arrowObjName = PREFIX_MSS_MARKER + mssId + "_ARR";
+  string labelObjName = PREFIX_MSS_MARKER + mssId + "_LBL";
+  string levelObjName = PREFIX_MSS_MARKER + mssId + "_KL";
 
-  bool   isBull = (mssBreak == DIR_UP);
-  color  clr    = isBull ? clrLime : clrTomato;
+  bool  isBull = (mssBreak == DIR_UP);
+  color clr    = isBull ? clrLime : clrTomato;
 
-  int shift = MyBarShift(_Symbol, tf, mssTime);
-  if (shift < 0) return;
-  double closeAtMss = iClose(_Symbol, tf, shift);
+  int barShift = MyBarShift(_Symbol, tf, mssTime);
+  if (barShift < 0) return;
+  double closeAtMss = iClose(_Symbol, tf, barShift);
 
-  if (ObjectFind(0, arrN) < 0)
-    ObjectCreate(0, arrN, OBJ_ARROW, 0, mssTime, closeAtMss);
-  ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isBull ? 233 : 234);
-  ObjectSetInteger(0, arrN, OBJPROP_COLOR,     clr);
-  ObjectSetInteger(0, arrN, OBJPROP_WIDTH,     2);
-  ObjectSetInteger(0, arrN, OBJPROP_ANCHOR,    isBull ? ANCHOR_TOP : ANCHOR_BOTTOM);
-  ObjectMove(0, arrN, 0, mssTime, closeAtMss);
+  if (ObjectFind(0, arrowObjName) < 0)
+    ObjectCreate(0, arrowObjName, OBJ_ARROW, 0, mssTime, closeAtMss);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_ARROWCODE, isBull ? 233 : 234);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_WIDTH,     2);
+  ObjectSetInteger(0, arrowObjName, OBJPROP_ANCHOR,    isBull ? ANCHOR_TOP : ANCHOR_BOTTOM);
+  ObjectMove(0, arrowObjName, 0, mssTime, closeAtMss);
 
-  double rng  = iHigh(_Symbol, tf, shift) - iLow(_Symbol, tf, shift);
-  double lblY = isBull ? closeAtMss - rng * 0.4 : closeAtMss + rng * 0.4;
-  if (ObjectFind(0, lblN) < 0)
-    ObjectCreate(0, lblN, OBJ_TEXT, 0, mssTime, lblY);
-  ObjectMove(0, lblN, 0, mssTime, lblY);
-  ObjectSetString (0, lblN, OBJPROP_TEXT,    isBull ? "▲MSS" : "▼MSS");
-  ObjectSetInteger(0, lblN, OBJPROP_COLOR,   clr);
-  ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,  isBull ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+  double barRange = iHigh(_Symbol, tf, barShift) - iLow(_Symbol, tf, barShift);
+  double labelY   = isBull ? closeAtMss - barRange * 0.4 : closeAtMss + barRange * 0.4;
+  if (ObjectFind(0, labelObjName) < 0)
+    ObjectCreate(0, labelObjName, OBJ_TEXT, 0, mssTime, labelY);
+  ObjectMove(0, labelObjName, 0, mssTime, labelY);
+  ObjectSetString (0, labelObjName, OBJPROP_TEXT,    isBull ? "▲MSS" : "▼MSS");
+  ObjectSetInteger(0, labelObjName, OBJPROP_COLOR,   clr);
+  ObjectSetInteger(0, labelObjName, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, labelObjName, OBJPROP_ANCHOR,  isBull ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
 
-  datetime tEnd = iTime(_Symbol, tf, 0);
-  if (ObjectFind(0, klN) < 0)
-    ObjectCreate(0, klN, OBJ_TREND, 0, mssTime, mssLevel, tEnd, mssLevel);
-  ObjectSetInteger(0, klN, OBJPROP_COLOR,     clr);
-  ObjectSetInteger(0, klN, OBJPROP_STYLE,     STYLE_DOT);
-  ObjectSetInteger(0, klN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
-  ObjectMove(0, klN, 0, mssTime, mssLevel);
-  ObjectMove(0, klN, 1, tEnd,    mssLevel);
+  datetime endTime = iTime(_Symbol, tf, 0);
+  if (ObjectFind(0, levelObjName) < 0)
+    ObjectCreate(0, levelObjName, OBJ_TREND, 0, mssTime, mssLevel, endTime, mssLevel);
+  ObjectSetInteger(0, levelObjName, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, levelObjName, OBJPROP_STYLE,     STYLE_DOT);
+  ObjectSetInteger(0, levelObjName, OBJPROP_WIDTH,     1);
+  ObjectSetInteger(0, levelObjName, OBJPROP_RAY_RIGHT, false);
+  ObjectMove(0, levelObjName, 0, mssTime, mssLevel);
+  ObjectMove(0, levelObjName, 1, endTime,    mssLevel);
 }
 
+/** Draws MSS markers for all FVGs that were triggered by MSS (usedCase == 2). */
 inline void DrawMSSMarkers()
 {
   if (!InpDebugDraw) return;
@@ -138,6 +138,7 @@ inline void DrawMSSMarkers()
   }
 }
 
+/** Draws order plan zones/lines/labels (entry, SL, TP) when valid and debug draw on. */
 inline void DrawOrderVisualization()
 {
   if (!InpDebugDraw) return;
@@ -233,6 +234,7 @@ inline void DrawOrderVisualization()
   ObjectSetInteger(0, infoLblN, OBJPROP_ANCHOR, ANCHOR_LEFT);
 }
 
+/** Draws one FVG record (rectangle + mid line + label) by pool index. */
 inline void DrawOneFVGRecord(int idx)
 {
   if (!InpDebugDraw || idx < 0 || idx >= g_FVGCount) return;
@@ -294,12 +296,14 @@ inline void DrawOneFVGRecord(int idx)
   ObjectSetInteger(0, lblN, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
 }
 
+/** Draws all FVGs in pool (calls DrawOneFVGRecord for each). */
 inline void DrawFVGPool()
 {
   if (!InpDebugDraw) return;
   for (int i = 0; i < g_FVGCount; i++) DrawOneFVGRecord(i);
 }
 
+/** Draws debug panel (bias, H1/M5 trend, risk, state, pool, active FVG, order). */
 inline void DrawContextDebug()
 {
   if (!InpDebugDraw) return;
@@ -350,10 +354,10 @@ inline void DrawContextDebug()
     { LBL(PREFIX_DEBUG_PANEL + "BLK", StringFormat("Block: %s", EnumToString(g_BlockReason)), 178, clrTomato) }
   else ObjectDelete(0, PREFIX_DEBUG_PANEL + "BLK");
 
-  int nP=0,nT=0,nU=0;
-  for(int i=0;i<g_FVGCount;i++)
-    { if(g_FVGPool[i].status==FVG_PENDING) nP++; else if(g_FVGPool[i].status==FVG_TOUCHED) nT++; else nU++; }
-  LBL(PREFIX_DEBUG_PANEL + "POOL", StringFormat("Pool : P=%d T=%d U=%d (%d/%d)", nP,nT,nU,g_FVGCount,MAX_FVG_POOL), 202, clrDodgerBlue)
+  int countPending = 0, countTouched = 0, countUsed = 0;
+  for (int i = 0; i < g_FVGCount; i++)
+    { if (g_FVGPool[i].status == FVG_PENDING) countPending++; else if (g_FVGPool[i].status == FVG_TOUCHED) countTouched++; else countUsed++; }
+  LBL(PREFIX_DEBUG_PANEL + "POOL", StringFormat("Pool : P=%d T=%d U=%d (%d/%d)", countPending, countTouched, countUsed, g_FVGCount, MAX_FVG_POOL), 202, clrDodgerBlue)
 
   if (g_ActiveFVGIdx >= 0 && g_ActiveFVGIdx < g_FVGCount)
   {
@@ -376,6 +380,7 @@ inline void DrawContextDebug()
   ChartRedraw(0);
 }
 
+/** Draws all debug visuals: swings, MSS markers, FVG pool, order, debug panel. */
 inline void DrawVisuals()
 {
   DrawMiddleSwingPoints();
