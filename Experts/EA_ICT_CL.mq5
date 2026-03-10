@@ -59,6 +59,7 @@ const string PREFIX_MSS_MARKER     = "MSSMarker_";
 const string PREFIX_FVG_POOL       = "FVGPool_";
 const string PREFIX_ORDER_VISUAL   = "OrderVisual_";
 const string PREFIX_DEBUG_PANEL    = "DebugPanel_";
+const string PREFIX_SESSION        = "Session_";
 
 #include "EA_ICT_CL/Contexts.mqh"
 #include "EA_ICT_CL/Guards.mqh"
@@ -98,11 +99,12 @@ void OnTick()
   if (InpDebugDraw) DrawVisuals();
 }
 
-/** Removes swing and debug panel objects and redraws chart. */
+/** Removes swing, session, debug panel objects and redraws chart. */
 void OnDeinit(const int reason)
 {
   ObjectsDeleteAll(0, PREFIX_SWING_MIDDLE);
   ObjectsDeleteAll(0, PREFIX_SWING_TRIGGER);
+  ObjectsDeleteAll(0, PREFIX_SESSION);
   ObjectsDeleteAll(0, PREFIX_DEBUG_PANEL);
   ChartRedraw(0);
   PrintFormat("ICT EA v4.3 deinit | reason=%d | pool=%d", reason, g_FVGCount);

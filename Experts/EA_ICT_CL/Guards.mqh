@@ -1,8 +1,13 @@
 #ifndef EA_ICT_CL__GUARDS_MQH
 #define EA_ICT_CL__GUARDS_MQH
 
-/** True if within allowed session (currently always true). */
-inline bool IsSessionAllowed()    { return true; }
+/** True if current time (UTC) is within London or NY session (InpLondon* / InpNY*). */
+inline bool IsSessionAllowed()
+{
+  int hourUtc = GetUTCHour(TimeCurrent());
+  return IsHourInRange(hourUtc, InpLondonStartHour, InpLondonEndHour)
+      || IsHourInRange(hourUtc, InpNYStartHour, InpNYEndHour);
+}
 /** True if daily loss limit has not been hit. */
 inline bool IsDailyLossOK()       { return !g_DailyRisk.limitHit; }
 /** True if bias is UP or DOWN (not NONE or SIDEWAY). */

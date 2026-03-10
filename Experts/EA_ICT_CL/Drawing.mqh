@@ -655,15 +655,130 @@ inline void DrawContextDebug()
   ChartRedraw(0);
 }
 
+/** Draws London and NY session zones (background color) on visible chart range. */
+inline void DrawSessionMarkers()
+{
+  if (!InpDebugDraw) return;
+
+  int firstBar = (int)ChartGetInteger(0, CHART_FIRST_VISIBLE_BAR);
+  int visibleBars = (int)ChartGetInteger(0, CHART_VISIBLE_BARS);
+  if (visibleBars <= 0) return;
+
+  ENUM_TIMEFRAMES chartTf = (ENUM_TIMEFRAMES)ChartPeriod(0);
+  datetime firstTime = iTime(_Symbol, chartTf, firstBar);
+  int lastBarIdx = firstBar - visibleBars + 1;
+  if (lastBarIdx < 0) return;
+  datetime lastTime = iTime(_Symbol, chartTf, lastBarIdx);
+
+  double yHigh = 0;
+  double yLow = 1e300;
+  for (int i = firstBar; i >= lastBarIdx && i >= 0; i--)
+  {
+    double h = iHigh(_Symbol, chartTf, i);
+    double l = iLow(_Symbol, chartTf, i);
+    if (h > yHigh) yHigh = h;
+    if (l < yLow) yLow = l;
+  }
+  double range = yHigh - yLow;
+  if (range < _Point) return;
+  double margin = MathMax(range * 0.02, 10 * _Point);
+  yHigh += margin;
+  yLow -= margin;
+
+  const color clrLondon = (color)C'50,75,115';
+  const color clrNY     = (color)C'115,80,50';
+
+  ObjectsDeleteAll(0, PREFIX_SESSION);
+
+  for (int d = 0; d <= 200; d++)
+  {
+    datetime dayStart = iTime(_Symbol, PERIOD_D1, d);
+    if (dayStart > lastTime) break;
+    if (dayStart + 86400 < firstTime) continue;
+
+    long startL = (long)InpLondonStartHour * 3600;
+    long endL   = (long)InpLondonEndHour   * 3600;
+    long startN = (long)InpNYStartHour * 3600;
+    long endN   = (long)InpNYEndHour   * 3600;
+
+    if (InpLondonStartHour < InpLondonEndHour)
+    {
+      datetime t1 = dayStart + startL;
+      datetime t2 = dayStart + endL;
+      if (t2 > firstTime && t1 < lastTime)
+      {
+        string name = PREFIX_SESSION + "L_" + IntegerToString(d);
+        if (ObjectFind(0, name) < 0)
+          ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, yHigh, t2, yLow);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrLondon);
+        ObjectSetInteger(0, name, OBJPROP_FILL,  true);
+        ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+        ObjectMove(0, name, 0, t1, yHigh);
+        ObjectMove(0, name, 1, t2, yLow);
+      }
+    }
+    else
+    {
+      datetime t1 = dayStart + startL;
+      datetime t2 = dayStart + 86400 + endL;
+      if (t2 > firstTime && t1 < lastTime)
+      {
+        string name = PREFIX_SESSION + "L_" + IntegerToString(d);
+        if (ObjectFind(0, name) < 0)
+          ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, yHigh, t2, yLow);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrLondon);
+        ObjectSetInteger(0, name, OBJPROP_FILL,  true);
+        ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+        ObjectMove(0, name, 0, t1, yHigh);
+        ObjectMove(0, name, 1, t2, yLow);
+      }
+    }
+
+    if (InpNYStartHour < InpNYEndHour)
+    {
+      datetime t1 = dayStart + startN;
+      datetime t2 = dayStart + endN;
+      if (t2 > firstTime && t1 < lastTime)
+      {
+        string name = PREFIX_SESSION + "N_" + IntegerToString(d);
+        if (ObjectFind(0, name) < 0)
+          ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, yHigh, t2, yLow);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrNY);
+        ObjectSetInteger(0, name, OBJPROP_FILL,  true);
+        ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+        ObjectMove(0, name, 0, t1, yHigh);
+        ObjectMove(0, name, 1, t2, yLow);
+      }
+    }
+    else
+    {
+      datetime t1 = dayStart + startN;
+      datetime t2 = dayStart + 86400 + endN;
+      if (t2 > firstTime && t1 < lastTime)
+      {
+        string name = PREFIX_SESSION + "N_" + IntegerToString(d);
+        if (ObjectFind(0, name) < 0)
+          ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, yHigh, t2, yLow);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrNY);
+        ObjectSetInteger(0, name, OBJPROP_FILL,  true);
+        ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+        ObjectMove(0, name, 0, t1, yHigh);
+        ObjectMove(0, name, 1, t2, yLow);
+      }
+    }
+  }
+}
+
 /** Draws all debug visuals: swings, MSS markers, FVG pool, order, debug panel. */
 inline void DrawVisuals()
 {
+  DrawSessionMarkers();
   DrawContextDebug();
-  return; // TESTING ONLY
   DrawMiddleSwingPoints();
+  DrawFVGPool();
+  return; // TESTING ONLY
   DrawTriggerSwingPoints();
   DrawMSSMarkers();
-  DrawFVGPool();
   DrawOrderVisualization();
 }
 
