@@ -1,0 +1,390 @@
+#ifndef EA_ICT_CL__DRAWING_MQH
+#define EA_ICT_CL__DRAWING_MQH
+
+// Module: Drawing
+// Extracted from EA_ICT_CL.mq5 (Section 11 – Drawing).
+// NOTE: Uses EA globals (g_*), prefix constants (PREFIX_SWING_MIDDLE, PREFIX_ORDER_VISUAL, etc.), and inputs.
+//       Include AFTER structs + globals + prefixes are declared in EA_ICT_CL.mq5.
+
+inline void DrawOneSwingPoint(
+  string prefix, ENUM_TIMEFRAMES tf,
+  string tag, bool isHigh, int barIdx, double price,
+  color clr, bool isKL, int arrowSz = 2, int fontSize = 8)
+{
+  string arrN = prefix + "ARR_" + tag;
+  string txtN = prefix + "TXT_" + tag;
+  string klN  = prefix + "KL_"  + tag;
+  datetime t  = iTime(_Symbol, tf, barIdx);
+
+  if (ObjectFind(0, arrN) < 0) ObjectCreate(0, arrN, OBJ_ARROW, 0, t, price);
+  ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isHigh ? 234 : 233);
+  ObjectSetInteger(0, arrN, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, arrN, OBJPROP_WIDTH,     arrowSz);
+  ObjectSetInteger(0, arrN, OBJPROP_ANCHOR,    isHigh ? ANCHOR_BOTTOM : ANCHOR_TOP);
+  ObjectMove(0, arrN, 0, t, price);
+
+  double rng  = iHigh(_Symbol, tf, barIdx) - iLow(_Symbol, tf, barIdx);
+  double txtY = isHigh ? price + rng * 0.3 : price - rng * 0.3;
+  if (ObjectFind(0, txtN) < 0) ObjectCreate(0, txtN, OBJ_TEXT, 0, t, txtY);
+  ObjectMove(0, txtN, 0, t, txtY);
+  ObjectSetString (0, txtN, OBJPROP_TEXT,    tag);
+  ObjectSetInteger(0, txtN, OBJPROP_COLOR,   clr);
+  ObjectSetInteger(0, txtN, OBJPROP_FONTSIZE, fontSize);
+  ObjectSetInteger(0, txtN, OBJPROP_ANCHOR,  isHigh ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
+
+  if (isKL)
+  {
+    datetime tEnd = iTime(_Symbol, tf, 0);
+    if (ObjectFind(0, klN) < 0) ObjectCreate(0, klN, OBJ_TREND, 0, t, price, tEnd, price);
+    ObjectSetInteger(0, klN, OBJPROP_COLOR,     clr);
+    ObjectSetInteger(0, klN, OBJPROP_STYLE,     STYLE_DASH);
+    ObjectSetInteger(0, klN, OBJPROP_WIDTH,     1);
+    ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
+    ObjectMove(0, klN, 0, t, price);
+    ObjectMove(0, klN, 1, tEnd, price);
+  }
+  else ObjectDelete(0, klN);
+}
+
+inline void DrawMiddleSwingPoints()
+{
+  if (!InpDebugDraw) return;
+  if (g_MiddleTrend.idxH0 <= 0 || g_MiddleTrend.idxH1 <= 0 ||
+      g_MiddleTrend.idxL0 <= 0 || g_MiddleTrend.idxL1 <= 0)
+    { ObjectsDeleteAll(0, PREFIX_SWING_MIDDLE); return; }
+
+  bool isUp   = (g_MiddleTrend.trend == DIR_UP);
+  bool isDown = (g_MiddleTrend.trend == DIR_DOWN);
+  DrawOneSwingPoint(PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleH0", true,  g_MiddleTrend.idxH0, g_MiddleTrend.h0, clrAqua,       isDown, 2, 8);
+  DrawOneSwingPoint(PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleH1", true,  g_MiddleTrend.idxH1, g_MiddleTrend.h1, C'0,140,160',  false,  2, 8);
+  DrawOneSwingPoint(PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleL0", false, g_MiddleTrend.idxL0, g_MiddleTrend.l0, clrYellow,     isUp,   2, 8);
+  DrawOneSwingPoint(PREFIX_SWING_MIDDLE, InpMiddleTF, "MiddleL1", false, g_MiddleTrend.idxL1, g_MiddleTrend.l1, C'160,140,0',  false,  2, 8);
+}
+
+inline void DrawTriggerSwingPoints()
+{
+  if (!InpDebugDraw) return;
+  if (g_TriggerTrend.idxH0 <= 0 || g_TriggerTrend.idxH1 <= 0 ||
+      g_TriggerTrend.idxL0 <= 0 || g_TriggerTrend.idxL1 <= 0)
+    { ObjectsDeleteAll(0, PREFIX_SWING_TRIGGER); return; }
+
+  bool isUp   = (g_TriggerTrend.trend == DIR_UP);
+  bool isDown = (g_TriggerTrend.trend == DIR_DOWN);
+  DrawOneSwingPoint(PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerH0", true,  g_TriggerTrend.idxH0, g_TriggerTrend.h0, C'180,100,255', isDown, 1, 7);
+  DrawOneSwingPoint(PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerH1", true,  g_TriggerTrend.idxH1, g_TriggerTrend.h1, C'100,60,160',  false,  1, 7);
+  DrawOneSwingPoint(PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerL0", false, g_TriggerTrend.idxL0, g_TriggerTrend.l0, C'255,160,40',  isUp,   1, 7);
+  DrawOneSwingPoint(PREFIX_SWING_TRIGGER, InpTriggerTF, "TriggerL1", false, g_TriggerTrend.idxL1, g_TriggerTrend.l1, C'160,100,20',  false,  1, 7);
+}
+
+inline void DrawMSSMarker(
+  string mssId, ENUM_TIMEFRAMES tf,
+  datetime mssTime, double mssLevel, MarketDir mssBreak)
+{
+  if (!InpDebugDraw || mssTime == 0) return;
+
+  string arrN = PREFIX_MSS_MARKER + mssId + "_ARR";
+  string lblN = PREFIX_MSS_MARKER + mssId + "_LBL";
+  string klN  = PREFIX_MSS_MARKER + mssId + "_KL";
+
+  bool   isBull = (mssBreak == DIR_UP);
+  color  clr    = isBull ? clrLime : clrTomato;
+
+  int shift = MyBarShift(_Symbol, tf, mssTime);
+  if (shift < 0) return;
+  double closeAtMss = iClose(_Symbol, tf, shift);
+
+  if (ObjectFind(0, arrN) < 0)
+    ObjectCreate(0, arrN, OBJ_ARROW, 0, mssTime, closeAtMss);
+  ObjectSetInteger(0, arrN, OBJPROP_ARROWCODE, isBull ? 233 : 234);
+  ObjectSetInteger(0, arrN, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, arrN, OBJPROP_WIDTH,     2);
+  ObjectSetInteger(0, arrN, OBJPROP_ANCHOR,    isBull ? ANCHOR_TOP : ANCHOR_BOTTOM);
+  ObjectMove(0, arrN, 0, mssTime, closeAtMss);
+
+  double rng  = iHigh(_Symbol, tf, shift) - iLow(_Symbol, tf, shift);
+  double lblY = isBull ? closeAtMss - rng * 0.4 : closeAtMss + rng * 0.4;
+  if (ObjectFind(0, lblN) < 0)
+    ObjectCreate(0, lblN, OBJ_TEXT, 0, mssTime, lblY);
+  ObjectMove(0, lblN, 0, mssTime, lblY);
+  ObjectSetString (0, lblN, OBJPROP_TEXT,    isBull ? "▲MSS" : "▼MSS");
+  ObjectSetInteger(0, lblN, OBJPROP_COLOR,   clr);
+  ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR,  isBull ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
+
+  datetime tEnd = iTime(_Symbol, tf, 0);
+  if (ObjectFind(0, klN) < 0)
+    ObjectCreate(0, klN, OBJ_TREND, 0, mssTime, mssLevel, tEnd, mssLevel);
+  ObjectSetInteger(0, klN, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, klN, OBJPROP_STYLE,     STYLE_DOT);
+  ObjectSetInteger(0, klN, OBJPROP_WIDTH,     1);
+  ObjectSetInteger(0, klN, OBJPROP_RAY_RIGHT, false);
+  ObjectMove(0, klN, 0, mssTime, mssLevel);
+  ObjectMove(0, klN, 1, tEnd,    mssLevel);
+}
+
+inline void DrawMSSMarkers()
+{
+  if (!InpDebugDraw) return;
+  for (int i = 0; i < g_FVGCount; i++)
+  {
+    if (g_FVGPool[i].status != FVG_USED || g_FVGPool[i].usedCase != 2) continue;
+    if (g_FVGPool[i].mssTime == 0) continue;
+
+    string tid = "T_" + IntegerToString(g_FVGPool[i].id);
+    DrawMSSMarker(tid, InpTriggerTF,
+      g_FVGPool[i].mssTime,
+      g_FVGPool[i].mssEntry,
+      g_FVGPool[i].direction == DIR_UP ? DIR_UP : DIR_DOWN);
+  }
+}
+
+inline void DrawOrderVisualization()
+{
+  if (!InpDebugDraw) return;
+
+  string tpZoneN  = PREFIX_ORDER_VISUAL + "TP_ZONE";
+  string slZoneN  = PREFIX_ORDER_VISUAL + "SL_ZONE";
+  string entLineN = PREFIX_ORDER_VISUAL + "ENTRY_LINE";
+  string slLineN  = PREFIX_ORDER_VISUAL + "SL_LINE";
+  string tpLineN  = PREFIX_ORDER_VISUAL + "TP_LINE";
+  string entLblN  = PREFIX_ORDER_VISUAL + "ENTRY_LBL";
+  string slLblN   = PREFIX_ORDER_VISUAL + "SL_LBL";
+  string tpLblN   = PREFIX_ORDER_VISUAL + "TP_LBL";
+  string infoLblN = PREFIX_ORDER_VISUAL + "INFO_LBL";
+
+  if (!g_OrderPlan.valid || g_State == EA_IDLE)
+  {
+    ObjectDelete(0, tpZoneN);  ObjectDelete(0, slZoneN);
+    ObjectDelete(0, entLineN); ObjectDelete(0, slLineN);  ObjectDelete(0, tpLineN);
+    ObjectDelete(0, entLblN);  ObjectDelete(0, slLblN);   ObjectDelete(0, tpLblN);
+    ObjectDelete(0, infoLblN);
+    return;
+  }
+
+  bool   isBuy = (g_OrderPlan.direction > 0);
+  double entry = g_OrderPlan.entry;
+  double sl    = g_OrderPlan.stopLoss;
+  double tp    = g_OrderPlan.takeProfit;
+
+  datetime tStart = (g_TriggerTrend.lastMssTime > 0) ? g_TriggerTrend.lastMssTime : iTime(_Symbol, InpTriggerTF, 20);
+  datetime tEnd   = iTime(_Symbol, InpTriggerTF, 0) + PeriodSeconds(InpTriggerTF) * 25;
+
+  double slPips = MathAbs(entry - sl) / _Point;
+  double tpPips = MathAbs(tp - entry) / _Point;
+  double rr     = (slPips > 0) ? tpPips / slPips : 0;
+
+  color entryClr = isBuy ? C'33,150,243' : C'255,152,0';
+  color tpFill   = C'15,65,35';
+  color slFill   = C'85,15,15';
+  color tpClr    = C'38,166,91';
+  color slClr    = C'229,57,53';
+
+  double tpTop = isBuy ? tp : entry, tpBot = isBuy ? entry : tp;
+  if (ObjectFind(0, tpZoneN) < 0) ObjectCreate(0, tpZoneN, OBJ_RECTANGLE, 0, tStart, tpTop, tEnd, tpBot);
+  ObjectSetInteger(0, tpZoneN, OBJPROP_COLOR, tpFill); ObjectSetInteger(0, tpZoneN, OBJPROP_FILL, true);
+  ObjectSetInteger(0, tpZoneN, OBJPROP_BACK, true);
+  ObjectMove(0, tpZoneN, 0, tStart, tpTop); ObjectMove(0, tpZoneN, 1, tEnd, tpBot);
+
+  double slTop = isBuy ? entry : sl, slBot = isBuy ? sl : entry;
+  if (ObjectFind(0, slZoneN) < 0) ObjectCreate(0, slZoneN, OBJ_RECTANGLE, 0, tStart, slTop, tEnd, slBot);
+  ObjectSetInteger(0, slZoneN, OBJPROP_COLOR, slFill); ObjectSetInteger(0, slZoneN, OBJPROP_FILL, true);
+  ObjectSetInteger(0, slZoneN, OBJPROP_BACK, true);
+  ObjectMove(0, slZoneN, 0, tStart, slTop); ObjectMove(0, slZoneN, 1, tEnd, slBot);
+
+  if (ObjectFind(0, entLineN) < 0) ObjectCreate(0, entLineN, OBJ_TREND, 0, tStart, entry, tEnd, entry);
+  ObjectSetInteger(0, entLineN, OBJPROP_COLOR, entryClr); ObjectSetInteger(0, entLineN, OBJPROP_STYLE, STYLE_SOLID);
+  ObjectSetInteger(0, entLineN, OBJPROP_WIDTH, 2); ObjectSetInteger(0, entLineN, OBJPROP_RAY_RIGHT, true);
+  ObjectMove(0, entLineN, 0, tStart, entry); ObjectMove(0, entLineN, 1, tEnd, entry);
+
+  if (ObjectFind(0, tpLineN) < 0) ObjectCreate(0, tpLineN, OBJ_TREND, 0, tStart, tp, tEnd, tp);
+  ObjectSetInteger(0, tpLineN, OBJPROP_COLOR, tpClr); ObjectSetInteger(0, tpLineN, OBJPROP_STYLE, STYLE_DASH);
+  ObjectSetInteger(0, tpLineN, OBJPROP_WIDTH, 1); ObjectSetInteger(0, tpLineN, OBJPROP_RAY_RIGHT, true);
+  ObjectMove(0, tpLineN, 0, tStart, tp); ObjectMove(0, tpLineN, 1, tEnd, tp);
+
+  if (ObjectFind(0, slLineN) < 0) ObjectCreate(0, slLineN, OBJ_TREND, 0, tStart, sl, tEnd, sl);
+  ObjectSetInteger(0, slLineN, OBJPROP_COLOR, slClr); ObjectSetInteger(0, slLineN, OBJPROP_STYLE, STYLE_DASH);
+  ObjectSetInteger(0, slLineN, OBJPROP_WIDTH, 1); ObjectSetInteger(0, slLineN, OBJPROP_RAY_RIGHT, true);
+  ObjectMove(0, slLineN, 0, tStart, sl); ObjectMove(0, slLineN, 1, tEnd, sl);
+
+  datetime lblT = tEnd;
+
+  string eTxt = StringFormat("%s %s | %.2f lot", isBuy?"▶ BUY LIM":"▶ SELL LIM", DoubleToString(entry,_Digits), g_OrderPlan.lot);
+  if (ObjectFind(0, entLblN) < 0) ObjectCreate(0, entLblN, OBJ_TEXT, 0, lblT, entry);
+  ObjectMove(0, entLblN, 0, lblT, entry); ObjectSetString(0, entLblN, OBJPROP_TEXT, eTxt);
+  ObjectSetInteger(0, entLblN, OBJPROP_COLOR, entryClr); ObjectSetInteger(0, entLblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, entLblN, OBJPROP_ANCHOR, ANCHOR_LEFT);
+
+  string tTxt = StringFormat("◎ TP %s +%.0fp (%.1fR)", DoubleToString(tp,_Digits), tpPips, rr);
+  if (ObjectFind(0, tpLblN) < 0) ObjectCreate(0, tpLblN, OBJ_TEXT, 0, lblT, tp);
+  ObjectMove(0, tpLblN, 0, lblT, tp); ObjectSetString(0, tpLblN, OBJPROP_TEXT, tTxt);
+  ObjectSetInteger(0, tpLblN, OBJPROP_COLOR, tpClr); ObjectSetInteger(0, tpLblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, tpLblN, OBJPROP_ANCHOR, isBuy?ANCHOR_LEFT_LOWER:ANCHOR_LEFT_UPPER);
+
+  string sTxt = StringFormat("✕ SL %s -%.0fp", DoubleToString(sl,_Digits), slPips);
+  if (ObjectFind(0, slLblN) < 0) ObjectCreate(0, slLblN, OBJ_TEXT, 0, lblT, sl);
+  ObjectMove(0, slLblN, 0, lblT, sl); ObjectSetString(0, slLblN, OBJPROP_TEXT, sTxt);
+  ObjectSetInteger(0, slLblN, OBJPROP_COLOR, slClr); ObjectSetInteger(0, slLblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, slLblN, OBJPROP_ANCHOR, isBuy?ANCHOR_LEFT_UPPER:ANCHOR_LEFT_LOWER);
+
+  string iTxt = StringFormat("Risk %.1f%% | %.0f:%.0f pips | %.1fR", InpRiskPercent, slPips, tpPips, rr);
+  if (ObjectFind(0, infoLblN) < 0) ObjectCreate(0, infoLblN, OBJ_TEXT, 0, lblT, (entry+sl)/2.0);
+  ObjectMove(0, infoLblN, 0, lblT, (entry+sl)/2.0); ObjectSetString(0, infoLblN, OBJPROP_TEXT, iTxt);
+  ObjectSetInteger(0, infoLblN, OBJPROP_COLOR, C'160,160,160'); ObjectSetInteger(0, infoLblN, OBJPROP_FONTSIZE, 7);
+  ObjectSetInteger(0, infoLblN, OBJPROP_ANCHOR, ANCHOR_LEFT);
+}
+
+inline void DrawOneFVGRecord(int idx)
+{
+  if (!InpDebugDraw || idx < 0 || idx >= g_FVGCount) return;
+
+  string sid   = IntegerToString(g_FVGPool[idx].id);
+  string rectN = PREFIX_FVG_POOL + "RECT_" + sid;
+  string midN  = PREFIX_FVG_POOL + "MID_"  + sid;
+  string lblN  = PREFIX_FVG_POOL + "LBL_"  + sid;
+
+  datetime rectEnd;
+  if (g_FVGPool[idx].status == FVG_PENDING)
+    rectEnd = iTime(_Symbol, InpMiddleTF, 0);
+  else if (g_FVGPool[idx].touchTime > 0)
+  {
+    int shift = MyBarShift(_Symbol, InpTriggerTF, g_FVGPool[idx].touchTime);
+    rectEnd   = (shift >= 0) ? iTime(_Symbol, InpTriggerTF, shift) : iTime(_Symbol, InpMiddleTF, 0);
+  }
+  else
+  {
+    int shift = MyBarShift(_Symbol, InpMiddleTF, g_FVGPool[idx].usedTime);
+    rectEnd   = (shift >= 0) ? iTime(_Symbol, InpMiddleTF, shift) : iTime(_Symbol, InpMiddleTF, 0);
+  }
+  if (rectEnd <= g_FVGPool[idx].createdTime) rectEnd = iTime(_Symbol, InpMiddleTF, 0);
+
+  color fillColor;
+  if      (g_FVGPool[idx].status == FVG_PENDING) fillColor = (g_FVGPool[idx].direction == DIR_UP) ? C'0,50,110'  : C'90,25,0';
+  else if (g_FVGPool[idx].status == FVG_TOUCHED) fillColor = (g_FVGPool[idx].direction == DIR_UP) ? C'0,120,220' : C'220,75,0';
+  else if (g_FVGPool[idx].usedCase == 2)         fillColor = C'0,100,0';
+  else if (g_FVGPool[idx].usedCase == 1)         fillColor = C'70,0,0';
+  else                                           fillColor = C'50,50,50';
+
+  if (ObjectFind(0, rectN) < 0)
+    ObjectCreate(0, rectN, OBJ_RECTANGLE, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high, rectEnd, g_FVGPool[idx].low);
+  ObjectSetInteger(0, rectN, OBJPROP_COLOR, fillColor); ObjectSetInteger(0, rectN, OBJPROP_FILL, true);
+  ObjectSetInteger(0, rectN, OBJPROP_BACK, true);
+  ObjectMove(0, rectN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
+  ObjectMove(0, rectN, 1, rectEnd, g_FVGPool[idx].low);
+
+  color midColor = (g_FVGPool[idx].status == FVG_USED) ? C'60,60,60' : clrSilver;
+  if (ObjectFind(0, midN) < 0)
+    ObjectCreate(0, midN, OBJ_TREND, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].mid, rectEnd, g_FVGPool[idx].mid);
+  ObjectSetInteger(0, midN, OBJPROP_COLOR, midColor); ObjectSetInteger(0, midN, OBJPROP_STYLE, STYLE_DOT);
+  ObjectSetInteger(0, midN, OBJPROP_WIDTH, 1); ObjectSetInteger(0, midN, OBJPROP_RAY_RIGHT, false);
+  ObjectMove(0, midN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].mid);
+  ObjectMove(0, midN, 1, rectEnd, g_FVGPool[idx].mid);
+
+  string sym = (g_FVGPool[idx].direction == DIR_UP) ? "▲" : "▼";
+  string stTxt = "";
+  if      (g_FVGPool[idx].status == FVG_TOUCHED) stTxt  = " [T]";
+  else if (g_FVGPool[idx].usedCase == 2)         stTxt  = " [TRIG]";
+  else if (g_FVGPool[idx].usedCase == 1)         stTxt  = " [BRK]";
+  else if (g_FVGPool[idx].status == FVG_USED)    stTxt  = " [EXP]";
+
+  if (ObjectFind(0, lblN) < 0)
+    ObjectCreate(0, lblN, OBJ_TEXT, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
+  ObjectMove(0, lblN, 0, g_FVGPool[idx].createdTime, g_FVGPool[idx].high);
+  ObjectSetString(0, lblN, OBJPROP_TEXT, StringFormat("FVG#%d %s%s", g_FVGPool[idx].id, sym, stTxt));
+  ObjectSetInteger(0, lblN, OBJPROP_COLOR, fillColor); ObjectSetInteger(0, lblN, OBJPROP_FONTSIZE, 8);
+  ObjectSetInteger(0, lblN, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+}
+
+inline void DrawFVGPool()
+{
+  if (!InpDebugDraw) return;
+  for (int i = 0; i < g_FVGCount; i++) DrawOneFVGRecord(i);
+}
+
+inline void DrawContextDebug()
+{
+  if (!InpDebugDraw) return;
+
+  #define LBL(name,txt,y,clr)                                           \
+    if(ObjectFind(0,name)<0) ObjectCreate(0,name,OBJ_LABEL,0,0,0);     \
+    ObjectSetInteger(0,name,OBJPROP_CORNER,    CORNER_LEFT_UPPER);      \
+    ObjectSetInteger(0,name,OBJPROP_XDISTANCE, 10);                     \
+    ObjectSetInteger(0,name,OBJPROP_YDISTANCE, y);                      \
+    ObjectSetInteger(0,name,OBJPROP_FONTSIZE,  9);                      \
+    ObjectSetInteger(0,name,OBJPROP_COLOR,     clr);                    \
+    ObjectSetString (0,name,OBJPROP_TEXT,      txt);
+
+  LBL(PREFIX_DEBUG_PANEL + "HDR",  "── ICT EA v4.3 ──", 10, clrSilver)
+
+  color cB = (g_Bias.bias==BIAS_UP)?clrLime:(g_Bias.bias==BIAS_DOWN)?clrTomato:(g_Bias.bias==BIAS_SIDEWAY)?clrOrange:clrGray;
+  LBL(PREFIX_DEBUG_PANEL + "BIAS", StringFormat("Bias : %s", EnumToString(g_Bias.bias)), 34, cB)
+
+  color cMT = (g_MiddleTrend.trend==DIR_UP)?clrLime:(g_MiddleTrend.trend==DIR_DOWN)?clrTomato:clrGray;
+  LBL(PREFIX_DEBUG_PANEL + "MT", StringFormat("H1   : %s  KL=%.5f", EnumToString(g_MiddleTrend.trend), g_MiddleTrend.keyLevel), 58, cMT)
+
+  color cTT = (g_TriggerTrend.trend==DIR_UP)?clrLime:(g_TriggerTrend.trend==DIR_DOWN)?clrTomato:clrGray;
+  LBL(PREFIX_DEBUG_PANEL + "TT", StringFormat("M5   : %s  KL=%.5f", EnumToString(g_TriggerTrend.trend), g_TriggerTrend.keyLevel), 82, cTT)
+
+  if (g_ActiveFVGIdx >= 0 && g_ActiveFVGIdx < g_FVGCount
+      && g_FVGPool[g_ActiveFVGIdx].usedCase == 2
+      && g_FVGPool[g_ActiveFVGIdx].mssTime > 0)
+  {
+    int ai = g_ActiveFVGIdx;
+    color cM = (g_FVGPool[ai].direction==DIR_UP)?clrLime:clrTomato;
+    LBL(PREFIX_DEBUG_PANEL + "MSS", StringFormat("MSS  : %s entry=%.5f SL=%.5f @ %s (FVG#%d)",
+      (g_FVGPool[ai].direction==DIR_UP)?"▲":"▼",
+      g_FVGPool[ai].mssEntry, g_FVGPool[ai].mssSL,
+      TimeToString(g_FVGPool[ai].mssTime, TIME_MINUTES),
+      g_FVGPool[ai].id), 106, cM)
+  }
+  else ObjectDelete(0, PREFIX_DEBUG_PANEL + "MSS");
+
+  double lostPct = g_DailyRisk.startBalance > 0
+    ? (g_DailyRisk.startBalance - g_DailyRisk.currentBalance) / g_DailyRisk.startBalance * 100.0 : 0.0;
+  color cR = g_DailyRisk.limitHit?clrRed:(lostPct>InpMaxDailyLossPct*0.7?clrOrange:clrLime);
+  LBL(PREFIX_DEBUG_PANEL + "RISK", StringFormat("Risk : %.2f%% / %.2f%%", lostPct, InpMaxDailyLossPct), 130, cR)
+
+  color cS = (g_State==EA_IDLE)?clrSilver:(g_State==EA_WAIT_TOUCH)?clrOrange:(g_State==EA_WAIT_TRIGGER)?clrYellow:clrLime;
+  LBL(PREFIX_DEBUG_PANEL + "ST", StringFormat("State: %s", EnumToString(g_State)), 154, cS)
+
+  if (g_BlockReason != BLOCK_NONE)
+    { LBL(PREFIX_DEBUG_PANEL + "BLK", StringFormat("Block: %s", EnumToString(g_BlockReason)), 178, clrTomato) }
+  else ObjectDelete(0, PREFIX_DEBUG_PANEL + "BLK");
+
+  int nP=0,nT=0,nU=0;
+  for(int i=0;i<g_FVGCount;i++)
+    { if(g_FVGPool[i].status==FVG_PENDING) nP++; else if(g_FVGPool[i].status==FVG_TOUCHED) nT++; else nU++; }
+  LBL(PREFIX_DEBUG_PANEL + "POOL", StringFormat("Pool : P=%d T=%d U=%d (%d/%d)", nP,nT,nU,g_FVGCount,MAX_FVG_POOL), 202, clrDodgerBlue)
+
+  if (g_ActiveFVGIdx >= 0 && g_ActiveFVGIdx < g_FVGCount)
+  {
+    int ai = g_ActiveFVGIdx;
+    LBL(PREFIX_DEBUG_PANEL + "ACT", StringFormat("Act  : #%d %s [%.5f–%.5f] %s",
+      g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
+      g_FVGPool[ai].low, g_FVGPool[ai].high, EnumToString(g_FVGPool[ai].status)), 226, clrDeepSkyBlue)
+  }
+  else ObjectDelete(0, PREFIX_DEBUG_PANEL + "ACT");
+
+  if (g_PendingTicket > 0 && g_OrderPlan.valid)
+  {
+    LBL(PREFIX_DEBUG_PANEL + "ORD", StringFormat("Order: %s #%llu @ %.5f SL=%.5f TP=%.5f",
+      (g_OrderPlan.direction>0)?"BUY":"SELL", g_PendingTicket,
+      g_OrderPlan.entry, g_OrderPlan.stopLoss, g_OrderPlan.takeProfit), 250, clrGold)
+  }
+  else ObjectDelete(0, PREFIX_DEBUG_PANEL + "ORD");
+
+  #undef LBL
+  ChartRedraw(0);
+}
+
+inline void DrawVisuals()
+{
+  DrawMiddleSwingPoints();
+  DrawTriggerSwingPoints();
+  DrawMSSMarkers();
+  DrawFVGPool();
+  DrawOrderVisualization();
+  DrawContextDebug();
+}
+
+#endif // EA_ICT_CL__DRAWING_MQH
+
