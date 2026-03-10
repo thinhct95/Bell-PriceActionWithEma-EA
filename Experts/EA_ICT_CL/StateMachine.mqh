@@ -1,23 +1,15 @@
 #ifndef EA_ICT_CL__STATE_MACHINE_MQH
 #define EA_ICT_CL__STATE_MACHINE_MQH
 
-// Module: StateMachine
-// State transitions + handlers + runner.
-// Extracted from EA_ICT_CL.mq5 (Sections 4, 9, 10).
-// NOTE: Uses EA globals + functions from Signals/Trade modules.
-//       Include AFTER Signals_BOS_FVG_OB.mqh and Trade.mqh.
-
-//+------------------------------------------------------------------+
-//|  SECTION 4 – STATE MACHINE HELPERS                               |
-//+------------------------------------------------------------------+
-
-inline void TransitionTo(EAState next)
+/** Transitions EA state to next and optionally logs. */
+inline void TransitionTo(EAState nextState)
 {
   if (InpDebugLog)
-    PrintFormat("[STATE] %s → %s", EnumToString(g_State), EnumToString(next));
-  g_State = next;
+    PrintFormat("[STATE] %s → %s", EnumToString(g_State), EnumToString(nextState));
+  g_State = nextState;
 }
 
+/** Resets to IDLE, clears active FVG, trade bar, pending ticket and order plan. */
 inline void ResetToIdle(string reason = "")
 {
   if (InpDebugLog && reason != "")
@@ -29,64 +21,63 @@ inline void ResetToIdle(string reason = "")
   TransitionTo(EA_IDLE);
 }
 
-//+------------------------------------------------------------------+
-//|  SECTION 9 – STATE HANDLERS                                      |
-//+------------------------------------------------------------------+
-
+/** Idle: picks best active FVG and transitions to WAIT_TOUCH or WAIT_TRIGGER. */
 inline void OnStateIdle()
 {
-  int idx = GetBestActiveFVGIdx();
-  if (idx < 0) return;
-  g_ActiveFVGIdx = idx;
+  int bestFvgIndex = GetBestActiveFVGIdx();
+  if (bestFvgIndex < 0) return;
+  g_ActiveFVGIdx = bestFvgIndex;
   if (InpDebugLog)
     PrintFormat("[ACTIVE FVG] #%d %s [%.5f–%.5f] %s",
-      g_FVGPool[idx].id, EnumToString(g_FVGPool[idx].direction),
-      g_FVGPool[idx].low, g_FVGPool[idx].high, EnumToString(g_FVGPool[idx].status));
-  TransitionTo(g_FVGPool[idx].status == FVG_TOUCHED ? EA_WAIT_TRIGGER : EA_WAIT_TOUCH);
+      g_FVGPool[bestFvgIndex].id, EnumToString(g_FVGPool[bestFvgIndex].direction),
+      g_FVGPool[bestFvgIndex].low, g_FVGPool[bestFvgIndex].high, EnumToString(g_FVGPool[bestFvgIndex].status));
+  TransitionTo(g_FVGPool[bestFvgIndex].status == FVG_TOUCHED ? EA_WAIT_TRIGGER : EA_WAIT_TOUCH);
 }
 
+/** WaitTouch: checks active FVG still valid, optionally switches to better FVG. */
 inline void OnStateWaitTouch()
 {
   if (g_ActiveFVGIdx < 0) { ResetToIdle("active lost"); return; }
-  int ai = g_ActiveFVGIdx;
+  int activeIndex = g_ActiveFVGIdx;
 
-  if (g_FVGPool[ai].status == FVG_USED)
-    { ResetToIdle(StringFormat("FVG #%d broken/expired", g_FVGPool[ai].id)); return; }
-  if (g_FVGPool[ai].status == FVG_TOUCHED)
+  if (g_FVGPool[activeIndex].status == FVG_USED)
+    { ResetToIdle(StringFormat("FVG #%d broken/expired", g_FVGPool[activeIndex].id)); return; }
+  if (g_FVGPool[activeIndex].status == FVG_TOUCHED)
     { TransitionTo(EA_WAIT_TRIGGER); return; }
 
-  int better = GetBestActiveFVGIdx();
-  if (better >= 0 && better != ai)
+  int betterIndex = GetBestActiveFVGIdx();
+  if (betterIndex >= 0 && betterIndex != activeIndex)
   {
-    bool bTouch = (g_FVGPool[better].status == FVG_TOUCHED);
-    bool bNewer = (g_FVGPool[better].createdTime > g_FVGPool[ai].createdTime);
-    if (bTouch || bNewer)
+    bool isBetterTouched = (g_FVGPool[betterIndex].status == FVG_TOUCHED);
+    bool isBetterNewer   = (g_FVGPool[betterIndex].createdTime > g_FVGPool[activeIndex].createdTime);
+    if (isBetterTouched || isBetterNewer)
     {
       if (InpDebugLog)
-        PrintFormat("[SWITCH] FVG #%d → #%d", g_FVGPool[ai].id, g_FVGPool[better].id);
-      g_ActiveFVGIdx = better;
-      if (bTouch) TransitionTo(EA_WAIT_TRIGGER);
+        PrintFormat("[SWITCH] FVG #%d → #%d", g_FVGPool[activeIndex].id, g_FVGPool[betterIndex].id);
+      g_ActiveFVGIdx = betterIndex;
+      if (isBetterTouched) TransitionTo(EA_WAIT_TRIGGER);
     }
   }
 }
 
+/** WaitTrigger: on FVG usedCase==2 builds order plan, sends limit order, goes IN_TRADE or resets. */
 inline void OnStateWaitTrigger()
 {
   if (g_ActiveFVGIdx < 0) { ResetToIdle("active lost"); return; }
-  int ai = g_ActiveFVGIdx;
+  int activeIndex = g_ActiveFVGIdx;
 
-  if (g_FVGPool[ai].status == FVG_USED)
+  if (g_FVGPool[activeIndex].status == FVG_USED)
   {
-    if (g_FVGPool[ai].usedCase == 2)
+    if (g_FVGPool[activeIndex].usedCase == 2)
     {
       if (InpDebugLog)
         PrintFormat("[ENTRY SIGNAL] FVG #%d %s [%.5f–%.5f] | MSS entry=%.5f SL=%.5f",
-          g_FVGPool[ai].id, EnumToString(g_FVGPool[ai].direction),
-          g_FVGPool[ai].low, g_FVGPool[ai].high,
-          g_FVGPool[ai].mssEntry, g_FVGPool[ai].mssSL);
+          g_FVGPool[activeIndex].id, EnumToString(g_FVGPool[activeIndex].direction),
+          g_FVGPool[activeIndex].low, g_FVGPool[activeIndex].high,
+          g_FVGPool[activeIndex].mssEntry, g_FVGPool[activeIndex].mssSL);
 
-      if (BuildOrderPlan(g_FVGPool[ai].id, g_FVGPool[ai].direction,
-                         g_FVGPool[ai].mssEntry, g_FVGPool[ai].mssSL))
+      if (BuildOrderPlan(g_FVGPool[activeIndex].id, g_FVGPool[activeIndex].direction,
+                         g_FVGPool[activeIndex].mssEntry, g_FVGPool[activeIndex].mssSL))
       {
         ulong ticket = ExecuteLimitOrder();
         if (ticket > 0)
@@ -96,18 +87,19 @@ inline void OnStateWaitTrigger()
           TransitionTo(EA_IN_TRADE);
         }
         else
-          ResetToIdle(StringFormat("FVG #%d order failed", g_FVGPool[ai].id));
+          ResetToIdle(StringFormat("FVG #%d order failed", g_FVGPool[activeIndex].id));
       }
       else
-        ResetToIdle(StringFormat("FVG #%d invalid plan", g_FVGPool[ai].id));
+        ResetToIdle(StringFormat("FVG #%d invalid plan", g_FVGPool[activeIndex].id));
     }
     else
-      ResetToIdle(StringFormat("FVG #%d case%d", g_FVGPool[ai].id, g_FVGPool[ai].usedCase));
+      ResetToIdle(StringFormat("FVG #%d case%d", g_FVGPool[activeIndex].id, g_FVGPool[activeIndex].usedCase));
     return;
   }
-  if (g_FVGPool[ai].status == FVG_PENDING) { TransitionTo(EA_WAIT_TOUCH); return; }
+  if (g_FVGPool[activeIndex].status == FVG_PENDING) { TransitionTo(EA_WAIT_TOUCH); return; }
 }
 
+/** InTrade: tracks pending order fill / cancel / expiry; resets when position closed or order lost. */
 inline void OnStateInTrade()
 {
   if (g_PendingTicket > 0)
@@ -120,32 +112,32 @@ inline void OnStateInTrade()
 
     if (!foundPending)
     {
-      bool posFound = false;
+      bool positionFound = false;
       for (int i = PositionsTotal() - 1; i >= 0; i--)
       {
-        ulong pt = PositionGetTicket(i);
-        if (pt > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
+        ulong positionTicket = PositionGetTicket(i);
+        if (positionTicket > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
             && PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
-          posFound = true;
+          positionFound = true;
           g_PendingTicket = 0;
-          if (InpDebugLog) PrintFormat("[TRADE] Filled → position #%llu", pt);
+          if (InpDebugLog) PrintFormat("[TRADE] Filled → position #%llu", positionTicket);
           break;
         }
       }
 
-      if (!posFound)
+      if (!positionFound)
       {
         HistorySelect(TimeCurrent() - 86400, TimeCurrent());
 
         bool cancelled = false;
         for (int i = HistoryOrdersTotal() - 1; i >= 0; i--)
         {
-          ulong ht = HistoryOrderGetTicket(i);
-          if (ht == g_PendingTicket)
+          ulong historyTicket = HistoryOrderGetTicket(i);
+          if (historyTicket == g_PendingTicket)
           {
-            long st = HistoryOrderGetInteger(ht, ORDER_STATE);
-            if (st == ORDER_STATE_CANCELED || st == ORDER_STATE_EXPIRED || st == ORDER_STATE_REJECTED)
+            long orderState = HistoryOrderGetInteger(historyTicket, ORDER_STATE);
+            if (orderState == ORDER_STATE_CANCELED || orderState == ORDER_STATE_EXPIRED || orderState == ORDER_STATE_REJECTED)
               cancelled = true;
             break;
           }
@@ -155,12 +147,12 @@ inline void OnStateInTrade()
         bool closed = false;
         for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
         {
-          ulong dt = HistoryDealGetTicket(i);
-          if (HistoryDealGetInteger(dt, DEAL_MAGIC) == InpMagicNumber
-              && HistoryDealGetString(dt, DEAL_SYMBOL) == _Symbol
-              && HistoryDealGetInteger(dt, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+          ulong dealTicket = HistoryDealGetTicket(i);
+          if (HistoryDealGetInteger(dealTicket, DEAL_MAGIC) == InpMagicNumber
+              && HistoryDealGetString(dealTicket, DEAL_SYMBOL) == _Symbol
+              && HistoryDealGetInteger(dealTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
           {
-            double profit = HistoryDealGetDouble(dt, DEAL_PROFIT);
+            double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
             if (InpDebugLog) PrintFormat("[TRADE] Closed | profit=%.2f", profit);
             closed = true; break;
           }
@@ -172,21 +164,18 @@ inline void OnStateInTrade()
     return;
   }
 
-  bool hasPos = false;
+  bool hasPosition = false;
   for (int i = PositionsTotal() - 1; i >= 0; i--)
   {
-    ulong pt = PositionGetTicket(i);
-    if (pt > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
+    ulong positionTicket = PositionGetTicket(i);
+    if (positionTicket > 0 && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber
         && PositionGetString(POSITION_SYMBOL) == _Symbol)
-    { hasPos = true; break; }
+    { hasPosition = true; break; }
   }
-  if (!hasPos) ResetToIdle("position closed");
+  if (!hasPosition) ResetToIdle("position closed");
 }
 
-//+------------------------------------------------------------------+
-//|  SECTION 10 – STATE MACHINE RUNNER                               |
-//+------------------------------------------------------------------+
-
+/** Runs state machine: updates FVG statuses, scans/registers FVGs, then handles current state. */
 inline void RunStateMachine()
 {
   UpdateFVGStatuses();
@@ -200,4 +189,4 @@ inline void RunStateMachine()
   }
 }
 
-#endif // EA_ICT_CL__STATE_MACHINE_MQH
+#endif
