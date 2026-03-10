@@ -17,20 +17,30 @@ inline int MyBarShift(string symbol, ENUM_TIMEFRAMES tf, datetime time, bool exa
   return exact ? -1 : copiedCount - 1;
 }
 
-/** True if bar at index i is a swing high (InpSwingRange bars each side lower). */
+/** Returns swing range (number of bars each side) per timeframe. */
+inline int GetSwingRangeForTf(ENUM_TIMEFRAMES tf)
+{
+  if (tf == InpMiddleTF)  return InpMiddleTfSwingRange;
+  if (tf == InpTriggerTF) return InpTriggerTfSwingRange;
+  return InpMiddleTfSwingRange;
+}
+
+/** True if bar at index i is a swing high (swingRange bars each side lower). */
 inline bool IsSwingHighAt(ENUM_TIMEFRAMES tf, int barIndex)
 {
+  int swingRange = GetSwingRangeForTf(tf);
   double highAtBar = iHigh(_Symbol, tf, barIndex);
-  for (int k = 1; k <= InpSwingRange; k++)
+  for (int k = 1; k <= swingRange; k++)
     if (iHigh(_Symbol, tf, barIndex - k) >= highAtBar || iHigh(_Symbol, tf, barIndex + k) >= highAtBar) return false;
   return true;
 }
 
-/** True if bar at index i is a swing low (InpSwingRange bars each side higher). */
+/** True if bar at index i is a swing low (swingRange bars each side higher). */
 inline bool IsSwingLowAt(ENUM_TIMEFRAMES tf, int barIndex)
 {
+  int swingRange = GetSwingRangeForTf(tf);
   double lowAtBar = iLow(_Symbol, tf, barIndex);
-  for (int k = 1; k <= InpSwingRange; k++)
+  for (int k = 1; k <= swingRange; k++)
     if (iLow(_Symbol, tf, barIndex - k) <= lowAtBar || iLow(_Symbol, tf, barIndex + k) <= lowAtBar) return false;
   return true;
 }
@@ -41,11 +51,12 @@ inline bool ScanSwingStructure(
   double &h0, double &h1, int &idxH0, int &idxH1,
   double &l0, double &l1, int &idxL0, int &idxL1)
 {
-  int maxBar = MathMin(lookback, Bars(_Symbol, tf) - InpSwingRange - 2);
+  int swingRange = GetSwingRangeForTf(tf);
+  int maxBar = MathMin(lookback, Bars(_Symbol, tf) - swingRange - 2);
   double highs[2]; int hiIdx[2]; int highCount = 0;
   double lows [2]; int loIdx[2]; int lowCount  = 0;
 
-  for (int i = InpSwingRange + 1; i <= maxBar; i++)
+  for (int i = swingRange + 1; i <= maxBar; i++)
   {
     if (highCount < 2 && IsSwingHighAt(tf, i)) { highs[highCount] = iHigh(_Symbol, tf, i); hiIdx[highCount] = i; highCount++; }
     if (lowCount  < 2 && IsSwingLowAt (tf, i)) { lows [lowCount]  = iLow (_Symbol, tf, i); loIdx[lowCount]  = i; lowCount++;  }
