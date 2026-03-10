@@ -7,8 +7,31 @@ inline HTFBias ResolveBias(double bar1High, double bar1Low, double bar1Close,
 {
   if (bar1Close > bar2High)                       return BIAS_UP;
   if (bar1Close < bar2Low)                        return BIAS_DOWN;
-  if (bar1High > bar2High && bar1Close < bar2High) return BIAS_DOWN;
-  if (bar1Low  < bar2Low  && bar1Close > bar2Low)  return BIAS_UP;
+
+  bool sweptHigh = (bar1High > bar2High);
+  bool sweptLow  = (bar1Low  < bar2Low);
+
+  // Trường hợp quét cả hai đầu: so sánh độ dài râu vượt khỏi range bar2.
+  // Râu nào dài hơn → ưu tiên chiều NGƯỢC LẠI (stop run –> đi ngược sweep mạnh hơn).
+  if (sweptHigh && sweptLow)
+  {
+    double upperSweep = bar1High - bar2High;  // khoảng quét lên trên đỉnh cũ
+    double lowerSweep = bar2Low  - bar1Low;   // khoảng quét xuống dưới đáy cũ
+
+    if (upperSweep > lowerSweep) return BIAS_DOWN; // quét đỉnh mạnh hơn → bearish
+    if (lowerSweep > upperSweep) return BIAS_UP;   // quét đáy mạnh hơn → bullish
+
+    // Nếu hai râu gần như bằng nhau → dùng close tương đối với mid-range để phân định
+    double mid = (bar2High + bar2Low) * 0.5;
+    if (bar1Close > mid) return BIAS_UP;
+    if (bar1Close < mid) return BIAS_DOWN;
+    return BIAS_SIDEWAY;
+  }
+
+  // Chỉ quét 1 đầu: giữ logic cũ với điều kiện close quay lại trong range.
+  if (sweptLow  && bar1Close > bar2Low)  return BIAS_UP;
+  if (sweptHigh && bar1Close < bar2High) return BIAS_DOWN;
+
   return BIAS_SIDEWAY;
 }
 
