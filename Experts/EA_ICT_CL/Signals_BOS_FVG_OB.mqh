@@ -1,10 +1,7 @@
 #ifndef EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH
-#define EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH
+#define EA_ICT_CL__SIGNALS_BOS_FVG_OB_MQH  // Tránh include trùng
 
-// Module: Signals (FVG)
-// Extracted from EA_ICT_CL.mq5 (Sections 5, 6, 7, 8).
-// FVG helpers, scan/register, status update, best selector.
-// NOTE: Uses EA globals (g_*) and inputs. Include AFTER globals exist.
+// Module: Signals (FVG) – helper FVG, quét/đăng ký pool, cập nhật trạng thái, chọn FVG tốt nhất
 
 //+------------------------------------------------------------------+
 //|  SECTION 5 – FVG HELPERS                                         |
@@ -15,14 +12,14 @@ inline bool IsCandleStrong(ENUM_TIMEFRAMES tf, int i)
   double h = iHigh(_Symbol, tf, i), l = iLow(_Symbol, tf, i);
   double o = iOpen(_Symbol, tf, i), c = iClose(_Symbol, tf, i);
   double range = h - l;
-  if (range < _Point) return false;
-  return (MathAbs(c - o) / range * 100.0) >= InpFVGMinBodyPct;
+  if (range < _Point) return false;  // Tránh chia 0
+  return (MathAbs(c - o) / range * 100.0) >= InpFVGMinBodyPct;  // Body % >= ngưỡng = nến mạnh
 }
 
 inline bool IsFVGInPool(datetime created)
 {
   for (int j = 0; j < g_FVGCount; j++)
-    if (g_FVGPool[j].createdTime == created) return true;
+    if (g_FVGPool[j].createdTime == created) return true;  // Đã có FVG cùng thời điểm tạo
   return false;
 }
 

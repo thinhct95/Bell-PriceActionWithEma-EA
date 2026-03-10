@@ -1,40 +1,38 @@
 #ifndef EA_ICT_CL__CONFIG_MQH
-#define EA_ICT_CL__CONFIG_MQH
+#define EA_ICT_CL__CONFIG_MQH  // Tránh include trùng
 
-// Module: Config
-// This file now hosts EA inputs. Keep other types (enums/structs/globals) in the .mq5
-// until you intentionally migrate them to State/Config to avoid redefinition.
+// Module: Config – toàn bộ input của EA
 
 //====================================================
 // INPUTS
 //====================================================
-input ENUM_TIMEFRAMES InpBiasTF          = PERIOD_D1;  // Bias TF (HTF)
-input ENUM_TIMEFRAMES InpMiddleTF        = PERIOD_H1;  // FVG + trend TF (MTF)
-input ENUM_TIMEFRAMES InpTriggerTF       = PERIOD_M5;  // Entry confirmation (LTF)
+input ENUM_TIMEFRAMES InpBiasTF          = PERIOD_D1;  // Timeframe xác định bias (D1)
+input ENUM_TIMEFRAMES InpMiddleTF        = PERIOD_H1;  // TF quét FVG + trend (H1)
+input ENUM_TIMEFRAMES InpTriggerTF       = PERIOD_M5;  // TF xác nhận entry bằng MSS (M5)
 
-input double InpRiskPercent              = 1.0;        // Risk % per trade
-input double InpRiskReward               = 2.0;        // TP/SL ratio
-input double InpMaxDailyLossPct          = 3.0;        // Max daily loss %
+input double InpRiskPercent              = 1.0;        // % balance risk mỗi lệnh
+input double InpRiskReward               = 2.0;        // Tỷ lệ R:R (TP = entry ± R*riskDist)
+input double InpMaxDailyLossPct          = 3.0;        // % lỗ tối đa trong ngày → dừng trade
 
-input int    InpLondonStartHour          = 8;          // London open (UTC)
-input int    InpLondonEndHour            = 17;         // London close (UTC)
-input int    InpNYStartHour              = 13;         // NY open (UTC)
-input int    InpNYEndHour                = 22;         // NY close (UTC)
+input int    InpLondonStartHour          = 8;          // Giờ mở London (UTC)
+input int    InpLondonEndHour            = 17;         // Giờ đóng London (UTC)
+input int    InpNYStartHour               = 13;         // Giờ mở NY (UTC)
+input int    InpNYEndHour                 = 22;        // Giờ đóng NY (UTC)
 
-input int    InpSwingRange               = 3;          // Bars each side for swing confirm
-input int    InpSwingLookback            = 50;         // MiddleTF swing scan bars
-input int    InpTriggerSwingLookback     = 30;         // TriggerTF swing scan bars
+input int    InpSwingRange               = 3;          // Số nến mỗi bên để xác nhận swing high/low
+input int    InpSwingLookback             = 50;        // Số bar quét swing trên MiddleTF (H1)
+input int    InpTriggerSwingLookback     = 30;         // Số bar quét swing trên TriggerTF (M5)
 
-input int    InpFVGMaxAliveMin           = 4320;       // Max FVG lifetime (min) = 72h (cả PENDING + TOUCHED)
-input int    InpFVGScanBars              = 50;         // MiddleTF bars to scan for FVGs
-input double InpFVGMinBodyPct            = 60.0;       // Mid-candle min body %
-input int    InpMSSMinDepthPts           = 30;         // MSS min swing depth (points): |tH0-tL0| phải >= giá trị này
+input int    InpFVGMaxAliveMin           = 4320;       // Thời gian sống FVG tối đa (phút), 4320 = 72h
+input int    InpFVGScanBars              = 50;        // Số bar H1 quét tìm FVG
+input double InpFVGMinBodyPct            = 60.0;      // Nến giữa FVG: body % tối thiểu (strong candle)
+input int    InpMSSMinDepthPts           = 30;        // Độ sâu swing M5 tối thiểu (point) mới chấp nhận MSS
 
-input long   InpMagicNumber              = 20250308;   // EA magic number
-input int    InpSlippage                 = 5;          // Max slippage (points)
+input long   InpMagicNumber              = 20250308;  // Magic number cho lệnh EA
+input int    InpSlippage                 = 5;         // Slippage tối đa (point) khi gửi lệnh
 
-input bool   InpDebugLog                 = true;       // Journal logging
-input bool   InpDebugDraw                = true;       // Chart drawing
+input bool   InpDebugLog                 = true;      // Bật log ra Journal
+input bool   InpDebugDraw                = true;      // Bật vẽ swing/FVG/order/debug panel
 
 #endif // EA_ICT_CL__CONFIG_MQH
 
