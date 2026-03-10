@@ -1,6 +1,7 @@
 #ifndef EA_ICT_CL__GUARDS_MQH
 #define EA_ICT_CL__GUARDS_MQH
 
+/** True if within allowed session (currently always true). */
 inline bool IsSessionAllowed()    { return true; }
 /** True if daily loss limit has not been hit. */
 inline bool IsDailyLossOK()       { return !g_DailyRisk.limitHit; }

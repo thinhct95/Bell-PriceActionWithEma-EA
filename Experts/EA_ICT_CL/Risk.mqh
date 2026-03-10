@@ -20,9 +20,8 @@ inline double LotsFromRiskMoneyAndSLPoints(const string symbol, const double ris
   if (riskMoney <= 0.0) return 0.0;
   if (slPoints <= 0.0) return 0.0;
 
-  double tickValue = 0.0, tickSize = 0.0;
-  if (!SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE, tickValue)) return 0.0;
-  if (!SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE,  tickSize))  return 0.0;
+  double tickValue = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_VALUE);
+  double tickSize  = SymbolInfoDouble(symbol, SYMBOL_TRADE_TICK_SIZE);
   if (tickValue <= 0.0 || tickSize <= 0.0) return 0.0;
 
   const double point = SymbolInfoDouble(symbol, SYMBOL_POINT);

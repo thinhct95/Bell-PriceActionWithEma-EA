@@ -14,7 +14,7 @@ input int    InpLondonEndHour            = 17;
 input int    InpNYStartHour              = 13;
 input int    InpNYEndHour                = 22;
 
-input int    InpSwingRange               = 3;
+input int    InpSwingRange               = 2;
 input int    InpSwingLookback            = 50;
 input int    InpTriggerSwingLookback     = 30;
 
