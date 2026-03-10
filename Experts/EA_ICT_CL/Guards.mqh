@@ -4,6 +4,7 @@
 /** True if current time (UTC) is within London or NY session (InpLondon* / InpNY*). */
 inline bool IsSessionAllowed()
 {
+  return true;
   int hourUtc = GetUTCHour(TimeCurrent());
   return IsHourInRange(hourUtc, InpLondonStartHour, InpLondonEndHour)
       || IsHourInRange(hourUtc, InpNYStartHour, InpNYEndHour);

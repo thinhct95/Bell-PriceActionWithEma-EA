@@ -100,21 +100,9 @@ inline void ScanAndRegisterFVGs()
     if (isBrokenByClose) { record.status = FVG_USED; record.usedCase = 1; record.usedTime = breakTime; }
     else
     {
-      bool isTouchedInGap = false;
-      datetime touchTimeInGap = 0;
-      for (int j = rightBarIndex - 1; j >= 1; j--)
-      {
-        bool inGap = (record.direction == DIR_UP   && iLow (_Symbol, InpMiddleTF, j) <= record.high) ||
-                     (record.direction == DIR_DOWN && iHigh(_Symbol, InpMiddleTF, j) >= record.low);
-        if (inGap) { isTouchedInGap = true; touchTimeInGap = iTime(_Symbol, InpMiddleTF, j); break; }
-      }
-      if (isTouchedInGap) { record.status = FVG_TOUCHED; record.touchTime = touchTimeInGap; record.triggerTrendAtTouch = g_TriggerTrend.trend; }
-      else
-      {
-        record.status = FVG_PENDING;
-        if ((int)(TimeCurrent() - record.createdTime) > InpFVGMaxAliveMin * 60)
-          { record.status = FVG_USED; record.usedCase = 0; record.usedTime = TimeCurrent(); }
-      }
+      record.status = FVG_PENDING;
+      if ((int)(TimeCurrent() - record.createdTime) > InpFVGMaxAliveMin * 60)
+        { record.status = FVG_USED; record.usedCase = 0; record.usedTime = TimeCurrent(); }
     }
 
     g_FVGPool[g_FVGCount] = record;
@@ -161,8 +149,10 @@ inline void UpdateFVGStatuses()
         continue;
       }
 
-      bool isTouched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high) ||
-                       (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low);
+      double fvgRange   = g_FVGPool[i].high - g_FVGPool[i].low;
+      double touchDepth = fvgRange * InpFVGTouchPct / 100.0;
+      bool isTouched = (g_FVGPool[i].direction == DIR_UP   && bid <= g_FVGPool[i].high - touchDepth) ||
+                       (g_FVGPool[i].direction == DIR_DOWN && bid >= g_FVGPool[i].low  + touchDepth);
       if (isTouched)
       {
         g_FVGPool[i].status              = FVG_TOUCHED;

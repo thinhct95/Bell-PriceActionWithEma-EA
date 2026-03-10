@@ -131,4 +131,63 @@ inline ulong ExecuteLimitOrder()
   return result.order;
 }
 
+/** Scans trigger TF bars from signalTime forward to find which bar first hit SL or TP. */
+inline datetime FindHitBarTime(const OrderHistRecord &rec)
+{
+  int startShift = MyBarShift(_Symbol, InpTriggerTF, rec.signalTime);
+  if (startShift < 0) return TimeCurrent();
+
+  for (int i = startShift; i >= 0; i--)
+  {
+    double h = iHigh(_Symbol, InpTriggerTF, i);
+    double l = iLow (_Symbol, InpTriggerTF, i);
+    bool hitTP = (rec.direction > 0) ? (h >= rec.takeProfit) : (l <= rec.takeProfit);
+    bool hitSL = (rec.direction > 0) ? (l <= rec.stopLoss)   : (h >= rec.stopLoss);
+    if (hitTP || hitSL)
+      return iTime(_Symbol, InpTriggerTF, i);
+  }
+  return TimeCurrent();
+}
+
+/** Saves the current order plan into order history as active (result=0). */
+inline void SaveOrderToHistory(datetime signalTime)
+{
+  if (g_OrderHistCount >= MAX_ORDER_HISTORY)
+  {
+    for (int j = 0; j < g_OrderHistCount - 1; j++)
+      g_OrderHist[j] = g_OrderHist[j + 1];
+    g_OrderHistCount--;
+  }
+
+  int n = g_OrderHistCount;
+  ZeroMemory(g_OrderHist[n]);
+  g_OrderHist[n].id          = g_NextOrderHistId++;
+  g_OrderHist[n].direction   = g_OrderPlan.direction;
+  g_OrderHist[n].entry       = g_OrderPlan.entry;
+  g_OrderHist[n].stopLoss    = g_OrderPlan.stopLoss;
+  g_OrderHist[n].takeProfit  = g_OrderPlan.takeProfit;
+  g_OrderHist[n].lot         = g_OrderPlan.lot;
+  g_OrderHist[n].signalTime  = signalTime;
+  g_OrderHist[n].parentFVGId = g_OrderPlan.parentFVGId;
+  g_OrderHistCount++;
+}
+
+/** Closes the most recent active order record with given result and profit. */
+inline void CloseActiveOrderRecord(int result, double profit)
+{
+  for (int i = g_OrderHistCount - 1; i >= 0; i--)
+  {
+    if (g_OrderHist[i].result != 0) continue;
+    g_OrderHist[i].result    = result;
+    g_OrderHist[i].profit    = profit;
+    g_OrderHist[i].closeTime = FindHitBarTime(g_OrderHist[i]);
+    if (InpDebugLog)
+      PrintFormat("[ORDER HIST] #%d %s | profit=%.2f | close=%s",
+        g_OrderHist[i].id,
+        (result == 1) ? "TP HIT" : (result == -1) ? "SL HIT" : "CANCELLED",
+        profit, TimeToString(g_OrderHist[i].closeTime, TIME_MINUTES));
+    break;
+  }
+}
+
 #endif

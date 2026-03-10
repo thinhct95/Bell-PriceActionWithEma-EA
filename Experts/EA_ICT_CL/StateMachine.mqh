@@ -84,6 +84,7 @@ inline void OnStateWaitTrigger()
         {
           g_PendingTicket = ticket;
           g_TradeBarIndex = Bars(_Symbol, InpTriggerTF);
+          SaveOrderToHistory(g_FVGPool[activeIndex].mssTime);
           TransitionTo(EA_IN_TRADE);
         }
         else
@@ -142,9 +143,10 @@ inline void OnStateInTrade()
             break;
           }
         }
-        if (cancelled) { ResetToIdle("order cancelled"); return; }
+        if (cancelled) { CloseActiveOrderRecord(2, 0); ResetToIdle("order cancelled"); return; }
 
         bool closed = false;
+        double closedProfit = 0;
         for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
         {
           ulong dealTicket = HistoryDealGetTicket(i);
@@ -152,11 +154,13 @@ inline void OnStateInTrade()
               && HistoryDealGetString(dealTicket, DEAL_SYMBOL) == _Symbol
               && HistoryDealGetInteger(dealTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
           {
-            double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
-            if (InpDebugLog) PrintFormat("[TRADE] Closed | profit=%.2f", profit);
+            closedProfit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT);
+            if (InpDebugLog) PrintFormat("[TRADE] Closed | profit=%.2f", closedProfit);
             closed = true; break;
           }
         }
+        if (closed) CloseActiveOrderRecord(closedProfit >= 0 ? 1 : -1, closedProfit);
+        else        CloseActiveOrderRecord(2, 0);
         ResetToIdle(closed ? "trade closed" : "order lost");
         return;
       }
@@ -172,14 +176,33 @@ inline void OnStateInTrade()
         && PositionGetString(POSITION_SYMBOL) == _Symbol)
     { hasPosition = true; break; }
   }
-  if (!hasPosition) ResetToIdle("position closed");
+  if (!hasPosition)
+  {
+    HistorySelect(TimeCurrent() - 86400, TimeCurrent());
+    double lastProfit = 0;
+    for (int i = HistoryDealsTotal() - 1; i >= 0; i--)
+    {
+      ulong dt = HistoryDealGetTicket(i);
+      if (HistoryDealGetInteger(dt, DEAL_MAGIC) == InpMagicNumber
+          && HistoryDealGetString(dt, DEAL_SYMBOL) == _Symbol
+          && HistoryDealGetInteger(dt, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+        { lastProfit = HistoryDealGetDouble(dt, DEAL_PROFIT); break; }
+    }
+    CloseActiveOrderRecord(lastProfit >= 0 ? 1 : -1, lastProfit);
+    ResetToIdle("position closed");
+  }
 }
 
-/** Runs state machine: updates FVG statuses, scans/registers FVGs, then handles current state. */
-inline void RunStateMachine()
+/** Keeps FVG pool up to date regardless of guard state. */
+inline void UpdateFVGPool()
 {
   UpdateFVGStatuses();
   ScanAndRegisterFVGs();
+}
+
+/** Runs state machine: handles current state (entry/exit logic). */
+inline void RunStateMachine()
+{
   switch (g_State)
   {
     case EA_IDLE:         OnStateIdle();        break;

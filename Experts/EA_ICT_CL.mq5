@@ -16,7 +16,9 @@
 #property copyright "Bell's ICT EA"
 #property version   "4.30"
 
-#define MAX_FVG_POOL 30
+#define MAX_FVG_POOL      30
+#define MAX_ORDER_HISTORY 50
+#define ORDER_HIST_DAYS   3
 
 #include "EA_ICT_CL/Config.mqh"
 #include "EA_ICT_CL/State.mqh"
@@ -48,11 +50,16 @@ int        g_TradeBarIndex = -1;
 OrderPlan        g_OrderPlan;
 ulong            g_PendingTicket = 0;
 
+OrderHistRecord  g_OrderHist[MAX_ORDER_HISTORY];
+int              g_OrderHistCount  = 0;
+int              g_NextOrderHistId = 0;
+
 const string PREFIX_SWING_MIDDLE   = "SwingMiddle_";
 const string PREFIX_SWING_TRIGGER  = "SwingTrigger_";
 const string PREFIX_MSS_MARKER     = "MSSMarker_";
 const string PREFIX_FVG_POOL       = "FVGPool_";
 const string PREFIX_ORDER_VISUAL   = "OrderVisual_";
+const string PREFIX_ORDER_HIST    = "OrdHist_";
 const string PREFIX_DEBUG_PANEL    = "DebugPanel_";
 const string PREFIX_SESSION        = "Session_";
 
@@ -69,12 +76,15 @@ int OnInit()
   ZeroMemory(g_MiddleTrend); ZeroMemory(g_TriggerTrend);
   ZeroMemory(g_DailyRisk); ZeroMemory(g_OrderPlan);
   for (int i = 0; i < MAX_FVG_POOL; i++) ZeroMemory(g_FVGPool[i]);
+  for (int i = 0; i < MAX_ORDER_HISTORY; i++) ZeroMemory(g_OrderHist[i]);
   g_FVGCount = 0; g_NextFVGId = 0;
   g_ActiveFVGIdx = -1; g_TradeBarIndex = -1; g_PendingTicket = 0;
+  g_OrderHistCount = 0; g_NextOrderHistId = 0;
   g_State = EA_IDLE; g_BlockReason = BLOCK_NONE;
+  ObjectsDeleteAll(0, PREFIX_ORDER_VISUAL);
 
   UpdateAllContexts();
-  ScanAndRegisterFVGs();
+  UpdateFVGPool();
   DrawVisuals();
 
   PrintFormat("✅ ICT EA v4.3 | H1=%s | M5=%s | Pool=%d",
@@ -83,10 +93,11 @@ int OnInit()
   return INIT_SUCCEEDED;
 }
 
-/** Each tick: update contexts, run guards and state machine, optionally redraw. */
+/** Each tick: update contexts & FVG pool always; run state machine only when guards pass. */
 void OnTick()
 {
   UpdateAllContexts();
+  UpdateFVGPool();
   if (EvaluateGuards())
     RunStateMachine();
   else if (g_State != EA_IDLE)

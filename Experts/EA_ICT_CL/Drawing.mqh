@@ -176,174 +176,180 @@ inline void DrawMSSMarkers()
   }
 }
 
-/** Draws order plan zones/lines/labels (entry, SL, TP) when valid and debug draw on. */
-inline void DrawOrderVisualization()
+/** Helper: creates or moves a rectangle. */
+inline void SetRect(string name, datetime t1, double p1, datetime t2, double p2, color clr)
 {
-  if (!InpDebugDraw) return;
+  if (ObjectFind(0, name) < 0)
+    ObjectCreate(0, name, OBJ_RECTANGLE, 0, t1, p1, t2, p2);
+  ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+  ObjectSetInteger(0, name, OBJPROP_FILL,  true);
+  ObjectSetInteger(0, name, OBJPROP_BACK,  true);
+  ObjectMove(0, name, 0, t1, p1);
+  ObjectMove(0, name, 1, t2, p2);
+}
 
-  string tpZoneN  = PREFIX_ORDER_VISUAL + "TP_ZONE";
-  string slZoneN  = PREFIX_ORDER_VISUAL + "SL_ZONE";
-  string entLineN = PREFIX_ORDER_VISUAL + "ENTRY_LINE";
-  string slLineN  = PREFIX_ORDER_VISUAL + "SL_LINE";
-  string tpLineN  = PREFIX_ORDER_VISUAL + "TP_LINE";
-  string entLblN  = PREFIX_ORDER_VISUAL + "ENTRY_LBL";
-  string slLblN   = PREFIX_ORDER_VISUAL + "SL_LBL";
-  string tpLblN   = PREFIX_ORDER_VISUAL + "TP_LBL";
-  string infoLblN = PREFIX_ORDER_VISUAL + "INFO_LBL";
+/** Helper: creates or moves a horizontal trend line. */
+inline void SetHLine(string name, datetime t1, double p, datetime t2, color clr, int style, int width)
+{
+  if (ObjectFind(0, name) < 0)
+    ObjectCreate(0, name, OBJ_TREND, 0, t1, p, t2, p);
+  ObjectSetInteger(0, name, OBJPROP_COLOR,     clr);
+  ObjectSetInteger(0, name, OBJPROP_STYLE,     style);
+  ObjectSetInteger(0, name, OBJPROP_WIDTH,     width);
+  ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+  ObjectMove(0, name, 0, t1, p);
+  ObjectMove(0, name, 1, t2, p);
+}
 
-  if (!g_OrderPlan.valid || g_State == EA_IDLE)
-  {
-    ObjectDelete(0, tpZoneN);
-    ObjectDelete(0, slZoneN);
-    ObjectDelete(0, entLineN);
-    ObjectDelete(0, slLineN);
-    ObjectDelete(0, tpLineN);
-    ObjectDelete(0, entLblN);
-    ObjectDelete(0, slLblN);
-    ObjectDelete(0, tpLblN);
-    ObjectDelete(0, infoLblN);
-    return;
-  }
+/** Helper: creates or moves a text label at a chart coordinate. */
+inline void SetText(string name, datetime t, double p, string txt, color clr, int fontSize, int anchor)
+{
+  if (ObjectFind(0, name) < 0)
+    ObjectCreate(0, name, OBJ_TEXT, 0, t, p);
+  ObjectMove(0, name, 0, t, p);
+  ObjectSetString (0, name, OBJPROP_TEXT,     txt);
+  ObjectSetInteger(0, name, OBJPROP_COLOR,    clr);
+  ObjectSetInteger(0, name, OBJPROP_FONTSIZE, fontSize);
+  ObjectSetInteger(0, name, OBJPROP_ANCHOR,   anchor);
+}
 
-  bool   isBuy = (g_OrderPlan.direction > 0);
-  double entry = g_OrderPlan.entry;
-  double sl    = g_OrderPlan.stopLoss;
-  double tp    = g_OrderPlan.takeProfit;
+/** Draws one order record in TradingView style (TP/SL zones, entry line, labels). */
+inline void DrawOneOrderHist(int idx)
+{
+  string sid = IntegerToString(g_OrderHist[idx].id);
+  string pfx = PREFIX_ORDER_HIST + sid + "_";
 
-  datetime tStart = (g_TriggerTrend.lastMssTime > 0) ? g_TriggerTrend.lastMssTime : iTime(_Symbol, InpTriggerTF, 20);
-  datetime tEnd   = iTime(_Symbol, InpTriggerTF, 0) + PeriodSeconds(InpTriggerTF) * 25;
+  bool   isBuy = (g_OrderHist[idx].direction > 0);
+  double entry = g_OrderHist[idx].entry;
+  double sl    = g_OrderHist[idx].stopLoss;
+  double tp    = g_OrderHist[idx].takeProfit;
+  int    res   = g_OrderHist[idx].result;
+
+  datetime tStart = g_OrderHist[idx].signalTime;
+  datetime tEnd;
+  if (res == 0)
+    tEnd = iTime(_Symbol, InpTriggerTF, 0) + PeriodSeconds(InpTriggerTF) * 10;
+  else
+    tEnd = g_OrderHist[idx].closeTime;
+  if (tEnd <= tStart)
+    tEnd = tStart + PeriodSeconds(InpTriggerTF) * 10;
 
   double slPips = MathAbs(entry - sl) / _Point;
   double tpPips = MathAbs(tp - entry) / _Point;
   double rr     = (slPips > 0) ? tpPips / slPips : 0;
 
-  color entryClr = isBuy ? C'33,150,243' : C'255,152,0';
-  color tpFill   = C'15,65,35';
-  color slFill   = C'85,15,15';
-  color tpClr    = C'38,166,91';
-  color slClr    = C'229,57,53';
+  color entClr, tpZoneClr, slZoneClr, tpLineClr, slLineClr, resultClr;
+  if (res == 1)
+  {
+    entClr     = C'0,180,80';
+    tpZoneClr  = C'10,70,30';
+    slZoneClr  = C'40,15,15';
+    tpLineClr  = C'38,200,91';
+    slLineClr  = C'120,50,50';
+    resultClr  = C'0,220,100';
+  }
+  else if (res == -1)
+  {
+    entClr     = C'220,50,50';
+    tpZoneClr  = C'15,40,15';
+    slZoneClr  = C'90,12,12';
+    tpLineClr  = C'50,120,50';
+    slLineClr  = C'229,57,53';
+    resultClr  = C'229,57,53';
+  }
+  else
+  {
+    entClr     = isBuy ? C'33,150,243' : C'255,152,0';
+    tpZoneClr  = C'15,60,30';
+    slZoneClr  = C'75,12,12';
+    tpLineClr  = C'38,166,91';
+    slLineClr  = C'229,57,53';
+    resultClr  = entClr;
+  }
 
-  double tpTop = isBuy ? tp : entry;
+  double tpTop = isBuy ? tp    : entry;
   double tpBot = isBuy ? entry : tp;
-  if (ObjectFind(0, tpZoneN) < 0)
-    ObjectCreate(0, tpZoneN, OBJ_RECTANGLE, 0, tStart, tpTop, tEnd, tpBot);
-  ObjectSetInteger(0, tpZoneN, OBJPROP_COLOR, tpFill);
-  ObjectSetInteger(0, tpZoneN, OBJPROP_FILL,  true);
-  ObjectSetInteger(0, tpZoneN, OBJPROP_BACK,  true);
-  ObjectMove(0, tpZoneN, 0, tStart, tpTop);
-  ObjectMove(0, tpZoneN, 1, tEnd,   tpBot);
+  SetRect(pfx + "TP", tStart, tpTop, tEnd, tpBot, tpZoneClr);
 
   double slTop = isBuy ? entry : sl;
   double slBot = isBuy ? sl    : entry;
-  if (ObjectFind(0, slZoneN) < 0)
-    ObjectCreate(0, slZoneN, OBJ_RECTANGLE, 0, tStart, slTop, tEnd, slBot);
-  ObjectSetInteger(0, slZoneN, OBJPROP_COLOR, slFill);
-  ObjectSetInteger(0, slZoneN, OBJPROP_FILL,  true);
-  ObjectSetInteger(0, slZoneN, OBJPROP_BACK,  true);
-  ObjectMove(0, slZoneN, 0, tStart, slTop);
-  ObjectMove(0, slZoneN, 1, tEnd,   slBot);
+  SetRect(pfx + "SL", tStart, slTop, tEnd, slBot, slZoneClr);
 
-  if (ObjectFind(0, entLineN) < 0)
-    ObjectCreate(0, entLineN, OBJ_TREND, 0, tStart, entry, tEnd, entry);
-  ObjectSetInteger(0, entLineN, OBJPROP_COLOR,     entryClr);
-  ObjectSetInteger(0, entLineN, OBJPROP_STYLE,     STYLE_SOLID);
-  ObjectSetInteger(0, entLineN, OBJPROP_WIDTH,     2);
-  ObjectSetInteger(0, entLineN, OBJPROP_RAY_RIGHT, true);
-  ObjectMove(0, entLineN, 0, tStart, entry);
-  ObjectMove(0, entLineN, 1, tEnd,   entry);
+  SetHLine(pfx + "ENT", tStart, entry, tEnd, entClr,     STYLE_SOLID, 2);
+  SetHLine(pfx + "TPL", tStart, tp,    tEnd, tpLineClr,  STYLE_DASH,  1);
+  SetHLine(pfx + "SLL", tStart, sl,    tEnd, slLineClr,  STYLE_DASH,  1);
 
-  if (ObjectFind(0, tpLineN) < 0)
-    ObjectCreate(0, tpLineN, OBJ_TREND, 0, tStart, tp, tEnd, tp);
-  ObjectSetInteger(0, tpLineN, OBJPROP_COLOR,     tpClr);
-  ObjectSetInteger(0, tpLineN, OBJPROP_STYLE,     STYLE_DASH);
-  ObjectSetInteger(0, tpLineN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, tpLineN, OBJPROP_RAY_RIGHT, true);
-  ObjectMove(0, tpLineN, 0, tStart, tp);
-  ObjectMove(0, tpLineN, 1, tEnd,   tp);
+  datetime lblT = tEnd + PeriodSeconds(InpTriggerTF);
 
-  if (ObjectFind(0, slLineN) < 0)
-    ObjectCreate(0, slLineN, OBJ_TREND, 0, tStart, sl, tEnd, sl);
-  ObjectSetInteger(0, slLineN, OBJPROP_COLOR,     slClr);
-  ObjectSetInteger(0, slLineN, OBJPROP_STYLE,     STYLE_DASH);
-  ObjectSetInteger(0, slLineN, OBJPROP_WIDTH,     1);
-  ObjectSetInteger(0, slLineN, OBJPROP_RAY_RIGHT, true);
-  ObjectMove(0, slLineN, 0, tStart, sl);
-  ObjectMove(0, slLineN, 1, tEnd,   sl);
+  string entTxt;
+  if (res == 0)
+    entTxt = StringFormat("%s %.3f | %.2f lot",
+      isBuy ? "BUY LIM" : "SELL LIM", entry, g_OrderHist[idx].lot);
+  else
+    entTxt = StringFormat("%s %.3f | %.2f lot | %s",
+      isBuy ? "BUY" : "SELL", entry, g_OrderHist[idx].lot,
+      (res == 1) ? "WIN" : (res == -1) ? "LOSS" : "X");
+  SetText(pfx + "ELBL", lblT, entry, entTxt, entClr, 8, ANCHOR_LEFT);
 
-  datetime lblT = tEnd;
+  SetText(pfx + "TPLBL", lblT, tp,
+    StringFormat("TP %.3f | +%.0fp (%.1fR)", tp, tpPips, rr),
+    tpLineClr, 7, isBuy ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER);
 
-  string eTxt = StringFormat(
-    "%s %s | %.2f lot",
-    isBuy ? "▶ BUY LIM" : "▶ SELL LIM",
-    DoubleToString(entry, _Digits),
-    g_OrderPlan.lot
-  );
-  if (ObjectFind(0, entLblN) < 0)
-    ObjectCreate(0, entLblN, OBJ_TEXT, 0, lblT, entry);
-  ObjectMove(0, entLblN, 0, lblT, entry);
-  ObjectSetString(0, entLblN, OBJPROP_TEXT, eTxt);
-  ObjectSetInteger(0, entLblN, OBJPROP_COLOR,   entryClr);
-  ObjectSetInteger(0, entLblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(0, entLblN, OBJPROP_ANCHOR, ANCHOR_LEFT);
+  SetText(pfx + "SLLBL", lblT, sl,
+    StringFormat("SL %.3f | -%.0fp", sl, slPips),
+    slLineClr, 7, isBuy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER);
 
-  string tTxt = StringFormat(
-    "◎ TP %s +%.0fp (%.1fR)",
-    DoubleToString(tp, _Digits),
-    tpPips,
-    rr
-  );
-  if (ObjectFind(0, tpLblN) < 0)
-    ObjectCreate(0, tpLblN, OBJ_TEXT, 0, lblT, tp);
-  ObjectMove(0, tpLblN, 0, lblT, tp);
-  ObjectSetString(0, tpLblN, OBJPROP_TEXT, tTxt);
-  ObjectSetInteger(0, tpLblN, OBJPROP_COLOR,   tpClr);
-  ObjectSetInteger(0, tpLblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(
-    0,
-    tpLblN,
-    OBJPROP_ANCHOR,
-    isBuy ? ANCHOR_LEFT_LOWER : ANCHOR_LEFT_UPPER
-  );
+  if (res != 0)
+  {
+    string resTxt = (res == 1)
+      ? StringFormat("✓ +$%.2f", g_OrderHist[idx].profit)
+      : (res == -1)
+        ? StringFormat("✗ $%.2f", g_OrderHist[idx].profit)
+        : "✗ cancelled";
+    SetText(pfx + "RES", lblT, (entry + sl) / 2.0, resTxt, resultClr, 8, ANCHOR_LEFT);
+  }
+  else
+  {
+    SetText(pfx + "RES", lblT, (entry + sl) / 2.0,
+      StringFormat("Risk %.1f%% | %.0f:%.0fp | %.1fR", InpRiskPercent, slPips, tpPips, rr),
+      C'140,140,140', 7, ANCHOR_LEFT);
+  }
+}
 
-  string sTxt = StringFormat(
-    "✕ SL %s -%.0fp",
-    DoubleToString(sl, _Digits),
-    slPips
-  );
-  if (ObjectFind(0, slLblN) < 0)
-    ObjectCreate(0, slLblN, OBJ_TEXT, 0, lblT, sl);
-  ObjectMove(0, slLblN, 0, lblT, sl);
-  ObjectSetString(0, slLblN, OBJPROP_TEXT, sTxt);
-  ObjectSetInteger(0, slLblN, OBJPROP_COLOR,   slClr);
-  ObjectSetInteger(0, slLblN, OBJPROP_FONTSIZE, 8);
-  ObjectSetInteger(
-    0,
-    slLblN,
-    OBJPROP_ANCHOR,
-    isBuy ? ANCHOR_LEFT_UPPER : ANCHOR_LEFT_LOWER
-  );
+/** Deletes all chart objects for one order history record. */
+inline void DeleteOrderHistObjects(int id)
+{
+  string sid = IntegerToString(id);
+  string pfx = PREFIX_ORDER_HIST + sid + "_";
+  ObjectDelete(0, pfx + "TP");
+  ObjectDelete(0, pfx + "SL");
+  ObjectDelete(0, pfx + "ENT");
+  ObjectDelete(0, pfx + "TPL");
+  ObjectDelete(0, pfx + "SLL");
+  ObjectDelete(0, pfx + "ELBL");
+  ObjectDelete(0, pfx + "TPLBL");
+  ObjectDelete(0, pfx + "SLLBL");
+  ObjectDelete(0, pfx + "RES");
+}
 
-  string iTxt = StringFormat(
-    "Risk %.1f%% | %.0f:%.0f pips | %.1fR",
-    InpRiskPercent,
-    slPips,
-    tpPips,
-    rr
-  );
-  if (ObjectFind(0, infoLblN) < 0)
-    ObjectCreate(
-      0,
-      infoLblN,
-      OBJ_TEXT,
-      0,
-      lblT,
-      (entry + sl) / 2.0
-    );
-  ObjectMove(0, infoLblN, 0, lblT, (entry + sl) / 2.0);
-  ObjectSetString(0, infoLblN, OBJPROP_TEXT, iTxt);
-  ObjectSetInteger(0, infoLblN, OBJPROP_COLOR,   C'160,160,160');
-  ObjectSetInteger(0, infoLblN, OBJPROP_FONTSIZE, 7);
-  ObjectSetInteger(0, infoLblN, OBJPROP_ANCHOR,  ANCHOR_LEFT);
+/** Draws all order history records; cleans up records older than ORDER_HIST_DAYS. */
+inline void DrawAllOrders()
+{
+  if (!InpDebugDraw) return;
+
+  datetime cutoff = TimeCurrent() - ORDER_HIST_DAYS * 86400;
+  for (int i = g_OrderHistCount - 1; i >= 0; i--)
+  {
+    if (g_OrderHist[i].closeTime > 0 && g_OrderHist[i].closeTime < cutoff)
+    {
+      DeleteOrderHistObjects(g_OrderHist[i].id);
+      for (int j = i; j < g_OrderHistCount - 1; j++)
+        g_OrderHist[j] = g_OrderHist[j + 1];
+      g_OrderHistCount--;
+      continue;
+    }
+    DrawOneOrderHist(i);
+  }
 }
 
 /** Draws one FVG record (rectangle + mid line + label) by pool index. */
@@ -757,7 +763,7 @@ inline void DrawSessionMarkers()
   }
 }
 
-/** Draws all debug visuals: swings, MSS markers, FVG pool, order, debug panel. */
+/** Draws all debug visuals: swings, MSS markers, FVG pool, orders, debug panel. */
 inline void DrawVisuals()
 {
   DrawSessionMarkers();
@@ -766,7 +772,7 @@ inline void DrawVisuals()
   DrawFVGPool();
   DrawTriggerSwingPoints();
   DrawMSSMarkers();
-  DrawOrderVisualization();
+  DrawAllOrders();
 }
 
 #endif // EA_ICT_CL__DRAWING_MQH

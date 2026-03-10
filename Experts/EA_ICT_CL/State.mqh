@@ -60,6 +60,18 @@ struct OrderPlan
   int    parentFVGId;
 };
 
+struct OrderHistRecord
+{
+  int       id;
+  int       direction;
+  double    entry, stopLoss, takeProfit, lot;
+  datetime  signalTime;
+  datetime  closeTime;    // 0 nếu đang active
+  int       result;       // 0=active, 1=TP hit, -1=SL hit, 2=cancelled
+  double    profit;
+  int       parentFVGId;
+};
+
 struct DailyRiskContext
 {
   double   startBalance, currentBalance;
