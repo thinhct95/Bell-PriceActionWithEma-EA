@@ -102,4 +102,16 @@ bool IsNewBar()
    return true;
 }
 
+//+------------------------------------------------------------------+
+//| Low TF dùng để xác nhận khi giá chạm FVG: H1->M5, H4->M15, M15->M2 |
+//| Trả về low TF hoặc chính highTF nếu không có mapping (không dùng confirm) |
+//+------------------------------------------------------------------+
+ENUM_TIMEFRAMES GetConfirmationTimeframe(ENUM_TIMEFRAMES highTF)
+{
+   if(highTF == PERIOD_H1)  return PERIOD_M5;
+   if(highTF == PERIOD_H4)  return PERIOD_M15;
+   if(highTF == PERIOD_M15) return PERIOD_M2;
+   return highTF;
+}
+
 #endif

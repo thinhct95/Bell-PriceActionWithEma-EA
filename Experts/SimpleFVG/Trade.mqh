@@ -241,6 +241,55 @@ double CalculateRiskLotSize(double entryPrice, double slPrice)
    return rounded2;
 }
 
+// Đặt lệnh limit theo entry/SL từ low TF FVG (sau khi có tín hiệu xác nhận)
+bool PlaceLimitFromLowTF(string symbol, ENUM_FVG_TYPE type, double entryPrice, double slPrice)
+{
+   double tpPrice;
+   ENUM_ORDER_TYPE orderType;
+
+   if(type == FVG_BULLISH)
+   {
+      double risk = entryPrice - slPrice;
+      if(risk <= 0.0) return false;
+      tpPrice   = entryPrice + risk * InpRRRatio;
+      orderType = ORDER_TYPE_BUY_LIMIT;
+   }
+   else
+   {
+      double risk = slPrice - entryPrice;
+      if(risk <= 0.0) return false;
+      tpPrice   = entryPrice - risk * InpRRRatio;
+      orderType = ORDER_TYPE_SELL_LIMIT;
+   }
+
+   if(HasLimitOrderAtPrice(orderType, entryPrice))
+      return false;
+
+   double volume = CalculateRiskLotSize(entryPrice, slPrice);
+   if(volume <= 0.0)
+      return false;
+
+   MqlTradeRequest req;
+   MqlTradeResult  res;
+   ZeroMemory(req);
+   ZeroMemory(res);
+   req.action   = TRADE_ACTION_PENDING;
+   req.symbol   = symbol;
+   req.magic    = InpEAMagic;
+   req.type     = orderType;
+   req.volume   = volume;
+   req.price    = entryPrice;
+   req.sl       = slPrice;
+   req.tp       = tpPrice;
+   req.type_filling = ORDER_FILLING_RETURN;
+   req.deviation = 10;
+   req.comment  = "SimpleFVG_LTF";
+
+   if(!OrderSend(req, res))
+      return false;
+   return (res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_PLACED);
+}
+
 bool PlaceLimitForZone(const FVGZone &zone)
 {
    string symbol = GetTradeSymbol();
@@ -333,11 +382,14 @@ void ManageFVGTrades()
    if(currentLimits >= InpMaxLimitOrders)
       return;
 
-   // Đặt lệnh limit khi giá vừa chạm cạnh ngoài FVG (trước khi fill đủ 35%)
+   // Khi giá chạm cạnh FVG (high TF) -> tìm tín hiệu xác nhận trên low TF (FVG cùng hướng)
    ENUM_TREND_DIRECTION trend = g_CurrentTrend;
    string symbol = GetTradeSymbol();
    double lastHigh = iHigh(symbol, InpTimeframe, 1);
    double lastLow  = iLow (symbol, InpTimeframe, 1);
+
+   ENUM_TIMEFRAMES lowTF = GetConfirmationTimeframe(InpTimeframe);
+   const int LOW_TF_FVG_LOOKBACK = 15;
 
    for(int i = g_FVGCount - 1; i >= 0 && currentLimits < InpMaxLimitOrders; i--)
    {
@@ -351,24 +403,42 @@ void ManageFVGTrades()
          continue;
 
       bool touchedEdge = false;
-
       if(zone.type == FVG_BULLISH)
       {
-         // giá chạm cạnh trên (upperEdge) của bullish FVG
          if(lastLow <= zone.upperEdge && lastHigh >= zone.upperEdge)
             touchedEdge = true;
       }
-      else // FVG_BEARISH
+      else
       {
-         // giá chạm cạnh dưới (lowerEdge) của bearish FVG
          if(lastHigh >= zone.lowerEdge && lastLow <= zone.lowerEdge)
             touchedEdge = true;
       }
-
       if(!touchedEdge)
          continue;
 
-      if(PlaceLimitForZone(zone))
+      // Chỉ đặt lệnh khi có low TF để xác nhận (H1->M5, H4->M15, M15->M2)
+      if(lowTF == InpTimeframe)
+         continue;
+
+      double ltfUpper, ltfLower, ltfBarALow, ltfBarAHigh;
+      if(!GetLatestLowTFFVG(symbol, lowTF, zone.type, LOW_TF_FVG_LOOKBACK,
+                            ltfUpper, ltfLower, ltfBarALow, ltfBarAHigh))
+         continue;
+
+      // Entry theo low TF FVG; SL vẫn dùng bar A của high TF (đủ xa)
+      double entryPrice, slPrice;
+      if(zone.type == FVG_BULLISH)
+      {
+         entryPrice = ltfUpper;            // Buy limit tại cạnh trên low TF FVG
+         slPrice    = zone.slReferencePrice; // SL dưới bar A của high TF FVG
+      }
+      else
+      {
+         entryPrice = ltfLower;            // Sell limit tại cạnh dưới low TF FVG
+         slPrice    = zone.slReferencePrice; // SL trên bar A của high TF FVG
+      }
+
+      if(PlaceLimitFromLowTF(symbol, zone.type, entryPrice, slPrice))
          currentLimits++;
    }
 }

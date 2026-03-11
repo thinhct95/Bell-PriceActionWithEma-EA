@@ -80,6 +80,7 @@ void DrawTradeStatsPanel()
 {
    int totalTrades, tpTrades, slTrades;
    GetTradeStats(totalTrades, tpTrades, slTrades);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
 
    string name = EA_PREFIX + "PNL_STATS";
    if(ObjectFind(0, name) < 0)
@@ -92,8 +93,8 @@ void DrawTradeStatsPanel()
    ObjectSetInteger(0, name, OBJPROP_COLOR,     clrWhite);
    ObjectSetString (0, name, OBJPROP_FONT,      "Consolas");
    ObjectSetString (0, name, OBJPROP_TEXT,
-      StringFormat("Trades: %d  |  TP: %d  |  SL: %d",
-                   totalTrades, tpTrades, slTrades));
+      StringFormat("Balance: %.2f  |  Trades: %d  |  TP: %d  |  SL: %d",
+                   balance, totalTrades, tpTrades, slTrades));
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 

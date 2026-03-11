@@ -223,6 +223,86 @@ void ScanForNewFVGs()
 }
 
 //+------------------------------------------------------------------+
+//| Quét TF bất kỳ, tìm FVG cùng hướng gần nhất (shift 1..maxLookback) |
+//| Trả về cạnh trên/dưới vùng và bar A low/high (để đặt SL).         |
+//+------------------------------------------------------------------+
+bool GetLatestLowTFFVG(string             symbol,
+                       ENUM_TIMEFRAMES    tf,
+                       ENUM_FVG_TYPE      type,
+                       int                maxLookbackBars,
+                       double            &outUpper,
+                       double            &outLower,
+                       double            &outBarALow,
+                       double            &outBarAHigh)
+{
+   int totalBars = Bars(symbol, tf);
+   int maxShift  = MathMin(maxLookbackBars, totalBars - 3);
+   if(maxShift < 1)
+      return false;
+
+   double maxOuterRatio = InpFVGMaxOuterBarRatio;
+   double minGapVsBody  = InpFVGMinGapVsImpulsePct / 100.0;
+
+   for(int shift = 1; shift <= maxShift; shift++)
+   {
+      int shiftA = shift + 2;
+      int shiftB = shift + 1;
+      int shiftC = shift;
+
+      double candleA_High = iHigh(symbol, tf, shiftA);
+      double candleA_Low  = iLow (symbol, tf, shiftA);
+      double candleB_High = iHigh(symbol, tf, shiftB);
+      double candleB_Low  = iLow (symbol, tf, shiftB);
+      double candleB_Open  = iOpen (symbol, tf, shiftB);
+      double candleB_Close = iClose(symbol, tf, shiftB);
+      double candleC_High = iHigh(symbol, tf, shiftC);
+      double candleC_Low  = iLow (symbol, tf, shiftC);
+
+      double rangeA = candleA_High - candleA_Low;
+      double rangeB = candleB_High - candleB_Low;
+      double rangeC = candleC_High - candleC_Low;
+      double bodyB  = MathAbs(candleB_Close - candleB_Open);
+
+      if(rangeB <= 0 || bodyB <= 0)
+         continue;
+      if(rangeA > maxOuterRatio * rangeB || rangeC > maxOuterRatio * rangeB)
+         continue;
+      if(!IsImpulseCandleStrong(symbol, tf, shiftB))
+         continue;
+
+      if(type == FVG_BULLISH)
+      {
+         if(candleA_High >= candleC_Low || candleB_Close <= candleB_Open)
+            continue;
+         double gap      = candleC_Low - candleA_High;
+         double gapRatio = gap / bodyB;
+         if(gapRatio < minGapVsBody)
+            continue;
+         outUpper    = candleC_Low;
+         outLower    = candleA_High;
+         outBarALow  = candleA_Low;
+         outBarAHigh = candleA_High;
+         return true;
+      }
+      else // FVG_BEARISH
+      {
+         if(candleA_Low <= candleC_High || candleB_Close >= candleB_Open)
+            continue;
+         double gap      = candleA_Low - candleC_High;
+         double gapRatio = gap / bodyB;
+         if(gapRatio < minGapVsBody)
+            continue;
+         outUpper    = candleA_Low;
+         outLower    = candleC_High;
+         outBarALow  = candleA_Low;
+         outBarAHigh = candleA_High;
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
 //| Check if price has mitigated (filled through) any active FVG       |
 //+------------------------------------------------------------------+
 void CheckMitigationStatus()
