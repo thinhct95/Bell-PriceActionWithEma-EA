@@ -314,18 +314,18 @@ void CheckMitigationStatus()
       if(IsZoneMitigated(g_FVGZones[i]) || !IsZoneActive(g_FVGZones[i]))
          continue;
 
-      double lastLow  = iLow (symbol, InpTimeframe, 1);
-      double lastHigh = iHigh(symbol, InpTimeframe, 1);
+      double lastLow   = iLow  (symbol, InpTimeframe, 1);
+      double lastHigh  = iHigh (symbol, InpTimeframe, 1);
+      double lastClose = iClose(symbol, InpTimeframe, 1);
 
       double zoneHeight = g_FVGZones[i].upperEdge - g_FVGZones[i].lowerEdge;
       if(zoneHeight <= 0)
          continue;
 
-      //--- Bullish FVG: price comes down into the gap ---
+      //--- Bullish FVG: mitigated chỉ khi nến ĐÓNG dưới FVG (rút râu chưa tính) ---
       if(g_FVGZones[i].type == FVG_BULLISH)
       {
-         // Mitigated: price drops through lower edge
-         if(lastLow <= g_FVGZones[i].lowerEdge)
+         if(lastClose <= g_FVGZones[i].lowerEdge)
          {
             g_FVGZones[i].status = MITIGATED;
             if(InpDebugLog)
@@ -343,11 +343,10 @@ void CheckMitigationStatus()
             g_FVGZones[i].status = TOUCHED;
       }
 
-      //--- Bearish FVG: price goes up into the gap ---
+      //--- Bearish FVG: mitigated chỉ khi nến ĐÓNG trên FVG (rút râu chưa tính) ---
       if(g_FVGZones[i].type == FVG_BEARISH)
       {
-         // Mitigated: price rises through upper edge
-         if(lastHigh >= g_FVGZones[i].upperEdge)
+         if(lastClose >= g_FVGZones[i].upperEdge)
          {
             g_FVGZones[i].status = MITIGATED;
             if(InpDebugLog)
