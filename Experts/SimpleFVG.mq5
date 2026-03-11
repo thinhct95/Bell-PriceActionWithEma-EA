@@ -14,6 +14,7 @@
 #include "SimpleFVG/Config.mqh"
 #include "SimpleFVG/Trend.mqh"
 #include "SimpleFVG/FVG.mqh"
+#include "SimpleFVG/Trade.mqh"
 #include "SimpleFVG/Drawing.mqh"
 
 //+------------------------------------------------------------------+
@@ -63,5 +64,6 @@ void OnTick()
 
    TrendUpdate();
    FVGUpdate();
+   ManageFVGTrades();
    DrawAll();
 }

@@ -7,6 +7,7 @@
 #include "Config.mqh"
 #include "Trend.mqh"
 #include "FVG.mqh"
+#include "Trade.mqh"
 
 //+------------------------------------------------------------------+
 //| Object-creation helpers                                            |
@@ -76,6 +77,81 @@ void DrawTextOnChart(string name, datetime t, double price,
 }
 
 //+------------------------------------------------------------------+
+//| Draw limit orders (TradingView-style lines)                      |
+//+------------------------------------------------------------------+
+void DrawLimitOrders()
+{
+   ObjectsDeleteAll(0, EA_PREFIX + "ORD_");
+
+   string   symbol     = GetTradeSymbol();
+   datetime currentBar = iTime(symbol, InpTimeframe, 0);
+
+   for(int i = 0; i < OrdersTotal(); i++)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket == 0) continue;
+      if(!OrderSelect(ticket)) continue;
+
+      if((long)OrderGetInteger(ORDER_MAGIC) != InpEAMagic) continue;
+      if((string)OrderGetString(ORDER_SYMBOL) != symbol)   continue;
+
+      ENUM_ORDER_TYPE type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+      if(type != ORDER_TYPE_BUY_LIMIT && type != ORDER_TYPE_SELL_LIMIT)
+         continue;
+
+      double entryPrice = OrderGetDouble(ORDER_PRICE_OPEN);
+      double slPrice    = OrderGetDouble(ORDER_SL);
+      double tpPrice    = OrderGetDouble(ORDER_TP);
+      double volume     = OrderGetDouble(ORDER_VOLUME_CURRENT);
+      datetime setupTime = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+
+      string side      = (type == ORDER_TYPE_BUY_LIMIT) ? "BUY" : "SELL";
+      color  entryClr  = (type == ORDER_TYPE_BUY_LIMIT) ? clrDeepSkyBlue : clrOrangeRed;
+      color  slClr     = clrRed;
+      color  tpClr     = clrLime;
+
+      string id = IntegerToString((int)ticket);
+
+      // Entry line
+      DrawTrendLine(
+         EA_PREFIX + "ORD_ENTRY_" + id,
+         setupTime,  entryPrice,
+         currentBar, entryPrice,
+         entryClr, STYLE_SOLID, 2
+      );
+
+      // SL line
+      DrawTrendLine(
+         EA_PREFIX + "ORD_SL_" + id,
+         setupTime,  slPrice,
+         currentBar, slPrice,
+         slClr, STYLE_DASH, 1
+      );
+
+      // TP line
+      DrawTrendLine(
+         EA_PREFIX + "ORD_TP_" + id,
+         setupTime,  tpPrice,
+         currentBar, tpPrice,
+         tpClr, STYLE_DASH, 1
+      );
+
+      // Label near entry
+      string labelText = StringFormat("%s LIMIT %.2f | Vol %.2f | RR %.1f",
+                                      side, entryPrice, volume, InpRRRatio);
+
+      DrawTextOnChart(
+         EA_PREFIX + "ORD_LBL_" + id,
+         setupTime,
+         entryPrice,
+         labelText,
+         entryClr,
+         8,
+         ANCHOR_LEFT_LOWER
+      );
+   }
+}
+//+------------------------------------------------------------------+
 //| Draw all active FVG zones as rectangles on the chart               |
 //+------------------------------------------------------------------+
 void DrawFVGZones()
@@ -87,14 +163,14 @@ void DrawFVGZones()
 
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(!g_FVGZones[i].isActive)
+      if(IsZoneExpired(g_FVGZones[i]))
          continue;
 
       string zoneId = IntegerToString(i);
 
-      //--- Zone color depends on type and mitigation status ---
+      //--- Zone color depends on type and FVG status ---
       color zoneColor;
-      if(g_FVGZones[i].isMitigated)
+      if(IsZoneMitigated(g_FVGZones[i]))
          zoneColor = InpColorMitigatedFVG;
       else if(g_FVGZones[i].type == FVG_BULLISH)
          zoneColor = InpColorBullFVG;
@@ -111,7 +187,7 @@ void DrawFVGZones()
 
       //--- Draw mid-line (50% of FVG) ---
       double midPrice = (g_FVGZones[i].upperEdge + g_FVGZones[i].lowerEdge) / 2.0;
-      color  midColor = g_FVGZones[i].isMitigated ? clrDimGray : clrGold;
+      color  midColor = IsZoneMitigated(g_FVGZones[i]) ? clrDimGray : clrGold;
 
       DrawTrendLine(
          EA_PREFIX + "FVG_MID_" + zoneId,
@@ -125,11 +201,17 @@ void DrawFVGZones()
       {
          string typeStr  = (g_FVGZones[i].type == FVG_BULLISH) ? "BULL" : "BEAR";
          string arrow    = (g_FVGZones[i].type == FVG_BULLISH) ? "▲"   : "▼";
-         string mitigStr = g_FVGZones[i].isMitigated ? " [MITIGATED]" : "";
+         string stateStr = "";
+         if(IsZoneTouched(g_FVGZones[i]))
+            stateStr = " [TOUCHED]";
+         else if(IsZoneMitigated(g_FVGZones[i]))
+            stateStr = " [MITIGATED]";
 
          color labelColor;
-         if(g_FVGZones[i].isMitigated)
+         if(IsZoneMitigated(g_FVGZones[i]))
             labelColor = clrDimGray;
+         else if(IsZoneTouched(g_FVGZones[i]))
+            labelColor = clrYellow;
          else if(g_FVGZones[i].type == FVG_BULLISH)
             labelColor = clrDeepSkyBlue;
          else
@@ -142,7 +224,7 @@ void DrawFVGZones()
             StringFormat("%s %s [%.2f–%.2f]%s",
                          arrow, typeStr,
                          g_FVGZones[i].lowerEdge, g_FVGZones[i].upperEdge,
-                         mitigStr),
+                         stateStr),
             labelColor, 7, ANCHOR_LEFT_LOWER
          );
       }
@@ -190,6 +272,7 @@ void DrawAll()
 {
    DrawFVGZones();
    DrawInfoPanel();
+   DrawLimitOrders();
    ChartRedraw(0);
 }
 

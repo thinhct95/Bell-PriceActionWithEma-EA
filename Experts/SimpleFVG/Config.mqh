@@ -6,30 +6,39 @@
 #define __SIMPLE_FVG_CONFIG_MQH__
 
 //--- Step 0: Asset & Timeframe ---
-input string          InpSymbol            = "";            // Symbol (empty = current chart)
-input ENUM_TIMEFRAMES InpTimeframe         = PERIOD_H1;     // Analysis Timeframe
+input string          InpSymbol            = "";
+input ENUM_TIMEFRAMES InpTimeframe         = PERIOD_H1;
 
 //--- Step 1: Trend (EMA) ---
-input int             InpEMAFastPeriod     = 34;            // EMA Fast Period
-input int             InpEMASlowPeriod     = 89;            // EMA Slow Period
+input int             InpEMAFastPeriod     = 34;
+input int             InpEMASlowPeriod     = 89;
 
 //--- Step 2: FVG Detection ---
-input int             InpFVGLookbackBars   = 100;           // FVG: Lookback range (bars)
-input int             InpFVGMaxAgeBars     = 50;            // FVG: Max age before expiry (bars)
-input double          InpFVGMinBodyPct     = 50.0;          // FVG: Min body % of impulse candle
-input double          InpFVGMinSizePoints  = 0;             // FVG: Min gap size (points, 0=any)
+input int             InpFVGLookbackBars   = 100;
+input int             InpFVGMaxAgeBars     = 50;
+input double          InpFVGMinBodyPct     = 50.0;
+input double          InpFVGMinSizePoints  = 0;
+input double          InpFVGTouchedPercent = 40.0;
+
+//--- Step 3: Trading ---
+input bool            InpTradeEnabled        = true;
+input double          InpRiskPercentPerR     = 1.0;
+input double          InpRRRatio             = 2.2;
+input int             InpMaxLimitOrders      = 3;
+input int             InpLimitMaxAgeBars     = 24;
+input long            InpEAMagic             = 123456;
 
 //--- Step 4: Drawing ---
-input color           InpColorBullFVG      = C'30,80,140';  // Color: Bullish FVG zone
-input color           InpColorBearFVG      = C'140,30,20';  // Color: Bearish FVG zone
-input color           InpColorMitigatedFVG = C'60,60,60';   // Color: Mitigated FVG zone
-input color           InpColorEMAFast      = clrDodgerBlue;  // Color: EMA Fast line
-input color           InpColorEMASlow      = clrOrangeRed;   // Color: EMA Slow line
-input bool            InpShowPanel         = true;           // Draw: Show info panel
-input bool            InpShowFVGLabels     = true;           // Draw: Show FVG labels
+input color           InpColorBullFVG      = C'30,80,140';
+input color           InpColorBearFVG      = C'140,30,20';
+input color           InpColorMitigatedFVG = C'60,60,60';
+input color           InpColorEMAFast      = clrDodgerBlue;
+input color           InpColorEMASlow      = clrOrangeRed;
+input bool            InpShowPanel         = true;
+input bool            InpShowFVGLabels     = true;
 
 //--- Debug ---
-input bool            InpDebugLog          = true;           // Debug: Enable logging
+input bool            InpDebugLog          = true;
 
 //+------------------------------------------------------------------+
 //| Enums                                                             |
@@ -45,6 +54,14 @@ enum ENUM_FVG_TYPE
 {
    FVG_BULLISH =  1,
    FVG_BEARISH = -1
+};
+
+enum ENUM_FVG_STATUS
+{
+   ACTIVE    = 0,  // Giá chưa quay lại test
+   TOUCHED   = 1,  // Giá đã retest >= threshold %
+   MITIGATED = 2,  // Giá đâm xuyên qua vùng
+   EXPIRED   = 3   // Hết hạn, không còn vẽ/đếm
 };
 
 //+------------------------------------------------------------------+

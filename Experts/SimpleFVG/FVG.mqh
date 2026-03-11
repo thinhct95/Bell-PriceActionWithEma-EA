@@ -22,13 +22,13 @@
 //+------------------------------------------------------------------+
 struct FVGZone
 {
-   bool           isActive;
-   ENUM_FVG_TYPE  type;
-   double         upperEdge;
-   double         lowerEdge;
-   datetime       createdTime;
-   int            ageInBars;
-   bool           isMitigated;
+   ENUM_FVG_TYPE   type;
+   ENUM_FVG_STATUS status;
+   double          upperEdge;
+   double          lowerEdge;
+   double          slReferencePrice;
+   datetime        createdTime;
+   int             ageInBars;
 };
 
 //+------------------------------------------------------------------+
@@ -49,8 +49,34 @@ void FVGInit()
 }
 
 //+------------------------------------------------------------------+
-//| Check if impulse candle has strong body (body/range >= threshold)   |
+//| Helper: status helpers & impulse strength                        |
 //+------------------------------------------------------------------+
+bool IsZoneActive(const FVGZone &z)
+{
+   return (z.status != EXPIRED);
+}
+
+bool IsZoneLive(const FVGZone &z)
+{
+   return (z.status == ACTIVE || z.status == TOUCHED);
+}
+
+bool IsZoneMitigated(const FVGZone &z)
+{
+   return (z.status == MITIGATED);
+}
+
+bool IsZoneTouched(const FVGZone &z)
+{
+   return (z.status == TOUCHED);
+}
+
+bool IsZoneExpired(const FVGZone &z)
+{
+   return (z.status == EXPIRED);
+}
+
+// Impulse candle strength: body/range >= threshold
 bool IsImpulseCandleStrong(string symbol, ENUM_TIMEFRAMES tf, int shift)
 {
    double high  = iHigh(symbol, tf, shift);
@@ -69,13 +95,13 @@ bool IsImpulseCandleStrong(string symbol, ENUM_TIMEFRAMES tf, int shift)
 }
 
 //+------------------------------------------------------------------+
-//| Check if this FVG timestamp already exists in our array            |
+//| Check if this FVG timestamp already exists in our array          |
 //+------------------------------------------------------------------+
 bool FVGAlreadyTracked(datetime fvgTime, ENUM_FVG_TYPE fvgType)
 {
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(g_FVGZones[i].isActive
+      if(IsZoneActive(g_FVGZones[i])
          && g_FVGZones[i].createdTime == fvgTime
          && g_FVGZones[i].type == fvgType)
          return true;
@@ -84,9 +110,13 @@ bool FVGAlreadyTracked(datetime fvgTime, ENUM_FVG_TYPE fvgType)
 }
 
 //+------------------------------------------------------------------+
-//| Add a new FVG zone to the array                                    |
+//| Add a new FVG zone to the array                                  |
 //+------------------------------------------------------------------+
-bool AddFVGZone(ENUM_FVG_TYPE type, double upper, double lower, datetime time)
+bool AddFVGZone(ENUM_FVG_TYPE type,
+                double        upper,
+                double        lower,
+                double        slReference,
+                datetime      time)
 {
    if(g_FVGCount >= MAX_FVG_SLOTS)
       return false;
@@ -99,13 +129,13 @@ bool AddFVGZone(ENUM_FVG_TYPE type, double upper, double lower, datetime time)
    }
 
    ZeroMemory(g_FVGZones[g_FVGCount]);
-   g_FVGZones[g_FVGCount].isActive     = true;
-   g_FVGZones[g_FVGCount].type         = type;
-   g_FVGZones[g_FVGCount].upperEdge    = upper;
-   g_FVGZones[g_FVGCount].lowerEdge    = lower;
-   g_FVGZones[g_FVGCount].createdTime  = time;
-   g_FVGZones[g_FVGCount].ageInBars    = 0;
-   g_FVGZones[g_FVGCount].isMitigated  = false;
+   g_FVGZones[g_FVGCount].type            = type;
+   g_FVGZones[g_FVGCount].status          = ACTIVE;
+   g_FVGZones[g_FVGCount].upperEdge       = upper;
+   g_FVGZones[g_FVGCount].lowerEdge       = lower;
+   g_FVGZones[g_FVGCount].slReferencePrice = slReference;
+   g_FVGZones[g_FVGCount].createdTime     = time;
+   g_FVGZones[g_FVGCount].ageInBars       = 0;
    g_FVGCount++;
 
    if(InpDebugLog)
@@ -148,7 +178,10 @@ void ScanForNewFVGs()
          && IsImpulseCandleStrong(symbol, InpTimeframe, shiftB))
       {
          if(!FVGAlreadyTracked(fvgTime, FVG_BULLISH))
-            AddFVGZone(FVG_BULLISH, candleC_Low, candleA_High, fvgTime);
+         {
+            double slRef = iLow(symbol, InpTimeframe, shiftB);   // bar2.low
+            AddFVGZone(FVG_BULLISH, candleC_Low, candleA_High, slRef, fvgTime);
+         }
       }
 
       //--- Bearish FVG: gap between C.High and A.Low ---
@@ -157,7 +190,10 @@ void ScanForNewFVGs()
          && IsImpulseCandleStrong(symbol, InpTimeframe, shiftB))
       {
          if(!FVGAlreadyTracked(fvgTime, FVG_BEARISH))
-            AddFVGZone(FVG_BEARISH, candleA_Low, candleC_High, fvgTime);
+         {
+            double slRef = iHigh(symbol, InpTimeframe, shiftB);  // bar2.high
+            AddFVGZone(FVG_BEARISH, candleA_Low, candleC_High, slRef, fvgTime);
+         }
       }
    }
 }
@@ -171,28 +207,58 @@ void CheckMitigationStatus()
 
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(!g_FVGZones[i].isActive || g_FVGZones[i].isMitigated)
+      if(IsZoneMitigated(g_FVGZones[i]) || !IsZoneActive(g_FVGZones[i]))
          continue;
 
       double lastLow  = iLow (symbol, InpTimeframe, 1);
       double lastHigh = iHigh(symbol, InpTimeframe, 1);
 
-      // Bullish FVG mitigated: price drops through lower edge
-      if(g_FVGZones[i].type == FVG_BULLISH && lastLow <= g_FVGZones[i].lowerEdge)
+      double zoneHeight = g_FVGZones[i].upperEdge - g_FVGZones[i].lowerEdge;
+      if(zoneHeight <= 0)
+         continue;
+
+      //--- Bullish FVG: price comes down into the gap ---
+      if(g_FVGZones[i].type == FVG_BULLISH)
       {
-         g_FVGZones[i].isMitigated = true;
-         if(InpDebugLog)
-            PrintFormat("[FVG] MITIGATED BULL [%.5f – %.5f]",
-                        g_FVGZones[i].lowerEdge, g_FVGZones[i].upperEdge);
+         // Mitigated: price drops through lower edge
+         if(lastLow <= g_FVGZones[i].lowerEdge)
+         {
+            g_FVGZones[i].status = MITIGATED;
+            if(InpDebugLog)
+               PrintFormat("[FVG] MITIGATED BULL [%.5f – %.5f]",
+                           g_FVGZones[i].lowerEdge, g_FVGZones[i].upperEdge);
+            continue;
+         }
+
+         // Touched: price has filled at least X% of gap, but not fully
+         double deepestPrice = MathMin(lastLow, g_FVGZones[i].upperEdge);
+         deepestPrice        = MathMax(deepestPrice, g_FVGZones[i].lowerEdge);
+         double fillPct      = (g_FVGZones[i].upperEdge - deepestPrice) / zoneHeight * 100.0;
+
+         if(g_FVGZones[i].status == ACTIVE && fillPct >= InpFVGTouchedPercent)
+            g_FVGZones[i].status = TOUCHED;
       }
 
-      // Bearish FVG mitigated: price rises through upper edge
-      if(g_FVGZones[i].type == FVG_BEARISH && lastHigh >= g_FVGZones[i].upperEdge)
+      //--- Bearish FVG: price goes up into the gap ---
+      if(g_FVGZones[i].type == FVG_BEARISH)
       {
-         g_FVGZones[i].isMitigated = true;
-         if(InpDebugLog)
-            PrintFormat("[FVG] MITIGATED BEAR [%.5f – %.5f]",
-                        g_FVGZones[i].lowerEdge, g_FVGZones[i].upperEdge);
+         // Mitigated: price rises through upper edge
+         if(lastHigh >= g_FVGZones[i].upperEdge)
+         {
+            g_FVGZones[i].status = MITIGATED;
+            if(InpDebugLog)
+               PrintFormat("[FVG] MITIGATED BEAR [%.5f – %.5f]",
+                           g_FVGZones[i].lowerEdge, g_FVGZones[i].upperEdge);
+            continue;
+         }
+
+         // Touched: price has filled at least X% of gap, but not fully
+         double highestPrice = MathMax(lastHigh, g_FVGZones[i].lowerEdge);
+         highestPrice        = MathMin(highestPrice, g_FVGZones[i].upperEdge);
+         double fillPct      = (highestPrice - g_FVGZones[i].lowerEdge) / zoneHeight * 100.0;
+
+         if(g_FVGZones[i].status == ACTIVE && fillPct >= InpFVGTouchedPercent)
+            g_FVGZones[i].status = TOUCHED;
       }
    }
 }
@@ -204,13 +270,13 @@ void ExpireOldFVGs()
 {
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(!g_FVGZones[i].isActive) continue;
+      if(!IsZoneActive(g_FVGZones[i])) continue;
 
       g_FVGZones[i].ageInBars++;
 
       if(g_FVGZones[i].ageInBars > InpFVGMaxAgeBars)
       {
-         g_FVGZones[i].isActive = false;
+         g_FVGZones[i].status = EXPIRED;
          if(InpDebugLog)
             PrintFormat("[FVG] EXPIRED %s [%.5f – %.5f] age=%d bars",
                         (g_FVGZones[i].type == FVG_BULLISH) ? "BULL" : "BEAR",
@@ -228,7 +294,7 @@ void CompactFVGArray()
    int writeIndex = 0;
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(g_FVGZones[i].isActive)
+      if(IsZoneActive(g_FVGZones[i]))
       {
          if(writeIndex != i)
             g_FVGZones[writeIndex] = g_FVGZones[i];
@@ -257,7 +323,7 @@ int CountActiveFVGs(ENUM_FVG_TYPE type)
    int count = 0;
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(g_FVGZones[i].isActive && g_FVGZones[i].type == type)
+      if(IsZoneActive(g_FVGZones[i]) && g_FVGZones[i].type == type)
          count++;
    }
    return count;
@@ -268,7 +334,7 @@ int CountMitigatedFVGs()
    int count = 0;
    for(int i = 0; i < g_FVGCount; i++)
    {
-      if(g_FVGZones[i].isActive && g_FVGZones[i].isMitigated)
+      if(IsZoneMitigated(g_FVGZones[i]))
          count++;
    }
    return count;
