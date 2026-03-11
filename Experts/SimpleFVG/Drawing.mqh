@@ -169,7 +169,7 @@ void DrawInfoPanel()
       clrSilver, 10);
 
    //--- Row 2: Trend status ---
-   DrawLabel(EA_PREFIX + "PNL_TREND", 12, 44,
+   DrawLabel(EA_PREFIX + "PNL_TREND", 12, 52,
       StringFormat("Trend: %s  |  EMA%d = %.2f  |  EMA%d = %.2f",
                    trendText,
                    InpEMAFastPeriod, g_EMAFastValue,
@@ -177,7 +177,7 @@ void DrawInfoPanel()
       trendColor, 9);
 
    //--- Row 3: FVG counts ---
-   DrawLabel(EA_PREFIX + "PNL_FVG", 12, 66,
+   DrawLabel(EA_PREFIX + "PNL_FVG", 12, 82,
       StringFormat("FVG Active: %d Bull + %d Bear  |  Mitigated: %d",
                    bullCount, bearCount, mitigCount),
       clrWheat, 9);
