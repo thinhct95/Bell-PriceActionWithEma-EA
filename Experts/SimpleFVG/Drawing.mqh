@@ -87,9 +87,9 @@ void DrawTradeStatsPanel()
 
    ObjectSetInteger(0, name, OBJPROP_CORNER,    CORNER_LEFT_LOWER);
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
-   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 22);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 40);
    ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  9);
-   ObjectSetInteger(0, name, OBJPROP_COLOR,     clrSilver);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,     clrWhite);
    ObjectSetString (0, name, OBJPROP_FONT,      "Consolas");
    ObjectSetString (0, name, OBJPROP_TEXT,
       StringFormat("Trades: %d  |  TP: %d  |  SL: %d",
