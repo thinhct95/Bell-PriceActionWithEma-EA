@@ -157,6 +157,47 @@ void CancelStaleLimitOrders()
    }
 }
 
+void GetTradeStats(int &totalTrades, int &tpTrades, int &slTrades)
+{
+   totalTrades = 0;
+   tpTrades    = 0;
+   slTrades    = 0;
+
+   datetime now = TimeCurrent();
+   if(now == 0)
+      return;
+
+   if(!HistorySelect(0, now))
+      return;
+
+   int deals = HistoryDealsTotal();
+   string symbol = GetTradeSymbol();
+
+   for(int i = 0; i < deals; i++)
+   {
+      ulong dealTicket = HistoryDealGetTicket(i);
+      if(dealTicket == 0)
+         continue;
+
+      string dealSymbol = (string)HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+      long   dealMagic  = (long)HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+      if(dealSymbol != symbol || dealMagic != InpEAMagic)
+         continue;
+
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_INOUT)
+         continue;
+
+      totalTrades++;
+
+      ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(dealTicket, DEAL_REASON);
+      if(reason == DEAL_REASON_TP)
+         tpTrades++;
+      else if(reason == DEAL_REASON_SL)
+         slTrades++;
+   }
+}
+
 // Tính khối lượng lot sao cho 1R = InpRiskPercentPerR % balance
 double CalculateRiskLotSize(double entryPrice, double slPrice)
 {
@@ -292,18 +333,39 @@ void ManageFVGTrades()
    if(currentLimits >= InpMaxLimitOrders)
       return;
 
-   // Chỉ đặt lệnh limit khi giá đã chạm FVG (TOUCHED), không đặt khi mới ACTIVE
+   // Đặt lệnh limit khi giá vừa chạm cạnh ngoài FVG (trước khi fill đủ 40%)
    ENUM_TREND_DIRECTION trend = g_CurrentTrend;
+   string symbol = GetTradeSymbol();
+   double lastHigh = iHigh(symbol, InpTimeframe, 1);
+   double lastLow  = iLow (symbol, InpTimeframe, 1);
 
    for(int i = g_FVGCount - 1; i >= 0 && currentLimits < InpMaxLimitOrders; i--)
    {
       FVGZone zone = g_FVGZones[i];
-      if(!IsZoneTouched(zone))
+      if(!IsZoneActive(zone) || IsZoneMitigated(zone))
          continue;
 
       if(zone.type == FVG_BULLISH && trend != TREND_BULLISH)
          continue;
       if(zone.type == FVG_BEARISH && trend != TREND_BEARISH)
+         continue;
+
+      bool touchedEdge = false;
+
+      if(zone.type == FVG_BULLISH)
+      {
+         // giá chạm cạnh trên (upperEdge) của bullish FVG
+         if(lastLow <= zone.upperEdge && lastHigh >= zone.upperEdge)
+            touchedEdge = true;
+      }
+      else // FVG_BEARISH
+      {
+         // giá chạm cạnh dưới (lowerEdge) của bearish FVG
+         if(lastHigh >= zone.lowerEdge && lastLow <= zone.lowerEdge)
+            touchedEdge = true;
+      }
+
+      if(!touchedEdge)
          continue;
 
       if(PlaceLimitForZone(zone))

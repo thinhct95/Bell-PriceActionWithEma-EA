@@ -76,6 +76,27 @@ void DrawTextOnChart(string name, datetime t, double price,
    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
 }
 
+void DrawTradeStatsPanel()
+{
+   int totalTrades, tpTrades, slTrades;
+   GetTradeStats(totalTrades, tpTrades, slTrades);
+
+   string name = EA_PREFIX + "PNL_STATS";
+   if(ObjectFind(0, name) < 0)
+      ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+   ObjectSetInteger(0, name, OBJPROP_CORNER,    CORNER_LEFT_LOWER);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 12);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 22);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE,  9);
+   ObjectSetInteger(0, name, OBJPROP_COLOR,     clrSilver);
+   ObjectSetString (0, name, OBJPROP_FONT,      "Consolas");
+   ObjectSetString (0, name, OBJPROP_TEXT,
+      StringFormat("Trades: %d  |  TP: %d  |  SL: %d",
+                   totalTrades, tpTrades, slTrades));
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+}
+
 //+------------------------------------------------------------------+
 //| Draw limit orders (TradingView-style lines)                      |
 //+------------------------------------------------------------------+
@@ -273,6 +294,7 @@ void DrawAll()
    DrawFVGZones();
    DrawInfoPanel();
    DrawLimitOrders();
+   DrawTradeStatsPanel();
    ChartRedraw(0);
 }
 
