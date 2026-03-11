@@ -258,7 +258,7 @@ bool PlaceLimitForZone(const FVGZone &zone)
 
    if(zone.type == FVG_BULLISH)
    {
-      // Entry: 40% từ đỉnh vùng xuống
+      // Entry: 35% từ đỉnh vùng xuống
       entryPrice = zone.upperEdge - zoneHeight * touchRatio;
       slPrice    = zone.slReferencePrice;
 
@@ -269,7 +269,7 @@ bool PlaceLimitForZone(const FVGZone &zone)
    }
    else // FVG_BEARISH
    {
-      // Entry: 40% từ đáy vùng lên
+      // Entry: 35% từ đáy vùng lên
       entryPrice = zone.lowerEdge + zoneHeight * touchRatio;
       slPrice    = zone.slReferencePrice;
 
@@ -333,7 +333,7 @@ void ManageFVGTrades()
    if(currentLimits >= InpMaxLimitOrders)
       return;
 
-   // Đặt lệnh limit khi giá vừa chạm cạnh ngoài FVG (trước khi fill đủ 40%)
+   // Đặt lệnh limit khi giá vừa chạm cạnh ngoài FVG (trước khi fill đủ 35%)
    ENUM_TREND_DIRECTION trend = g_CurrentTrend;
    string symbol = GetTradeSymbol();
    double lastHigh = iHigh(symbol, InpTimeframe, 1);

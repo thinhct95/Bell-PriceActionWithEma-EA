@@ -18,7 +18,7 @@ input int             InpFVGLookbackBars   = 100;
 input int             InpFVGMaxAgeBars     = 50;
 input double          InpFVGMinBodyPct     = 50.0;
 input double          InpFVGMinSizePoints      = 0;
-input double          InpFVGTouchedPercent     = 40.0;
+input double          InpFVGTouchedPercent     = 33.0;
 input double          InpFVGMinGapVsImpulsePct = 30.0;
 input double          InpFVGMaxOuterBarRatio   = 2.0;
 
