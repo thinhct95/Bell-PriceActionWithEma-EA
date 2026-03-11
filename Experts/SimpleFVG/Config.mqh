@@ -25,7 +25,7 @@ input double          InpFVGMaxOuterBarRatio   = 2.0;
 //--- Step 3: Trading ---
 input bool            InpTradeEnabled        = true;
 input double          InpRiskPercentPerR     = 1.0;
-input double          InpRRRatio             = 2.2;
+input double          InpRRRatio             = 3.2;
 input int             InpMaxLimitOrders      = 3;
 input int             InpLimitMaxAgeBars     = 24;
 input long            InpEAMagic             = 123456;

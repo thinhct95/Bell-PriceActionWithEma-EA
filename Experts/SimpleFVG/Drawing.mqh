@@ -300,11 +300,15 @@ void DrawAll()
 }
 
 //+------------------------------------------------------------------+
-//| Clean up all drawn objects                                         |
+//| Clean up drawn objects (giữ lại PNL_STATS để xem kết quả sau test) |
 //+------------------------------------------------------------------+
 void DrawCleanup()
 {
-   ObjectsDeleteAll(0, EA_PREFIX);
+   ObjectsDeleteAll(0, EA_PREFIX + "FVG_");
+   ObjectsDeleteAll(0, EA_PREFIX + "ORD_");
+   ObjectDelete(0, EA_PREFIX + "PNL_HDR");
+   ObjectDelete(0, EA_PREFIX + "PNL_TREND");
+   ObjectDelete(0, EA_PREFIX + "PNL_FVG");
    ChartRedraw(0);
 }
 

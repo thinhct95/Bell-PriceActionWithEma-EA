@@ -425,17 +425,17 @@ void ManageFVGTrades()
                             ltfUpper, ltfLower, ltfBarALow, ltfBarAHigh))
          continue;
 
-      // Entry theo low TF FVG; SL vẫn dùng bar A của high TF (đủ xa)
+      // Entry theo low TF FVG; SL = bar B của high TF FVG
       double entryPrice, slPrice;
       if(zone.type == FVG_BULLISH)
       {
          entryPrice = ltfUpper;            // Buy limit tại cạnh trên low TF FVG
-         slPrice    = zone.slReferencePrice; // SL dưới bar A của high TF FVG
+         slPrice    = zone.slReferencePrice; // SL dưới bar B high TF
       }
       else
       {
          entryPrice = ltfLower;            // Sell limit tại cạnh dưới low TF FVG
-         slPrice    = zone.slReferencePrice; // SL trên bar A của high TF FVG
+         slPrice    = zone.slReferencePrice; // SL trên bar B high TF
       }
 
       if(PlaceLimitFromLowTF(symbol, zone.type, entryPrice, slPrice))
