@@ -177,15 +177,18 @@ void ScanForNewFVGs()
       double rangeA = candleA_High - candleA_Low;
       double rangeB = candleB_High - candleB_Low;
       double rangeC = candleC_High - candleC_Low;
+      double bodyB  = MathAbs(candleB_Close - candleB_Open);
 
       if(rangeB <= 0)
+         continue;
+      if(bodyB <= 0)
          continue;
 
       double maxOuterRatio = InpFVGMaxOuterBarRatio;
       if(rangeA > maxOuterRatio * rangeB || rangeC > maxOuterRatio * rangeB)
          continue;
 
-      double minGapVsImpulse = InpFVGMinGapVsImpulsePct / 100.0;
+      double minGapVsBody = InpFVGMinGapVsImpulsePct / 100.0;
 
       //--- Bullish FVG: gap between A.High and C.Low ---
       if(candleA_High < candleC_Low
@@ -193,9 +196,9 @@ void ScanForNewFVGs()
          && IsImpulseCandleStrong(symbol, InpTimeframe, shiftB))
       {
          double gap      = candleC_Low - candleA_High;
-         double gapRatio = gap / rangeB;
+         double gapRatio = gap / bodyB;
 
-         if(gapRatio >= minGapVsImpulse && !FVGAlreadyTracked(fvgTime, FVG_BULLISH))
+         if(gapRatio >= minGapVsBody && !FVGAlreadyTracked(fvgTime, FVG_BULLISH))
          {
             double slRef = candleB_Low;   // bar2.low
             AddFVGZone(FVG_BULLISH, candleC_Low, candleA_High, slRef, fvgTime);
@@ -208,9 +211,9 @@ void ScanForNewFVGs()
          && IsImpulseCandleStrong(symbol, InpTimeframe, shiftB))
       {
          double gap      = candleA_Low - candleC_High;
-         double gapRatio = gap / rangeB;
+         double gapRatio = gap / bodyB;
 
-         if(gapRatio >= minGapVsImpulse && !FVGAlreadyTracked(fvgTime, FVG_BEARISH))
+         if(gapRatio >= minGapVsBody && !FVGAlreadyTracked(fvgTime, FVG_BEARISH))
          {
             double slRef = candleB_High;  // bar2.high
             AddFVGZone(FVG_BEARISH, candleA_Low, candleC_High, slRef, fvgTime);
