@@ -25,7 +25,7 @@ input double          InpFVGMaxOuterBarRatio   = 2.0;
 //--- Step 3: Trading ---
 input bool            InpTradeEnabled        = true;
 input double          InpRiskPercentPerR     = 1.0;
-input double          InpRRRatio             = 3.2;
+input double          InpRRRatio             = 2.2;
 input int             InpMaxLimitOrders      = 3;
 input int             InpLimitMaxAgeBars     = 24;
 input long            InpEAMagic             = 123456;
@@ -108,9 +108,15 @@ bool IsNewBar()
 //+------------------------------------------------------------------+
 ENUM_TIMEFRAMES GetConfirmationTimeframe(ENUM_TIMEFRAMES highTF)
 {
-   if(highTF == PERIOD_H1)  return PERIOD_M5;
-   if(highTF == PERIOD_H4)  return PERIOD_M15;
-   if(highTF == PERIOD_M15) return PERIOD_M2;
+   switch(highTF)
+   {
+      case PERIOD_M15: return PERIOD_M1;
+      case PERIOD_H1:  return PERIOD_M5;
+      case PERIOD_H4:  return PERIOD_M15;
+      case PERIOD_D1:  return PERIOD_H1;
+      default: return highTF;
+   }
+
    return highTF;
 }
 
