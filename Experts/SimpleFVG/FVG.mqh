@@ -164,6 +164,8 @@ void ScanForNewFVGs()
       double candleA_High = iHigh(symbol, InpTimeframe, shiftA);
       double candleA_Low  = iLow (symbol, InpTimeframe, shiftA);
 
+      double candleB_High = iHigh(symbol, InpTimeframe, shiftB);
+      double candleB_Low  = iLow (symbol, InpTimeframe, shiftB);
       double candleB_Open  = iOpen (symbol, InpTimeframe, shiftB);
       double candleB_Close = iClose(symbol, InpTimeframe, shiftB);
 
@@ -172,14 +174,30 @@ void ScanForNewFVGs()
 
       datetime fvgTime = iTime(symbol, InpTimeframe, shiftC);
 
+      double rangeA = candleA_High - candleA_Low;
+      double rangeB = candleB_High - candleB_Low;
+      double rangeC = candleC_High - candleC_Low;
+
+      if(rangeB <= 0)
+         continue;
+
+      double maxOuterRatio = InpFVGMaxOuterBarRatio;
+      if(rangeA > maxOuterRatio * rangeB || rangeC > maxOuterRatio * rangeB)
+         continue;
+
+      double minGapVsImpulse = InpFVGMinGapVsImpulsePct / 100.0;
+
       //--- Bullish FVG: gap between A.High and C.Low ---
       if(candleA_High < candleC_Low
          && candleB_Close > candleB_Open
          && IsImpulseCandleStrong(symbol, InpTimeframe, shiftB))
       {
-         if(!FVGAlreadyTracked(fvgTime, FVG_BULLISH))
+         double gap      = candleC_Low - candleA_High;
+         double gapRatio = gap / rangeB;
+
+         if(gapRatio >= minGapVsImpulse && !FVGAlreadyTracked(fvgTime, FVG_BULLISH))
          {
-            double slRef = iLow(symbol, InpTimeframe, shiftB);   // bar2.low
+            double slRef = candleB_Low;   // bar2.low
             AddFVGZone(FVG_BULLISH, candleC_Low, candleA_High, slRef, fvgTime);
          }
       }
@@ -189,9 +207,12 @@ void ScanForNewFVGs()
          && candleB_Close < candleB_Open
          && IsImpulseCandleStrong(symbol, InpTimeframe, shiftB))
       {
-         if(!FVGAlreadyTracked(fvgTime, FVG_BEARISH))
+         double gap      = candleA_Low - candleC_High;
+         double gapRatio = gap / rangeB;
+
+         if(gapRatio >= minGapVsImpulse && !FVGAlreadyTracked(fvgTime, FVG_BEARISH))
          {
-            double slRef = iHigh(symbol, InpTimeframe, shiftB);  // bar2.high
+            double slRef = candleB_High;  // bar2.high
             AddFVGZone(FVG_BEARISH, candleA_Low, candleC_High, slRef, fvgTime);
          }
       }

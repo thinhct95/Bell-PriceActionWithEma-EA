@@ -17,8 +17,10 @@ input int             InpEMASlowPeriod     = 89;
 input int             InpFVGLookbackBars   = 100;
 input int             InpFVGMaxAgeBars     = 50;
 input double          InpFVGMinBodyPct     = 50.0;
-input double          InpFVGMinSizePoints  = 0;
-input double          InpFVGTouchedPercent = 40.0;
+input double          InpFVGMinSizePoints      = 0;
+input double          InpFVGTouchedPercent     = 40.0;
+input double          InpFVGMinGapVsImpulsePct = 40.0;
+input double          InpFVGMaxOuterBarRatio   = 2.0;
 
 //--- Step 3: Trading ---
 input bool            InpTradeEnabled        = true;
