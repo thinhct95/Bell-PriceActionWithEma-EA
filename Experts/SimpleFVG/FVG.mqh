@@ -200,7 +200,7 @@ void ScanForNewFVGs()
 
          if(gapRatio >= minGapVsBody && !FVGAlreadyTracked(fvgTime, FVG_BULLISH))
          {
-            double slRef = candleB_Low;   // bar2.low
+            double slRef = candleA_Low;   // SL dưới bar A
             AddFVGZone(FVG_BULLISH, candleC_Low, candleA_High, slRef, fvgTime);
          }
       }
@@ -215,7 +215,7 @@ void ScanForNewFVGs()
 
          if(gapRatio >= minGapVsBody && !FVGAlreadyTracked(fvgTime, FVG_BEARISH))
          {
-            double slRef = candleB_High;  // bar2.high
+            double slRef = candleA_High;  // SL trên bar A
             AddFVGZone(FVG_BEARISH, candleA_Low, candleC_High, slRef, fvgTime);
          }
       }
