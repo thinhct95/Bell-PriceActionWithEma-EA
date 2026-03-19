@@ -382,12 +382,9 @@ void ManageFVGTrades()
    if(currentLimits >= InpMaxLimitOrders)
       return;
 
-   // Khi giá chạm cạnh FVG (high TF) -> tìm tín hiệu xác nhận trên low TF (FVG cùng hướng)
+   // Chỉ tìm tín hiệu low TF FVG khi high TF FVG đã TOUCHED (giá lấp đủ %), không trigger khi mới chạm cạnh
    ENUM_TREND_DIRECTION trend = g_CurrentTrend;
    string symbol = GetTradeSymbol();
-   double lastHigh = iHigh(symbol, InpTimeframe, 1);
-   double lastLow  = iLow (symbol, InpTimeframe, 1);
-
    ENUM_TIMEFRAMES lowTF = GetConfirmationTimeframe(InpTimeframe);
    const int LOW_TF_FVG_LOOKBACK = 15;
 
@@ -402,18 +399,8 @@ void ManageFVGTrades()
       if(zone.type == FVG_BEARISH && trend != TREND_BEARISH)
          continue;
 
-      bool touchedEdge = false;
-      if(zone.type == FVG_BULLISH)
-      {
-         if(lastLow <= zone.upperEdge && lastHigh >= zone.upperEdge)
-            touchedEdge = true;
-      }
-      else
-      {
-         if(lastHigh >= zone.lowerEdge && lastLow <= zone.lowerEdge)
-            touchedEdge = true;
-      }
-      if(!touchedEdge)
+      // Điều kiện vào lệnh: FVG high TF phải đã TOUCHED (giá lấp >= InpFVGTouchedPercent), không chỉ chạm cạnh
+      if(!IsZoneTouched(zone))
          continue;
 
       // Chỉ đặt lệnh khi có low TF để xác nhận (H1->M5, H4->M15, M15->M2)
@@ -439,7 +426,11 @@ void ManageFVGTrades()
       }
 
       if(PlaceLimitFromLowTF(symbol, zone.type, entryPrice, slPrice))
+      {
+         // Mỗi FVG chỉ được dùng để trade 1 lần
+         g_FVGZones[i].status = EXPIRED;
          currentLimits++;
+      }
    }
 }
 
