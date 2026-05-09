@@ -1,21 +1,21 @@
 # RSIForceStateEA
 
-EA giao dich pullback theo dong luc RSI, loc trend bang EMA200, dieu phoi qua state
-machine 4 trang thai. Chi dung 1 lenh moi pullback, vao bang BUY/SELL LIMIT.
+EA giao dịch pullback theo động lực RSI, lọc xu hướng bằng EMA200, điều phối bằng state
+machine 4 trạng thái. Mỗi pullback chỉ một lệnh, vào bằng **BUY/SELL LIMIT** (không đuổi giá market).
 
-## 1) Cau truc thu muc
+## 1) Cấu trúc thư mục
 
-- EA chinh: `Experts/RSIForceStateEA.mq5`
-- Cac module:
-  - `Experts/RSIForceStateEA/Config.mqh`        - toan bo input
-  - `Experts/RSIForceStateEA/State.mqh`         - enum + struct (no globals)
-  - `Experts/RSIForceStateEA/Indicators.mqh`    - handle + buffer + helper slope/cross
-  - `Experts/RSIForceStateEA/Trade.mqh`         - dat lenh, sizing, partial + BE
-  - `Experts/RSIForceStateEA/StateMachine.mqh`  - flow 4 state
-  - `Experts/RSIForceStateEA/Visualizer.mqh`    - dashboard, stats panel, trade levels
-  - `Experts/RSIForceStateEA/README.md`
+- EA chính: `Experts/RSIForceStateEA.mq5`
+- Các module:
+  - `Experts/RSIForceStateEA/Config.mqh` — toàn bộ tham số đầu vào (`input`)
+  - `Experts/RSIForceStateEA/State.mqh` — `enum` + `struct` (không chứa biến global)
+  - `Experts/RSIForceStateEA/Indicators.mqh` — handle chỉ báo + buffer + hàm slope/cross
+  - `Experts/RSIForceStateEA/Trade.mqh` — đặt lệnh, khối lượng theo rủi ro, partial + BE
+  - `Experts/RSIForceStateEA/StateMachine.mqh` — luồng 4 trạng thái
+  - `Experts/RSIForceStateEA/Visualizer.mqh` — dashboard, bảng thống kê, mức Entry/SL/TP
+  - `Experts/RSIForceStateEA/README.md` — tài liệu này
 
-Thu tu include trong file `.mq5`:
+Thứ tự `#include` trong file `.mq5`:
 
 ```
 Layer 1 : Config -> State -> Indicators
@@ -24,212 +24,433 @@ Layer 2 : Trade -> StateMachine
 Layer 3 : Visualizer
 ```
 
-## 2) Logic tong the
+## 2) Logic tổng thể
 
-### 2.1 Cac chi bao
+### 2.1 Các chỉ báo
 
-- `RSI(InpRSIPeriod)` - dong luc gia.
-- `EMA(InpRSI_EMA9Period)` tinh tren RSI.
-- `WMA(InpRSI_WMA45Period)` tinh tren RSI.
-- `EMA(InpEMA200Period)` tren close - loc trend.
-- `ATR(InpATRPeriod)` - dung cho trend buffer va SL.
+- `RSI(InpRSIPeriod)` — động lực giá.
+- `EMA(InpRSI_EMA9Period)` — tính **trên** chuỗi RSI.
+- `WMA(InpRSI_WMA45Period)` — tính **trên** chuỗi RSI.
+- `EMA(InpEMA200Period)` — trên **giá đóng** — lọc xu hướng.
+- `ATR(InpATRPeriod)` — dùng cho vùng đệm trend và SL.
 
-### 2.2 Trend filter
+### 2.2 Bộ lọc xu hướng (trend)
 
-- `Uptrend`   khi `Close > EMA200 + buffer`.
-- `Downtrend` khi `Close < EMA200 - buffer`.
-- `buffer`:
-  - `% EMA200` mac dinh (`InpTrendBufferPercent = 0.10%`), hoac
-  - `ATR-based` neu `InpUseATRTrendBuffer = true`.
-- `InpSkipFlatEMA200`: bo qua khi EMA200 phang (delta giua 2 nen <= `ATR * InpFlatEMA_ATRMult`).
+- **Uptrend** khi `Close > EMA200 + buffer`.
+- **Downtrend** khi `Close < EMA200 - buffer`.
+- **Buffer**:
+  - Theo `%` EMA200 mặc định (`InpTrendBufferPercent = 0.10%`), hoặc
+  - Theo ATR nếu `InpUseATRTrendBuffer = true`.
+- `InpSkipFlatEMA200`: bỏ qua khi EMA200 “phẳng” (chênh lệch giữa hai nến ≤ `ATR * InpFlatEMA_ATRMult`).
 
-### 2.3 4 trang thai
+### 2.3 Bốn trạng thái
 
+| Trạng thái | Ý nghĩa |
+| ----------- | ------- |
+| `STATE_NO_TRADE` | Chưa có setup hợp lệ |
+| `STATE_WATCHING` | Đã có pullback hợp lệ, đang chờ tín hiệu vào lệnh |
+| `STATE_PENDING_ORDER` | Đã đặt BUY/SELL LIMIT, chờ khớp |
+| `STATE_IN_TRADE` | Đã khớp, đang quản lý vị thế (partial + BE + TP) |
 
-| State                 | Y nghia                                            |
-| --------------------- | -------------------------------------------------- |
-| `STATE_NO_TRADE`      | khong co setup hop le                              |
-| `STATE_WATCHING`      | da co pullback hop le, dang cho trigger            |
-| `STATE_PENDING_ORDER` | da dat BUY/SELL LIMIT, dang cho khop               |
-| `STATE_IN_TRADE`      | da khop, dang quan ly position (partial + BE + TP) |
+### 2.4 Pullback (`NO_TRADE` → `WATCHING`)
 
-
-### 2.4 Pullback (NO_TRADE -> WATCHING)
-
-- Uptrend pullback:
+- Pullback trong **uptrend**:
   - `RSI < EMA9 < WMA45`
-  - 3 buffer cung slope giam (kiem tra `InpSlopeLookbackBars` nen)
-- Downtrend pullback (mirror).
+  - Cả ba đường cùng **slope giảm** (kiểm tra trên `InpSlopeLookbackBars` nến).
+- Pullback trong **downtrend**: đối xứng (slope tăng).
 
-### 2.5 Trigger entry (WATCHING -> PENDING_ORDER)
+### 2.5 Kích hoạt vào lệnh (`WATCHING` → `PENDING_ORDER`)
 
-- BUY trigger:
-  - RSI cat len WMA45 (so sanh nen `InpSignalBarShift` voi nen truoc).
-  - EMA9 van con < WMA45 (xac nhan dong luc moi bat).
-  - Khong co cross RSI/WMA45 trong `InpMinBarsBetweenCrosses` nen truoc do
-  (tin hieu phai "isolated", tranh nhieu sat WMA45).
-- SELL trigger (mirror).
+- **Tín hiệu BUY**:
+  - RSI cắt **lên** WMA45 (so sánh nến `InpSignalBarShift` với nến trước).
+  - EMA9 vẫn **dưới** WMA45.
+  - Trong `InpMinBarsBetweenCrosses` nến trước đó **không** có cắt RSI/WMA45 (tín hiệu “cô lập”, tránh nhiễu sát WMA45).
+- **Tín hiệu SELL**: đối xứng.
 
-### 2.6 Dat LIMIT ORDER
+### 2.6 Đặt lệnh LIMIT
 
-- `Entry = (Close(signal) + SwingExtreme) / 2`
-  - BUY: SwingExtreme = swing low gan nhat trong `InpSwingLookbackBars`.
-  - SELL: SwingExtreme = swing high gan nhat.
-- Lenh dat la `BuyLimit` / `SellLimit` (khong co market chase).
-- Pending song toi da `InpPendingMaxAliveBars`. Het han -> huy.
-- Neu `InpInvalidateIfCrossBack = true`, khi RSI cross nguoc lai WMA45
-hoac trend mat -> huy ngay.
-- WATCHING song toi da `InpWatchingMaxBars`. Het han -> tro ve NO_TRADE.
+- `Entry = (Close(nến tín hiệu) + SwingExtreme) / 2`
+  - **BUY**: SwingExtreme = đáy gần nhất trong `InpSwingLookbackBars`.
+  - **SELL**: SwingExtreme = đỉnh gần nhất.
+- Lệnh: `BuyLimit` / `SellLimit` (không vào market).
+- Pending tối đa `InpPendingMaxAliveBars` nến; hết hạn → hủy.
+- Nếu `InpInvalidateIfCrossBack = true`: RSI cắt ngược lại WMA45 hoặc mất trend → hủy.
+- `WATCHING` tối đa `InpWatchingMaxBars` nến không có trigger → về `NO_TRADE`.
 
 ### 2.7 Stop Loss
 
-
-| Mode        | Cong thuc                                                      |
-| ----------- | -------------------------------------------------------------- |
-| `SL_SWING`  | swing extreme +/- `InpSL_SwingBufferPoints`                    |
-| `SL_ATR`    | `Entry +/- ATR * InpSL_ATRMult`                                |
-| `SL_HYBRID` | chon SL **rong hon** giua swing va ATR (an toan hon, mac dinh) |
-
+| Chế độ | Công thức |
+| ------ | --------- |
+| `SL_SWING` | Cực trị swing ± `InpSL_SwingBufferPoints` (point) |
+| `SL_ATR` | `Entry ± ATR * InpSL_ATRMult` |
+| `SL_HYBRID` | Chọn SL **rộng hơn** giữa swing và ATR (mặc định, an toàn hơn) |
 
 ### 2.8 Take Profit
 
-- `TP = Entry +/- R * InpRiskRewardRatio` (mac dinh `2R`).
+- `TP = Entry ± R * InpRiskRewardRatio` (mặc định `2R`).
 
-### 2.9 Quan ly trong IN_TRADE
+### 2.9 Quản lý khi `IN_TRADE`
 
-- Risk = `InpRiskPercent` (% balance, mac dinh 1%).
-- Khi gia chay duoc `InpPartialCloseAtR` (mac dinh `1.5R`):
-  - Dong `InpPartialClosePercent`% volume (mac dinh 50%).
-  - Doi SL ve `Entry` (BE).
-- Neu volume khong the chia (volMin chan), van dich SL ve BE va bo qua partial.
-- Khong lam gi them o `1R`.
+- Rủi ro: `InpRiskPercent` (% số dư, mặc định 1%).
+- Khi giá đạt `InpPartialCloseAtR` lần **R thực tế** (mặc định `1.5R`):
+  - Đóng `InpPartialClosePercent` % khối lượng (mặc định 50%).
+  - Dời SL về **giá khớp** (BE).
+- Nếu không chia được lot (bị `volume min` chặn): vẫn dời SL về BE, bỏ qua partial.
+- Không có hành động đặc biệt tại `1R`.
 
-### 2.10 Anti-spam
+### 2.10 Chống spam (một pullback — một lệnh thử)
 
-- Mot `pullback` chi sinh ra 1 lenh (`g_HasTradedThisPullback`).
-- Reset bookkeeping khi trend regime doi (TREND_UP <-> TREND_DOWN/NONE).
-- Khi trend doi va dang co pending nguoc huong -> huy luon.
+- Biến `g_HasTradedThisPullback`: sau khi **đặt thành công** pending cho pullback hiện tại → bật.
+- **Reset** `g_HasTradedThisPullback` khi:
+  - Pending bị hủy / hết hạn / invalid (chưa khớp → được thử pullback khác).
+  - Vị thế đã đóng hoàn toàn (TP/SL/đóng tay).
+  - **Đảo chiều xu hướng có hướng** UP ↔ DOWN (đi qua `TREND_NONE` ngắn **không** coi là đảo chiều).
+- Khi đảo chiều UP ↔ DOWN mà còn pending ngược hướng → hủy pending.
 
-### 2.11 Sideway filter
+### 2.11 Bộ lọc RSI sideway
 
-- `InpUseRSISidewayFilter`: khi tat ca `InpSidewayLookbackBars` gia tri RSI gan nhat
-nam trong `[InpSidewayRSILow, InpSidewayRSIHigh]` -> bo qua tim setup moi.
-- Filter nay chi chan `NO_TRADE -> WATCHING`, khong chan vong doi pending va
-khong chan quan ly position.
+- `InpUseRSISidewayFilter`: nếu **tất cả** `InpSidewayLookbackBars` giá trị RSI gần nhất nằm trong `[InpSidewayRSILow, InpSidewayRSIHigh]` → bỏ qua tìm setup mới.
+- Bộ lọc này **chỉ** chặn nhánh `NO_TRADE → WATCHING`; **không** chặn vòng đời pending và **không** chặn quản lý vị thế.
 
-## 3) Cach build va chay
+## 3) Cách biên dịch và chạy
 
-1. Mo MetaEditor.
-2. Mo `MQL5/Experts/RSIForceStateEA.mq5` va Compile (F7).
-3. Quay lai MT5, attach EA vao chart muon trade.
-4. Bat `Algo Trading`.
-5. Inputs co the dieu chinh ngay tu UI khi attach.
+1. Mở MetaEditor.
+2. Mở `MQL5/Experts/RSIForceStateEA.mq5` và biên dịch (F7).
+3. Quay lại MT5, gắn EA vào biểu đồ cần giao dịch.
+4. Bật **Algo Trading**.
+5. Có thể chỉnh `Inputs` ngay trên giao diện khi gắn EA.
 
-## 4) Cac input quan trong (mac dinh)
+## 4) Các tham số quan trọng (mặc định)
 
+| Tham số | Mặc định | Mô tả |
+| ------- | -------- | ----- |
+| `InpMagicNumber` | 26050901 | Magic; đổi nếu chạy nhiều bản EA |
+| `InpRiskPercent` | 1.0 | % số dư / mỗi lệnh |
+| `InpRiskRewardRatio` | 2.0 | TP = R × hệ số này |
+| `InpPartialCloseAtR` | 1.5 | Chốt một phần khi đạt R này (phải < RR) |
+| `InpPartialClosePercent` | 50.0 | % khối lượng chốt partial |
+| `InpPendingMaxAliveBars` | 5 | Hủy pending sau N nến |
+| `InpWatchingMaxBars` | 10 | Thoát WATCHING nếu không có trigger |
+| `InpMinBarsBetweenCrosses` | 10 | Khoảng cách tối thiểu giữa các lần cắt RSI/WMA45 |
+| `InpSlopeLookbackBars` | 3 | Số nến kiểm tra slope |
+| `InpSwingLookbackBars` | 20 | Cửa sổ tìm swing cho entry/SL |
+| `InpStopLossMode` | SL_HYBRID | `SL_SWING` / `SL_ATR` / `SL_HYBRID` |
+| `InpSL_ATRMult` | 1.2 | Hệ số ATR cho SL kiểu ATR |
+| `InpSL_SwingBufferPoints` | 20 | Đệm thêm (point) ngoài cực trị swing |
+| `InpUseRSISidewayFilter` | true | Bật/tắt lọc sideway RSI |
+| `InpSidewayRSILow / High` | 45 / 55 | Dải sideway theo RSI |
+| `InpUseATRTrendBuffer` | false | Dùng buffer trend theo ATR |
 
-| Input                      | Mac dinh  | Mo ta                                   |
-| -------------------------- | --------- | --------------------------------------- |
-| `InpMagicNumber`           | 26050901  | Magic, doi neu chay nhieu instance      |
-| `InpRiskPercent`           | 1.0       | % balance/lenh                          |
-| `InpRiskRewardRatio`       | 2.0       | TP = R * day                            |
-| `InpPartialCloseAtR`       | 1.5       | dong 1 phan tai R nay                   |
-| `InpPartialClosePercent`   | 50.0      | % volume dong tai partial               |
-| `InpPendingMaxAliveBars`   | 5         | huy pending sau N nen                   |
-| `InpWatchingMaxBars`       | 10        | huy WATCHING neu khong trigger          |
-| `InpMinBarsBetweenCrosses` | 10        | dam bao tin hieu cross "isolated"       |
-| `InpSlopeLookbackBars`     | 3         | so nen kiem tra slope                   |
-| `InpSwingLookbackBars`     | 20        | tim swing extreme cho entry/SL          |
-| `InpStopLossMode`          | SL_HYBRID | SL_SWING / SL_ATR / SL_HYBRID           |
-| `InpSL_ATRMult`            | 1.2       | ATR multiplier khi SL theo ATR          |
-| `InpSL_SwingBufferPoints`  | 20        | them buffer (point) ngoai swing extreme |
-| `InpUseRSISidewayFilter`   | true      | bat/tat sideway filter                  |
-| `InpSidewayRSILow / High`  | 45 / 55   | dai sideway theo RSI                    |
-| `InpUseATRTrendBuffer`     | false     | doi trend buffer sang dang ATR          |
+## 5) Gợi ý kiểm thử và tối ưu
 
+- Nên backtest từng symbol ít nhất 6–12 tháng trước khi chạy thật.
+- Thị trường biến động mạnh: thử `InpUseATRTrendBuffer = true`.
+- Muốn **ít tín hiệu hơn nhưng chọn lọc hơn**:
+  - Tăng `InpMinBarsBetweenCrosses`
+  - Tăng `InpSlopeLookbackBars`
+  - Giữ `SL_HYBRID`
+- Muốn **nhiều tín hiệu hơn**:
+  - Giảm `InpSlopeLookbackBars` xuống 2
+  - Tắt `InpUseRSISidewayFilter`
+- Theo dõi tab **Experts** / **Journal** để xem log `[STATE]`, `[TREND]`, `[PENDING]`, `[TRADE]`.
 
-## 5) Goi y test va toi uu
+## 6) Hiển thị trực quan (Visualization)
 
-- Backtest tung symbol toi thieu 6-12 thang truoc khi chay live.
-- Voi index/forex bien dong cao -> bat `InpUseATRTrendBuffer = true`.
-- Muon **it tin hieu hon nhung chat hon**:
-  - tang `InpMinBarsBetweenCrosses`
-  - tang `InpSlopeLookbackBars`
-  - giu `SL_HYBRID`
-- Muon **nhieu tin hieu**:
-  - giam `InpSlopeLookbackBars` ve 2
-  - tat `InpUseRSISidewayFilter`
-- Theo doi tab `Experts` / `Journal` de xem log `[STATE]`, `[TREND]`, `[PENDING]`,
-`[TRADE]`.
+EA có thể tự vẽ để quan sát và đánh giá (bật/tắt bằng `InpVisualize` và các cờ con).
 
-## 6) Visualization
+### 6.1 Dashboard (góc trên-trái)
 
-EA tu hien thi dau day du de quan sat va danh gia:
+Hiển thị:
 
-### 6.1 Dashboard (goc tren-trai)
+- **Trend**: UP / DOWN / NONE (màu xanh / đỏ / xám)
+- **State**: `STATE_NO_TRADE` / `STATE_WATCHING` / `STATE_PENDING_ORDER` / `STATE_IN_TRADE`
+- **RSI**: giá trị RSI, EMA9, WMA45 tại nến tín hiệu (`InpSignalBarShift`)
+- **EMA200**: giá trị EMA200 + giá đóng hiện tại
+- **ATR**: giá trị ATR
+- **Context**: tùy trạng thái — ví dụ số nến WATCHING, thời gian sống pending, đã partial hay chưa
 
-Hien thi cac dong:
+### 6.2 Bảng thống kê (góc dưới-trái)
 
-- **Trend** : UP / DOWN / NONE (mau xanh / do / xam)
-- **State** : `STATE_NO_TRADE` / `STATE_WATCHING` / `STATE_PENDING_ORDER` / `STATE_IN_TRADE`
-- **RSI**   : gia tri RSI, EMA9, WMA45 cua nen tin hieu (`InpSignalBarShift`)
-- **EMA200**: gia tri EMA200 + close hien tai
-- **ATR**   : gia tri ATR
-- **Context**: tuy state se in:
-  - `Watching: x/N bars`
-  - `Pending : dir entry alive=x/N`
-  - `Trade   : dir entry partial=DONE/PEND`
+Quét lịch sử `InpStatsLookbackDays` ngày (mặc định 60), lọc theo `InpMagicNumber` + `_Symbol`:
 
-### 6.2 Stats panel (goc duoi-trai)
+- **Total**: số vị thế đã đóng (gộp theo `POSITION_ID`, tránh đếm trùng partial)
+- **TP hit**: số deal đóng với lý do `DEAL_REASON_TP`
+- **SL hit**: số deal đóng với lý do `DEAL_REASON_SL`
+- **Other**: đóng tay / partial / đóng bởi expert
+- **Net PL**: tổng P/L (profit + swap + hoa hồng)
 
-Quet history `InpStatsLookbackDays` ngay (mac dinh 60), filter theo
-`InpMagicNumber` + `_Symbol`, hien thi:
+### 6.3 Mức giá Entry / SL / TP (kiểu TradingView)
 
-- `Total`  : so position da dong (theo POSITION_ID, dedupe partial)
-- `TP hit` : so deal dong voi reason `DEAL_REASON_TP`
-- `SL hit` : so deal dong voi reason `DEAL_REASON_SL`
-- `Other`  : dong thu cong / partial close / expert close
-- `Net PL` : tong P/L (profit + swap + commission)
+Khi `STATE_PENDING_ORDER` hoặc `STATE_IN_TRADE`, vẽ 3 đường ngang:
 
-### 6.3 Trade levels (TradingView style)
+- **ENTRY** (chấm, màu `InpColorEntry`)
+- **SL** (gạch, màu `InpColorSL`)
+- **TP** (gạch, màu `InpColorTP`)
 
-Khi state = `PENDING_ORDER` hoac `IN_TRADE`, ve 3 line ngang:
+Tự xóa khi về `NO_TRADE`.
 
-- `ENTRY` (dotted, `InpColorEntry`)
-- `SL`    (dashed, `InpColorSL`)
-- `TP`    (dashed, `InpColorTP`)
+### 6.4 Tự gắn chỉ báo lên chart
 
-Tu dong xoa khi quay ve `NO_TRADE`.
+Khi `InpAttachIndicators = true` (mặc định):
 
-### 6.4 Auto-attach indicators
+- **EMA200** vào cửa sổ chính.
+- **RSI**, **EMA trên RSI**, **WMA trên RSI** vào **cửa sổ phụ** (subwindow).
 
-Khi `InpAttachIndicators = true` (mac dinh):
+Có thể tắt từng phần:
 
-- `EMA200` duoc them vao **main chart**.
-- `RSI(14)`, `RSI_EMA9`, `RSI_WMA45` duoc them vao **subwindow moi**.
+| Tham số | Mặc định | Tác dụng |
+| ------- | -------- | -------- |
+| `InpVisualize` | true | Bật/tắt toàn bộ lớp hiển thị |
+| `InpAttachIndicators` | true | Tự thêm EMA200 + cụm RSI lên chart |
+| `InpShowDashboard` | true | Panel góc trên-trái |
+| `InpShowStatsPanel` | true | Panel góc dưới-trái |
+| `InpShowTradeLevels` | true | Đường Entry/SL/TP |
+| `InpStatsLookbackDays` | 60 | Số ngày quét thống kê |
 
-Co the tat tung phan rieng:
+Mọi đối tượng đồ họa dùng tiền tố `RSIForce_` và được xóa trong `OnDeinit`.
 
+## 7) Luồng chạy chi tiết (từng bước)
 
-| Input                  | Mac dinh | Tac dung                              |
-| ---------------------- | -------- | ------------------------------------- |
-| `InpVisualize`         | true     | bat tat toan bo overlay               |
-| `InpAttachIndicators`  | true     | tu add EMA200 / RSI cluster vao chart |
-| `InpShowDashboard`     | true     | panel goc tren-trai                   |
-| `InpShowStatsPanel`    | true     | panel goc duoi-trai                   |
-| `InpShowTradeLevels`   | true     | line Entry/SL/TP                      |
-| `InpStatsLookbackDays` | 60       | so ngay quet stats                    |
+### 7.1 Toàn cảnh kiến trúc
 
+```
++-------------------------------------------------------------+
+|                  RSIForceStateEA.mq5                        |
+|  (điểm vào — chỉ có OnInit / OnTick / OnTradeTransaction    |
+|   / OnDeinit, không chứa logic nghiệp vụ)                   |
++-------------------------------------------------------------+
+            |
+            | #include theo thứ tự:
+            v
++-------- Tầng 1 (dữ liệu + kiểu) ---------------------------+
+|  Config.mqh       — toàn bộ input                           |
+|  State.mqh        — enum EAState, struct SignalSnapshot...   |
+|  Indicators.mqh   — handle iRSI/iMA + buffer g_RSI[]...      |
++------------------------------------------------------------+
+            |
+            | Khai báo global trong .mq5:
+            |   g_State, g_Pending, g_OpenTrade
+            v
++-------- Tầng 2 (logic) ------------------------------------+
+|  Trade.mqh        — CalcLotsForRisk, PlaceLimitOrderFromPlan,|
+|                     ManagePartialAndBreakEven...             |
+|  StateMachine.mqh — DetectTrend, IsPullback*, IsBuyTrigger*, |
+|                     BuildSignalPlan, RunStateMachine...      |
++------------------------------------------------------------+
+            |
+            v
++-------- Tầng 3 (giao diện) --------------------------------+
+|  Visualizer.mqh   — DrawDashboardPanel, DrawStatsPanel,      |
+|                     DrawTradeLevels, AttachIndicatorsToChart |
++------------------------------------------------------------+
+```
 
-Tat ca object visual dung prefix `RSIForce`_ va duoc xoa o `OnDeinit`.
+### 7.2 Vòng đời — từ lúc gắn EA
 
-## 7) Ghi chu kien truc
+#### Bước 0. MT5 gọi `OnInit()` (file `RSIForceStateEA.mq5`)
 
-- Toan bo state machine xoay quanh **closed bar** (`IsNewBar()`), tranh fire
-nhieu lan trong cung 1 nen.
-- Quan ly position (partial + BE) chay **moi tick** de phan ung nhanh khi
-gia di chuyen.
-- `SyncStateWithBroker()` chay moi tick + sau moi `OnTradeTransaction` -
-dam bao state nha minh luon khop voi broker (truong hop user dong tay,
-pending bi reject, v.v.).
+```
+RSIForceStateEA.mq5 :: OnInit()
+  |
+  +-- ValidateInputs()              (file .mq5 — kiểm tra cấu hình)
+  |   nếu sai  -> INIT_PARAMETERS_INCORRECT (EA không khởi động)
+  |
+  +-- ZeroMemory(g_Pending), ZeroMemory(g_OpenTrade)
+  |   đưa global về trạng thái sạch
+  |
+  +-- InitIndicators()              (Indicators.mqh)
+  |   |
+  |   +-- iRSI(...)        -> g_hRSI
+  |   +-- iMA(g_hRSI, EMA) -> g_hEMA9   (EMA trên RSI)
+  |   +-- iMA(g_hRSI, WMA) -> g_hWMA45  (WMA trên RSI)
+  |   +-- iMA(close, EMA)  -> g_hEMA200 (EMA trên giá đóng)
+  |   +-- iATR(...)        -> g_hATR
+  |   +-- ArraySetAsSeries(...) cho mọi buffer
+  |
+  +-- RefreshIndicatorData()        (Indicators.mqh)
+  |   |
+  |   +-- CopyRates()    -> g_Bars[]
+  |   +-- CopyBuffer() -> g_RSI[], g_EMA9[], g_WMA45[], g_EMA200[], g_ATR[]
+  |   nếu chart chưa đủ lịch sử (< 200 nến) -> INIT_FAILED
+  |
+  +-- InitTradeOps()                (Trade.mqh)
+  |   |
+  |   +-- g_TradeOps.SetExpertMagicNumber(InpMagicNumber)
+  |   +-- g_TradeOps.SetDeviationInPoints(10)
+  |   +-- g_TradeOps.SetTypeFillingBySymbol(_Symbol)
+  |
+  +-- g_LastTrend = DetectTrend(InpSignalBarShift)
+  |   khởi tạo trend ngay từ đầu để tick đầu không báo “đảo chiều” giả
+  |
+  +-- AttachIndicatorsToChart()     (Visualizer.mqh)
+  |   |
+  |   +-- IsIndicatorAlreadyAttached(...) — tránh trùng khi reload EA
+  |   +-- ChartIndicatorAdd(0, 0, g_hEMA200)        -> cửa sổ chính
+  |   +-- ChartIndicatorAdd(0, sub, g_hRSI)        -> subwindow
+  |   +-- ChartIndicatorAdd(0, sub, g_hEMA9)
+  |   +-- ChartIndicatorAdd(0, sub, g_hWMA45)
+  |
+  +-- DrawAllVisuals(g_LastTrend)   (Visualizer.mqh)
+      vẽ dashboard + stats lần đầu
+```
 
+#### Bước 1. Mỗi tick — `OnTick()` (`RSIForceStateEA.mq5`)
+
+```
+RSIForceStateEA.mq5 :: OnTick()
+  |
+  +-- RefreshIndicatorData()        (Indicators.mqh)
+  |   cập nhật g_Bars / g_RSI / g_EMA9 / g_WMA45 / g_EMA200 / g_ATR
+  |   nếu copy lỗi (ví dụ thị trường vừa mở) -> return, chờ tick sau
+  |
+  +-- SyncStateWithBroker()         (StateMachine.mqh)
+  |   |
+  |   nếu state = PENDING_ORDER:
+  |     +- HasOurOpenPosition() = true ? (Trade.mqh)
+  |     |    -> chuyển IN_TRADE, copy kế hoạch từ g_Pending sang g_OpenTrade
+  |     +- HasOurPendingOrder() = false (hủy/hết hạn/từ chối) ?
+  |          -> reset g_HasTradedThisPullback, về NO_TRADE
+  |
+  |   nếu state = IN_TRADE:
+  |     +- HasOurOpenPosition() = false (TP/SL/đóng tay) ?
+  |          -> reset g_HasTradedThisPullback, về NO_TRADE
+  |
+  +-- if (state == IN_TRADE):
+  |     ManagePartialAndBreakEven(g_OpenTrade)   (Trade.mqh)
+  |     |
+  |     +- PositionSelectByTicket(positionTicket)
+  |     +- profitDist = giá hiện tại so với giá mở (BUY/SELL)
+  |     +- initRisk = |openPrice - SL|  (lấy từ broker, không dùng plan)
+  |     +- nếu profitDist >= InpPartialCloseAtR * initRisk:
+  |          - PositionClosePartial(ticket, % volume) nếu chia lot được
+  |          - PositionModify(ticket, openPrice, tp) — SL về BE
+  |          - g_OpenTrade.partialClosedDone = true (chỉ một lần)
+  |
+  +-- newBar = IsNewBar()           (StateMachine.mqh)
+  |   so sánh g_Bars[0].time với lastBarTime — true khi nến mới mở
+  |
+  +-- if (newBar): RunStateMachine()   <-- xem Bước 2
+  |
+  +-- if (newBar HOẶC đã qua 2 giây kể từ lần vẽ trước):
+        DrawAllVisuals(DetectTrend(InpSignalBarShift))   (Visualizer.mqh)
+        |
+        +- DrawDashboardPanel(trend)
+        +- DrawStatsPanel()
+        +- DrawTradeLevels()
+```
+
+#### Bước 2. Có nến mới — `RunStateMachine()` (`StateMachine.mqh`)
+
+```
+StateMachine.mqh :: RunStateMachine()
+  |
+  +-- signalShift = InpSignalBarShift          (mặc định = 1, nến vừa đóng)
+  +-- trendNow    = DetectTrend(signalShift)   (Up / Down / None)
+  |
+  +-- Phát hiện đảo chiều **có hướng** thật (UP <-> DOWN):
+  |   |
+  |   nếu trendNow != NONE:
+  |     +- so với g_LastDirTrend (xu hướng có hướng trước đó)
+  |     +- nếu g_LastDirTrend khác hướng và cả hai đều không NONE
+  |          -> dirFlipped = true
+  |     +- cập nhật g_LastDirTrend = trendNow
+  |
+  +-- if (dirFlipped):              <-- chỉ reset khi UP <-> DOWN
+  |     +- ResetPullbackCycle()
+  |     +- nếu PENDING_ORDER -> CancelPendingOrder, về NO_TRADE
+  |     +- nếu WATCHING      -> về NO_TRADE
+  |
+  +-- g_LastTrend = trendNow
+  |
+  +-- switch (g_State):
+        |
+        case STATE_NO_TRADE:
+        |   HandleStateNoTrade(...)
+        |
+        case STATE_WATCHING:
+        |   HandleStateWatching(...)
+        |     (timeout, BuildSignalPlan, PlaceLimitOrderFromPlan...)
+        |
+        case STATE_PENDING_ORDER:
+        |   TickPendingOrderLifecycle(...)
+        |     (đếm nến, hết hạn/invalid -> hủy, reset anti-spam)
+        |
+        case STATE_IN_TRADE:
+            (không làm gì ở đây — partial/BE chạy trong OnTick)
+```
+
+#### Bước 3. Biến động lệnh — `OnTradeTransaction()`
+
+```
+RSIForceStateEA.mq5 :: OnTradeTransaction(...)
+  |
+  +-- SyncStateWithBroker()
+      đồng bộ ngay khi broker báo sự kiện (không chỉ dựa vào tick)
+```
+
+#### Bước 4. Gỡ EA — `OnDeinit()`
+
+```
+RSIForceStateEA.mq5 :: OnDeinit(reason)
+  |
+  +-- RemoveAllVisuals()            (Visualizer.mqh)
+  |   ObjectsDeleteAll(0, "RSIForce_")
+  |
+  +-- ReleaseIndicators()           (Indicators.mqh)
+      IndicatorRelease cho mọi handle
+```
+
+### 7.3 Bảng phân công: file nào làm việc gì
+
+| Trách nhiệm | File | Hàm chính |
+| ----------- | ---- | --------- |
+| Toàn bộ input | `Config.mqh` | (chỉ khai báo) |
+| Enum / struct | `State.mqh` | `EAState`, `TrendDirection`, `SignalSnapshot`, `PendingContext`, `TradeContext` |
+| Tạo & cập nhật chỉ báo | `Indicators.mqh` | `InitIndicators`, `RefreshIndicatorData`, `IsBufferSlopingDown/Up`, `HasCrossInLastNBars` |
+| Lot, đặt/hủy/quản lý lệnh | `Trade.mqh` | `CalcLotsForRisk`, `PlaceLimitOrderFromPlan`, `CancelPendingOrder`, `ManagePartialAndBreakEven` |
+| Trend, pullback, trigger | `StateMachine.mqh` | `DetectTrend`, `IsPullbackInUptrend/Downtrend`, `IsBuyTriggerSignal`, `IsSellTriggerSignal` |
+| Điều phối state machine | `StateMachine.mqh` | `RunStateMachine`, `HandleStateNoTrade`, `HandleStateWatching`, `TickPendingOrderLifecycle` |
+| Đồng bộ broker | `StateMachine.mqh` | `SyncStateWithBroker` (+ `HasOurOpenPosition` / `HasOurPendingOrder` trong `Trade.mqh`) |
+| UI & mức giá | `Visualizer.mqh` | `DrawDashboardPanel`, `DrawStatsPanel`, `DrawTradeLevels`, `AttachIndicatorsToChart` |
+| Vòng đời & validate | `RSIForceStateEA.mq5` | `OnInit`, `OnTick`, `OnTradeTransaction`, `OnDeinit`, `ValidateInputs` |
+
+### 7.4 Global của EA và ai được sửa
+
+| Global | Kiểu | Vai trò | Thường sửa tại |
+| ------ | ---- | ------- | -------------- |
+| `g_State` | `EAState` | Trạng thái SM | `TransitionTo` (StateMachine.mqh) |
+| `g_Pending` | `PendingContext` | Lệnh chờ | `PlaceLimitOrderFromPlan`, `CancelPendingOrder` |
+| `g_OpenTrade` | `TradeContext` | Vị thế mở | `SyncStateWithBroker`, `ManagePartialAndBreakEven` |
+| `g_HasTradedThisPullback` | `bool` | Chống spam | Khi đặt lệnh; reset khi hủy/đóng/đảo chiều |
+| `g_BarsInWatching` | `int` | Timeout WATCHING | `HandleStateWatching` và khi chuyển trạng thái |
+| `g_LastTrend` | `TrendDirection` | Trend mới nhất | Cuối `RunStateMachine` |
+| `g_LastDirTrend` | `TrendDirection` | Trend có hướng gần nhất | `RunStateMachine` khi `trendNow != NONE` |
+
+### 7.5 Sự kiện broker → cách code phản ứng
+
+| Sự kiện thực tế | Cách phát hiện | Phản ứng trong code |
+| --------------- | -------------- | ------------------- |
+| Limit khớp | `OnTradeTransaction` + `SyncStateWithBroker` | `PENDING` → `IN_TRADE`, copy plan |
+| Pending hết hạn / bị hủy | `Sync` (không còn order) | `PENDING` → `NO_TRADE`, reset anti-spam |
+| Pending bị từ chối | `PlaceLimit...` false hoặc `Sync` | Ở `NO_TRADE`, có log retcode |
+| Chạm TP | `Sync` (không còn position) | `IN_TRADE` → `NO_TRADE`, reset anti-spam |
+| Chạm SL | như trên | như trên |
+| Đóng tay | như trên | như trên |
+| Đạt mức partial R | `OnTick` → `ManagePartialAndBreakEven` | Partial (nếu được) + SL về BE |
+| Đảo chiều UP ↔ DOWN | `RunStateMachine` — `dirFlipped` | Hủy pending ngược hướng, reset chu kỳ |
+| Đi qua NONE rồi về cùng hướng | `RunStateMachine` | **Không** coi là flip; `g_LastDirTrend` giữ ngữ cảnh |
+| Nến mới | `OnTick` → `IsNewBar` | Gọi `RunStateMachine` một lần |
+
+## 8) Ghi chú kiến trúc
+
+- State machine chạy theo **nến mới** (`IsNewBar()`), tránh bắn tín hiệu nhiều lần trong cùng một nến.
+- Quản lý vị thế (partial + BE) chạy **mỗi tick** để phản ứng nhanh theo giá.
+- `SyncStateWithBroker()` chạy mỗi tick và sau `OnTradeTransaction` để trạng thái nội bộ luôn khớp broker (đóng tay, từ chối lệnh, v.v.).
+- Phân tầng `#include`:
+  - **Tầng 1** chỉ khai báo dữ liệu và hàm thuần.
+  - **Tầng 2** dùng các global khai báo giữa hai tầng.
+  - **Tầng 3** chỉ đọc/hiển thị, không sửa logic nghiệp vụ cốt lõi.
+
+---
+
+*Tệp README dùng mã hóa UTF-8. Tiếng Việt có dấu an toàn với Git, GitHub và trình soạn thảo hiện đại; không ảnh hưởng tới biên dịch EA (MetaEditor không compile file `.md`).*
