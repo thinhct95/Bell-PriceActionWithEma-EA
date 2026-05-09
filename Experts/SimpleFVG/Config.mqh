@@ -14,21 +14,30 @@ input int             InpEMAFastPeriod     = 34;
 input int             InpEMASlowPeriod     = 89;
 
 //--- Step 2: FVG Detection ---
-input int             InpFVGLookbackBars   = 100;
-input int             InpFVGMaxAgeBars     = 50;
-input double          InpFVGMinBodyPct     = 50.0;
-input double          InpFVGMinSizePoints      = 0;
-input double          InpFVGTouchedPercent     = 33.0;
-input double          InpFVGMinGapVsImpulsePct = 30.0;
+input int             InpFVGLookbackBars   = 120;
+input int             InpFVGMaxAgeBars     = 36;
+input double          InpFVGMinBodyPct     = 55.0;
+input double          InpFVGMinSizePoints      = 120;
+input double          InpFVGTouchedPercent     = 35.0;
+input double          InpFVGMinGapVsImpulsePct = 35.0;
 input double          InpFVGMaxOuterBarRatio   = 2.0;
 
 //--- Step 3: Trading ---
 input bool            InpTradeEnabled        = true;
-input double          InpRiskPercentPerR     = 1.0;
+input double          InpRiskPercentPerR     = 1;
 input double          InpRRRatio             = 2.2;
-input int             InpMaxLimitOrders      = 3;
-input int             InpLimitMaxAgeBars     = 24;
+input int             InpMaxLimitOrders      = 1;
+input int             InpLimitMaxAgeBars     = 12;
 input long            InpEAMagic             = 123456;
+input int             InpMaxSpreadPoints     = 350; // XAUUSD-friendly default
+input bool            InpUseSessionFilter    = true;
+input int             InpSessionStartHour    = 7;   // server time hour [0..23]
+input int             InpSessionEndHour      = 23;  // server time hour [0..23], supports overnight window
+input bool            InpUseATRFilter        = true;
+input int             InpATRPeriod           = 14;
+input double          InpMinATRPoints        = 1200;  // skip low-volatility regime
+input double          InpMaxATRPoints        = 7000; // skip extreme-volatility regime
+input double          InpLowTFEntryRangeBufferPoints = 60; // HTF-LTF mapping tolerance
 
 //--- Step 4: Drawing ---
 input color           InpColorBullFVG      = C'30,80,140';

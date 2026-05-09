@@ -228,6 +228,8 @@ void DrawFVGZones()
             stateStr = " [TOUCHED]";
          else if(IsZoneMitigated(g_FVGZones[i]))
             stateStr = " [MITIGATED]";
+         if(g_FVGZones[i].tradeLocked)
+            stateStr += " [LOCKED]";
 
          color labelColor;
          if(IsZoneMitigated(g_FVGZones[i]))

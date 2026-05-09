@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "D:/Coding Tools"
+		}
+	],
+  "settings": {
+    "files.associations": {
+      "*.mqh": "cpp",
+      "*.mq4": "cpp",
+      "*.mq5": "cpp"
+    }
+  }
+}

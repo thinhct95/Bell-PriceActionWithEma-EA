@@ -13,6 +13,135 @@
 //+------------------------------------------------------------------+
 //| Internal helpers                                                 |
 //+------------------------------------------------------------------+
+string FVGTypeToString(ENUM_FVG_TYPE type)
+{
+   return (type == FVG_BULLISH) ? "BULL" : "BEAR";
+}
+
+void LogDecisionTrace(const string stage, const string message)
+{
+   if(!InpDebugLog)
+      return;
+   PrintFormat("[TRACE][%s] %s", stage, message);
+}
+
+bool IsSpreadAcceptable(string symbol)
+{
+   if(InpMaxSpreadPoints <= 0)
+      return true;
+
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   double spreadPoints = -1.0;
+   if(ask > 0.0 && bid > 0.0)
+      spreadPoints = (ask - bid) / _Point;
+   else
+   {
+      // In Strategy Tester, BID/ASK can be unavailable on some bars.
+      // Fallback to broker/tester spread setting (already in points).
+      long spreadInt = SymbolInfoInteger(symbol, SYMBOL_SPREAD);
+      if(spreadInt > 0)
+         spreadPoints = (double)spreadInt;
+   }
+
+   if(spreadPoints < 0.0)
+      return false;
+
+   return (spreadPoints <= InpMaxSpreadPoints);
+}
+
+double GetCurrentSpreadPoints(string symbol)
+{
+   double ask = SymbolInfoDouble(symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(symbol, SYMBOL_BID);
+   if(ask > 0.0 && bid > 0.0)
+      return (ask - bid) / _Point;
+
+   long spreadInt = SymbolInfoInteger(symbol, SYMBOL_SPREAD);
+   if(spreadInt > 0)
+      return (double)spreadInt;
+
+   return -1.0;
+}
+
+bool IsTradingSessionOpen()
+{
+   if(!InpUseSessionFilter)
+      return true;
+
+   datetime now = TimeCurrent();
+   if(now == 0)
+      return false;
+
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   int hour = dt.hour;
+
+   int startHour = MathMax(0, MathMin(23, InpSessionStartHour));
+   int endHour   = MathMax(0, MathMin(23, InpSessionEndHour));
+
+   if(startHour == endHour)
+      return true;
+   if(startHour < endHour)
+      return (hour >= startHour && hour < endHour);
+   return (hour >= startHour || hour < endHour); // overnight session
+}
+
+int GetCurrentServerHour()
+{
+   datetime now = TimeCurrent();
+   if(now == 0)
+      return -1;
+
+   MqlDateTime dt;
+   TimeToStruct(now, dt);
+   return dt.hour;
+}
+
+void GetNormalizedSessionHours(int &outStartHour, int &outEndHour)
+{
+   outStartHour = MathMax(0, MathMin(23, InpSessionStartHour));
+   outEndHour   = MathMax(0, MathMin(23, InpSessionEndHour));
+}
+
+double GetATRPoints(string symbol, ENUM_TIMEFRAMES tf, int period)
+{
+   if(period <= 1)
+      return -1.0;
+
+   int handle = iATR(symbol, tf, period);
+   if(handle == INVALID_HANDLE)
+      return -1.0;
+
+   double buffer[1];
+   int copied = CopyBuffer(handle, 0, 1, 1, buffer);
+   IndicatorRelease(handle);
+   if(copied < 1 || buffer[0] <= 0.0)
+      return -1.0;
+
+   return buffer[0] / _Point;
+}
+
+bool IsATRRegimeValid(string symbol)
+{
+   if(!InpUseATRFilter)
+      return true;
+
+   double atrPoints = GetATRPoints(symbol, InpTimeframe, InpATRPeriod);
+   if(atrPoints <= 0.0)
+      return false;
+   if(InpMinATRPoints > 0.0 && atrPoints < InpMinATRPoints)
+      return false;
+   if(InpMaxATRPoints > 0.0 && atrPoints > InpMaxATRPoints)
+      return false;
+   return true;
+}
+
+double GetCurrentATRPoints(string symbol)
+{
+   return GetATRPoints(symbol, InpTimeframe, InpATRPeriod);
+}
+
 int CountOurPositions()
 {
    int count = 0;
@@ -382,9 +511,35 @@ void ManageFVGTrades()
    if(currentLimits >= InpMaxLimitOrders)
       return;
 
+   string symbol = GetTradeSymbol();
+   if(!IsSpreadAcceptable(symbol))
+   {
+      double spreadPts = GetCurrentSpreadPoints(symbol);
+      LogDecisionTrace("FILTER", StringFormat("Skip entries: spread %.1f > max %d points",
+                                              spreadPts, InpMaxSpreadPoints));
+      return;
+   }
+   if(!IsTradingSessionOpen())
+   {
+      int startHour, endHour;
+      GetNormalizedSessionHours(startHour, endHour);
+      int currentHour = GetCurrentServerHour();
+      LogDecisionTrace("FILTER", StringFormat("Skip entries: session closed (hour=%d, window=%02d-%02d, useSession=%s)",
+                                              currentHour, startHour, endHour,
+                                              InpUseSessionFilter ? "true" : "false"));
+      return;
+   }
+   if(!IsATRRegimeValid(symbol))
+   {
+      double atrPoints = GetCurrentATRPoints(symbol);
+      LogDecisionTrace("FILTER", StringFormat("Skip entries: ATR %.1f outside [%.1f..%.1f] points (period=%d, useATR=%s)",
+                                              atrPoints, InpMinATRPoints, InpMaxATRPoints,
+                                              InpATRPeriod, InpUseATRFilter ? "true" : "false"));
+      return;
+   }
+
    // Chỉ tìm tín hiệu low TF FVG khi high TF FVG đã TOUCHED (giá lấp đủ %), không trigger khi mới chạm cạnh
    ENUM_TREND_DIRECTION trend = g_CurrentTrend;
-   string symbol = GetTradeSymbol();
    ENUM_TIMEFRAMES lowTF = GetConfirmationTimeframe(InpTimeframe);
    const int LOW_TF_FVG_LOOKBACK = 15;
 
@@ -392,25 +547,52 @@ void ManageFVGTrades()
    {
       FVGZone zone = g_FVGZones[i];
       if(!IsZoneActive(zone) || IsZoneMitigated(zone))
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d skip: inactive/mitigated", i));
          continue;
+      }
+
+      if(zone.tradeLocked)
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d %s skip: locked", i, FVGTypeToString(zone.type)));
+         continue;
+      }
 
       if(zone.type == FVG_BULLISH && trend != TREND_BULLISH)
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d BULL blocked by EMA trend", i));
          continue;
+      }
       if(zone.type == FVG_BEARISH && trend != TREND_BEARISH)
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d BEAR blocked by EMA trend", i));
          continue;
+      }
 
       // Điều kiện vào lệnh: FVG high TF phải đã TOUCHED (giá lấp >= InpFVGTouchedPercent), không chỉ chạm cạnh
       if(!IsZoneTouched(zone))
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d %s not touched", i, FVGTypeToString(zone.type)));
          continue;
+      }
 
       // Chỉ đặt lệnh khi có low TF để xác nhận (H1->M5, H4->M15, M15->M2)
       if(lowTF == InpTimeframe)
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d skip: lowTF mapping unavailable", i));
          continue;
+      }
 
       double ltfUpper, ltfLower, ltfBarALow, ltfBarAHigh;
-      if(!GetLatestLowTFFVG(symbol, lowTF, zone.type, LOW_TF_FVG_LOOKBACK,
-                            ltfUpper, ltfLower, ltfBarALow, ltfBarAHigh))
+      if(!GetLatestLowTFFVGInRange(symbol, lowTF, zone.type, LOW_TF_FVG_LOOKBACK,
+                                   zone.lowerEdge, zone.upperEdge,
+                                   InpLowTFEntryRangeBufferPoints,
+                                   ltfUpper, ltfLower, ltfBarALow, ltfBarAHigh))
+      {
+         LogDecisionTrace("ZONE", StringFormat("#%d %s no LTF FVG aligned to HTF zone [%.5f..%.5f]",
+                                               i, FVGTypeToString(zone.type), zone.lowerEdge, zone.upperEdge));
          continue;
+      }
 
       // Entry theo low TF FVG; SL = bar B của high TF FVG
       double entryPrice, slPrice;
@@ -427,9 +609,18 @@ void ManageFVGTrades()
 
       if(PlaceLimitFromLowTF(symbol, zone.type, entryPrice, slPrice))
       {
-         // Mỗi FVG chỉ được dùng để trade 1 lần
-         g_FVGZones[i].status = EXPIRED;
+         // v2 state: lock zone after first successful placement; keep visible for diagnostics.
+         g_FVGZones[i].tradeLocked       = true;
+         g_FVGZones[i].tradeLockedTime   = TimeCurrent();
+         g_FVGZones[i].linkedOrderTicket = 0;
+         LogDecisionTrace("ORDER", StringFormat("#%d %s placed @%.5f SL=%.5f HTF[%.5f..%.5f] LTF[%.5f..%.5f]",
+                                                i, FVGTypeToString(zone.type), entryPrice, slPrice,
+                                                zone.lowerEdge, zone.upperEdge, ltfLower, ltfUpper));
          currentLimits++;
+      }
+      else
+      {
+         LogDecisionTrace("ORDER", StringFormat("#%d %s failed @%.5f", i, FVGTypeToString(zone.type), entryPrice));
       }
    }
 }

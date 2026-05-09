@@ -29,6 +29,9 @@ struct FVGZone
    double          slReferencePrice;
    datetime        createdTime;
    int             ageInBars;
+   bool            tradeLocked;      // true after one order attempt is placed from this zone
+   ulong           linkedOrderTicket;
+   datetime        tradeLockedTime;
 };
 
 //+------------------------------------------------------------------+
@@ -292,6 +295,103 @@ bool GetLatestLowTFFVG(string             symbol,
          double gapRatio = gap / bodyB;
          if(gapRatio < minGapVsBody)
             continue;
+         outUpper    = candleA_Low;
+         outLower    = candleC_High;
+         outBarALow  = candleA_Low;
+         outBarAHigh = candleA_High;
+         return true;
+      }
+   }
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Low-TF FVG nearest and aligned with HTF zone price range         |
+//+------------------------------------------------------------------+
+bool GetLatestLowTFFVGInRange(string             symbol,
+                              ENUM_TIMEFRAMES    tf,
+                              ENUM_FVG_TYPE      type,
+                              int                maxLookbackBars,
+                              double             rangeLower,
+                              double             rangeUpper,
+                              double             rangeBufferPoints,
+                              double            &outUpper,
+                              double            &outLower,
+                              double            &outBarALow,
+                              double            &outBarAHigh)
+{
+   int totalBars = Bars(symbol, tf);
+   int maxShift  = MathMin(maxLookbackBars, totalBars - 3);
+   if(maxShift < 1)
+      return false;
+
+   double maxOuterRatio = InpFVGMaxOuterBarRatio;
+   double minGapVsBody  = InpFVGMinGapVsImpulsePct / 100.0;
+   double bufferPrice   = rangeBufferPoints * _Point;
+   double minAllowed    = rangeLower - bufferPrice;
+   double maxAllowed    = rangeUpper + bufferPrice;
+
+   for(int shift = 1; shift <= maxShift; shift++)
+   {
+      int shiftA = shift + 2;
+      int shiftB = shift + 1;
+      int shiftC = shift;
+
+      double candleA_High = iHigh(symbol, tf, shiftA);
+      double candleA_Low  = iLow (symbol, tf, shiftA);
+      double candleB_High = iHigh(symbol, tf, shiftB);
+      double candleB_Low  = iLow (symbol, tf, shiftB);
+      double candleB_Open  = iOpen (symbol, tf, shiftB);
+      double candleB_Close = iClose(symbol, tf, shiftB);
+      double candleC_High = iHigh(symbol, tf, shiftC);
+      double candleC_Low  = iLow (symbol, tf, shiftC);
+
+      double rangeA = candleA_High - candleA_Low;
+      double rangeB = candleB_High - candleB_Low;
+      double rangeC = candleC_High - candleC_Low;
+      double bodyB  = MathAbs(candleB_Close - candleB_Open);
+
+      if(rangeB <= 0 || bodyB <= 0)
+         continue;
+      if(rangeA > maxOuterRatio * rangeB || rangeC > maxOuterRatio * rangeB)
+         continue;
+      if(!IsImpulseCandleStrong(symbol, tf, shiftB))
+         continue;
+
+      if(type == FVG_BULLISH)
+      {
+         if(candleA_High >= candleC_Low || candleB_Close <= candleB_Open)
+            continue;
+
+         double gap      = candleC_Low - candleA_High;
+         double gapRatio = gap / bodyB;
+         if(gapRatio < minGapVsBody)
+            continue;
+
+         double entry = candleC_Low;
+         if(entry < minAllowed || entry > maxAllowed)
+            continue;
+
+         outUpper    = candleC_Low;
+         outLower    = candleA_High;
+         outBarALow  = candleA_Low;
+         outBarAHigh = candleA_High;
+         return true;
+      }
+      else
+      {
+         if(candleA_Low <= candleC_High || candleB_Close >= candleB_Open)
+            continue;
+
+         double gap      = candleA_Low - candleC_High;
+         double gapRatio = gap / bodyB;
+         if(gapRatio < minGapVsBody)
+            continue;
+
+         double entry = candleC_High;
+         if(entry < minAllowed || entry > maxAllowed)
+            continue;
+
          outUpper    = candleA_Low;
          outLower    = candleC_High;
          outBarALow  = candleA_Low;

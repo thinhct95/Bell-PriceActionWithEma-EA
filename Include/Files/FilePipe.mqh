@@ -204,7 +204,7 @@ bool CFilePipe::ReadInteger(T &value)
    if(WaitForRead(sizeof(T)))
      {
       ResetLastError();
-      value=FileReadInteger(m_handle,sizeof(T));
+      value=(T)FileReadInteger(m_handle,sizeof(T));
       return(GetLastError()==0);
      }
 //--- failure
