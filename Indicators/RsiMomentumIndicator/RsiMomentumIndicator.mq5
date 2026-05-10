@@ -7,15 +7,15 @@
 #property copyright   "RsiMomentumIndicator"
 #property version     "1.00"
 #property indicator_separate_window
-#property indicator_buffers 4
+#property indicator_buffers 3
 #property indicator_plots   3
 #property indicator_minimum 0
 #property indicator_maximum 100
 
-// --- Plot 0 (Buffer 0 + Color buffer 3): RSI14 với màu thay đổi theo vùng extreme ---
+// --- Buffer 0: RSI14 ---
 #property indicator_label1  "RSI(14)"
-#property indicator_type1   DRAW_COLOR_LINE
-#property indicator_color1  clrMediumOrchid, clrRed   // index 0 = bình thường, index 1 = extreme
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrMediumOrchid
 #property indicator_style1  STYLE_SOLID
 #property indicator_width1  2
 
@@ -45,11 +45,9 @@ input int   InpEMA200Period = 200;
 input group "Bộ lọc trend"
 input int   InpTrendConfirmBars = 2;   // số nến liên tiếp phải đóng cùng phía EMA200
 
-input group "Bộ lọc RSI extreme"
-input double InpRSIOverbought  = 70.0;   // RSI ≥ ngưỡng này → bỏ qua tín hiệu BUY
-input double InpRSIOversold    = 30.0;   // RSI ≤ ngưỡng này → bỏ qua tín hiệu SELL
-input double InpRSIExtremeHigh = 75.0;   // RSI > ngưỡng này → tô đỏ trên biểu đồ
-input double InpRSIExtremeLow  = 25.0;   // RSI < ngưỡng này → tô đỏ trên biểu đồ
+input group "Bộ lọc RSI"
+input double InpRSIOverbought = 70.0;   // RSI ≥ ngưỡng này → bỏ qua tín hiệu BUY
+input double InpRSIOversold   = 30.0;   // RSI ≤ ngưỡng này → bỏ qua tín hiệu SELL
 
 input group "Mũi tên giao cắt"
 input color InpArrowUpColor   = clrLime;     // màu mũi tên khi RSI cắt lên WMA45
@@ -66,7 +64,6 @@ input bool  InpShowPanel = true;
 double buf_RSI[];
 double buf_EMA9[];
 double buf_WMA45[];
-double buf_RSI_color[];   // color index buffer cho RSI (0 = normal, 1 = extreme red)
 
 int h_RSI    = INVALID_HANDLE;
 int h_EMA9   = INVALID_HANDLE;
@@ -113,30 +110,16 @@ void UpdateLabel(const string name, const string text, const color clr)
 int OnInit()
 {
   // Đăng ký buffer — đặt AS_SERIES để [0] = nến hiện tại
-  SetIndexBuffer(0, buf_RSI,       INDICATOR_DATA);
-  SetIndexBuffer(1, buf_EMA9,      INDICATOR_DATA);
-  SetIndexBuffer(2, buf_WMA45,     INDICATOR_DATA);
-  SetIndexBuffer(3, buf_RSI_color, INDICATOR_COLOR_INDEX);
+  SetIndexBuffer(0, buf_RSI,   INDICATOR_DATA);
+  SetIndexBuffer(1, buf_EMA9,  INDICATOR_DATA);
+  SetIndexBuffer(2, buf_WMA45, INDICATOR_DATA);
 
-  ArraySetAsSeries(buf_RSI,       true);
-  ArraySetAsSeries(buf_EMA9,      true);
-  ArraySetAsSeries(buf_WMA45,     true);
-  ArraySetAsSeries(buf_RSI_color, true);
+  ArraySetAsSeries(buf_RSI,   true);
+  ArraySetAsSeries(buf_EMA9,  true);
+  ArraySetAsSeries(buf_WMA45, true);
 
   IndicatorSetString (INDICATOR_SHORTNAME, StringFormat("RsiMom(%d)", InpRSIPeriod));
   IndicatorSetInteger(INDICATOR_DIGITS, 2);
-
-  // Vẽ 2 đường ngang: Overbought (70) và Oversold (30)
-  IndicatorSetInteger(INDICATOR_LEVELS,        2);
-  IndicatorSetDouble (INDICATOR_LEVELVALUE, 0, InpRSIOverbought);
-  IndicatorSetDouble (INDICATOR_LEVELVALUE, 1, InpRSIOversold);
-  IndicatorSetInteger(INDICATOR_LEVELCOLOR, 0, clrSilver);
-  IndicatorSetInteger(INDICATOR_LEVELCOLOR, 1, clrSilver);
-  IndicatorSetInteger(INDICATOR_LEVELSTYLE, 0, STYLE_DOT);
-  IndicatorSetInteger(INDICATOR_LEVELSTYLE, 1, STYLE_DOT);
-  IndicatorSetInteger(INDICATOR_LEVELWIDTH, 0, 1);
-  IndicatorSetInteger(INDICATOR_LEVELWIDTH, 1, 1);
-  PlotIndexSetString (0, PLOT_LABEL, "RSI(14)");
 
   // Tạo handles chỉ báo
   h_RSI = iRSI(_Symbol, _Period, InpRSIPeriod, PRICE_CLOSE);
@@ -205,20 +188,24 @@ int OnCalculate(const int rates_total,
   const int minBars = InpWMA45Period + InpRSIPeriod + 5;
   if (rates_total < minBars) return 0;
 
-  // Đổ dữ liệu vào indicator buffer (AS_SERIES=true, [0]=nến hiện tại)
-  if (CopyBuffer(h_RSI,   0, 0, rates_total, buf_RSI)   < rates_total) return prev_calculated;
-  if (CopyBuffer(h_EMA9,  0, 0, rates_total, buf_EMA9)  < rates_total) return prev_calculated;
-  if (CopyBuffer(h_WMA45, 0, 0, rates_total, buf_WMA45) < rates_total) return prev_calculated;
+  // Đảm bảo các source indicator đã tính xong (quan trọng khi cold-start
+  // hoặc khi thị trường đóng — không có tick để retry)
+  const int rsiBars    = BarsCalculated(h_RSI);
+  const int ema9Bars   = BarsCalculated(h_EMA9);
+  const int wmaBars    = BarsCalculated(h_WMA45);
+  const int ema200Bars = BarsCalculated(h_EMA200);
+  if (rsiBars <= 0 || ema9Bars <= 0 || wmaBars <= 0 || ema200Bars <= 0)
+    return 0; // chưa có dữ liệu — return 0 để MT5 retry ngay
 
-  // Tô màu RSI theo vùng extreme:
-  //   value > InpRSIExtremeHigh hoặc < InpRSIExtremeLow  → color index 1 (đỏ)
-  //   ngược lại                                          → color index 0 (mặc định)
-  // Buffer đang AS_SERIES → [0] = bar mới nhất; quét toàn bộ cho đơn giản (O(N) nhẹ).
-  for (int i = 0; i < rates_total; i++)
-  {
-    const double v = buf_RSI[i];
-    buf_RSI_color[i] = (v > InpRSIExtremeHigh || v < InpRSIExtremeLow) ? 1.0 : 0.0;
-  }
+  // Chỉ copy số bar mà tất cả source đã tính xong (tránh return giữa chừng)
+  const int srcMin = MathMin(MathMin(rsiBars, ema9Bars), wmaBars);
+  const int copyN  = MathMin(srcMin, rates_total);
+  if (copyN < minBars) return 0;
+
+  // Đổ dữ liệu vào indicator buffer (AS_SERIES=true, [0]=nến hiện tại)
+  if (CopyBuffer(h_RSI,   0, 0, copyN, buf_RSI)   <= 0) return 0;
+  if (CopyBuffer(h_EMA9,  0, 0, copyN, buf_EMA9)  <= 0) return 0;
+  if (CopyBuffer(h_WMA45, 0, 0, copyN, buf_WMA45) <= 0) return 0;
 
   // Số nến cần quét để phát hiện giao cắt mới
   int barsToScan = (prev_calculated == 0)
@@ -228,8 +215,10 @@ int OnCalculate(const int rates_total,
 
   // Sao chép time, high, low, close và EMA200 để phát hiện giao cắt + lọc trend
   // +InpTrendConfirmBars vì cần check N nến liên tiếp đóng cùng phía EMA200
+  // CLAMP need ≤ copyN để CopyTime/CopyClose không bao giờ "thiếu" — first call
+  // có barsToScan = rates_total-2 sẽ cho need lớn hơn rates_total nếu không clamp.
   const int trendN = MathMax(1, InpTrendConfirmBars);
-  const int need   = barsToScan + 2 + trendN;
+  const int need   = MathMin(barsToScan + 2 + trendN, copyN);
   datetime timeArr[];
   double   highArr[], lowArr[], closeArr[], ema200Arr[];
   ArraySetAsSeries(timeArr,   true);
@@ -238,10 +227,10 @@ int OnCalculate(const int rates_total,
   ArraySetAsSeries(closeArr,  true);
   ArraySetAsSeries(ema200Arr, true);
 
-  if (CopyTime  (_Symbol, _Period, 0, need, timeArr)   < need) return prev_calculated;
-  if (CopyHigh  (_Symbol, _Period, 0, need, highArr)   < need) return prev_calculated;
-  if (CopyLow   (_Symbol, _Period, 0, need, lowArr)    < need) return prev_calculated;
-  if (CopyClose (_Symbol, _Period, 0, need, closeArr)  < need) return prev_calculated;
+  if (CopyTime  (_Symbol, _Period, 0, need, timeArr)         < need) return prev_calculated;
+  if (CopyHigh  (_Symbol, _Period, 0, need, highArr)         < need) return prev_calculated;
+  if (CopyLow   (_Symbol, _Period, 0, need, lowArr)          < need) return prev_calculated;
+  if (CopyClose (_Symbol, _Period, 0, need, closeArr)        < need) return prev_calculated;
   if (CopyBuffer(h_EMA200, 0, 0,            need, ema200Arr) < need) return prev_calculated;
 
   const double arrowOffset = InpArrowOffsetPts * _Point;
@@ -249,9 +238,9 @@ int OnCalculate(const int rates_total,
   // Phát hiện giao cắt RSI vs WMA45, chỉ vẽ khi khớp với trend EMA200
   for (int i = barsToScan; i >= 1; i--)
   {
-    if (i + 1 >= rates_total)        continue;
-    if (i + trendN >= rates_total)   continue; // không đủ lịch sử cho N nến trend
-    if (ema200Arr[i] <= 0.0)         continue; // EMA200 chưa tính đủ bars
+    if (i + 1 >= rates_total)  continue;
+    if (i + trendN >= need)    continue; // ngoài phạm vi mảng cục bộ (timeArr/closeArr/ema200Arr)
+    if (ema200Arr[i] <= 0.0)   continue; // EMA200 chưa tính đủ bars
 
     const bool crossUp   = (buf_RSI[i+1] <= buf_WMA45[i+1]) && (buf_RSI[i] > buf_WMA45[i]);
     const bool crossDown = (buf_RSI[i+1] >= buf_WMA45[i+1]) && (buf_RSI[i] < buf_WMA45[i]);
@@ -363,5 +352,9 @@ int OnCalculate(const int rates_total,
   }
 
   ChartRedraw(0);
-  return rates_total;
+  // Return số bar thật sự đã xử lý — nếu copyN < rates_total thì lần sau MT5
+  // sẽ scan tiếp phần còn lại (do chênh prev_calculated)
+  return copyN;
 }
+
+//+------------------------------------------------------------------+
