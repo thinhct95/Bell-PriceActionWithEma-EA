@@ -7,15 +7,15 @@
 #property copyright   "RsiMomentumIndicator"
 #property version     "1.00"
 #property indicator_separate_window
-#property indicator_buffers 3
+#property indicator_buffers 4
 #property indicator_plots   3
 #property indicator_minimum 0
 #property indicator_maximum 100
 
-// --- Buffer 0: RSI14 ---
+// --- Plot 0 (Buffer 0 + Color buffer 3): RSI14 với màu thay đổi theo vùng extreme ---
 #property indicator_label1  "RSI(14)"
-#property indicator_type1   DRAW_LINE
-#property indicator_color1  clrMediumOrchid
+#property indicator_type1   DRAW_COLOR_LINE
+#property indicator_color1  clrMediumOrchid, clrRed   // index 0 = bình thường, index 1 = extreme
 #property indicator_style1  STYLE_SOLID
 #property indicator_width1  2
 
@@ -42,6 +42,15 @@ input int   InpEMA9Period   = 9;
 input int   InpWMA45Period  = 45;
 input int   InpEMA200Period = 200;
 
+input group "Bộ lọc trend"
+input int   InpTrendConfirmBars = 2;   // số nến liên tiếp phải đóng cùng phía EMA200
+
+input group "Bộ lọc RSI extreme"
+input double InpRSIOverbought  = 70.0;   // RSI ≥ ngưỡng này → bỏ qua tín hiệu BUY
+input double InpRSIOversold    = 30.0;   // RSI ≤ ngưỡng này → bỏ qua tín hiệu SELL
+input double InpRSIExtremeHigh = 75.0;   // RSI > ngưỡng này → tô đỏ trên biểu đồ
+input double InpRSIExtremeLow  = 25.0;   // RSI < ngưỡng này → tô đỏ trên biểu đồ
+
 input group "Mũi tên giao cắt"
 input color InpArrowUpColor   = clrLime;     // màu mũi tên khi RSI cắt lên WMA45
 input color InpArrowDownColor = clrTomato;   // màu mũi tên khi RSI cắt xuống WMA45
@@ -57,6 +66,7 @@ input bool  InpShowPanel = true;
 double buf_RSI[];
 double buf_EMA9[];
 double buf_WMA45[];
+double buf_RSI_color[];   // color index buffer cho RSI (0 = normal, 1 = extreme red)
 
 int h_RSI    = INVALID_HANDLE;
 int h_EMA9   = INVALID_HANDLE;
@@ -103,16 +113,30 @@ void UpdateLabel(const string name, const string text, const color clr)
 int OnInit()
 {
   // Đăng ký buffer — đặt AS_SERIES để [0] = nến hiện tại
-  SetIndexBuffer(0, buf_RSI,   INDICATOR_DATA);
-  SetIndexBuffer(1, buf_EMA9,  INDICATOR_DATA);
-  SetIndexBuffer(2, buf_WMA45, INDICATOR_DATA);
+  SetIndexBuffer(0, buf_RSI,       INDICATOR_DATA);
+  SetIndexBuffer(1, buf_EMA9,      INDICATOR_DATA);
+  SetIndexBuffer(2, buf_WMA45,     INDICATOR_DATA);
+  SetIndexBuffer(3, buf_RSI_color, INDICATOR_COLOR_INDEX);
 
-  ArraySetAsSeries(buf_RSI,   true);
-  ArraySetAsSeries(buf_EMA9,  true);
-  ArraySetAsSeries(buf_WMA45, true);
+  ArraySetAsSeries(buf_RSI,       true);
+  ArraySetAsSeries(buf_EMA9,      true);
+  ArraySetAsSeries(buf_WMA45,     true);
+  ArraySetAsSeries(buf_RSI_color, true);
 
   IndicatorSetString (INDICATOR_SHORTNAME, StringFormat("RsiMom(%d)", InpRSIPeriod));
   IndicatorSetInteger(INDICATOR_DIGITS, 2);
+
+  // Vẽ 2 đường ngang: Overbought (70) và Oversold (30)
+  IndicatorSetInteger(INDICATOR_LEVELS,        2);
+  IndicatorSetDouble (INDICATOR_LEVELVALUE, 0, InpRSIOverbought);
+  IndicatorSetDouble (INDICATOR_LEVELVALUE, 1, InpRSIOversold);
+  IndicatorSetInteger(INDICATOR_LEVELCOLOR, 0, clrSilver);
+  IndicatorSetInteger(INDICATOR_LEVELCOLOR, 1, clrSilver);
+  IndicatorSetInteger(INDICATOR_LEVELSTYLE, 0, STYLE_DOT);
+  IndicatorSetInteger(INDICATOR_LEVELSTYLE, 1, STYLE_DOT);
+  IndicatorSetInteger(INDICATOR_LEVELWIDTH, 0, 1);
+  IndicatorSetInteger(INDICATOR_LEVELWIDTH, 1, 1);
+  PlotIndexSetString (0, PLOT_LABEL, "RSI(14)");
 
   // Tạo handles chỉ báo
   h_RSI = iRSI(_Symbol, _Period, InpRSIPeriod, PRICE_CLOSE);
@@ -186,98 +210,156 @@ int OnCalculate(const int rates_total,
   if (CopyBuffer(h_EMA9,  0, 0, rates_total, buf_EMA9)  < rates_total) return prev_calculated;
   if (CopyBuffer(h_WMA45, 0, 0, rates_total, buf_WMA45) < rates_total) return prev_calculated;
 
+  // Tô màu RSI theo vùng extreme:
+  //   value > InpRSIExtremeHigh hoặc < InpRSIExtremeLow  → color index 1 (đỏ)
+  //   ngược lại                                          → color index 0 (mặc định)
+  // Buffer đang AS_SERIES → [0] = bar mới nhất; quét toàn bộ cho đơn giản (O(N) nhẹ).
+  for (int i = 0; i < rates_total; i++)
+  {
+    const double v = buf_RSI[i];
+    buf_RSI_color[i] = (v > InpRSIExtremeHigh || v < InpRSIExtremeLow) ? 1.0 : 0.0;
+  }
+
   // Số nến cần quét để phát hiện giao cắt mới
   int barsToScan = (prev_calculated == 0)
                    ? rates_total - 2
                    : (rates_total - prev_calculated + 2);
   barsToScan = MathMin(barsToScan, rates_total - 2);
 
-  // Sao chép time, high, low vào mảng cục bộ AS_SERIES để dùng trong vòng lặp
+  // Sao chép time, high, low, close và EMA200 để phát hiện giao cắt + lọc trend
+  // +InpTrendConfirmBars vì cần check N nến liên tiếp đóng cùng phía EMA200
+  const int trendN = MathMax(1, InpTrendConfirmBars);
+  const int need   = barsToScan + 2 + trendN;
   datetime timeArr[];
-  double   highArr[];
-  double   lowArr[];
-  ArraySetAsSeries(timeArr, true);
-  ArraySetAsSeries(highArr, true);
-  ArraySetAsSeries(lowArr,  true);
+  double   highArr[], lowArr[], closeArr[], ema200Arr[];
+  ArraySetAsSeries(timeArr,   true);
+  ArraySetAsSeries(highArr,   true);
+  ArraySetAsSeries(lowArr,    true);
+  ArraySetAsSeries(closeArr,  true);
+  ArraySetAsSeries(ema200Arr, true);
 
-  if (CopyTime (_Symbol, _Period, 0, barsToScan + 2, timeArr) < barsToScan + 2) return prev_calculated;
-  if (CopyHigh (_Symbol, _Period, 0, barsToScan + 2, highArr) < barsToScan + 2) return prev_calculated;
-  if (CopyLow  (_Symbol, _Period, 0, barsToScan + 2, lowArr)  < barsToScan + 2) return prev_calculated;
+  if (CopyTime  (_Symbol, _Period, 0, need, timeArr)   < need) return prev_calculated;
+  if (CopyHigh  (_Symbol, _Period, 0, need, highArr)   < need) return prev_calculated;
+  if (CopyLow   (_Symbol, _Period, 0, need, lowArr)    < need) return prev_calculated;
+  if (CopyClose (_Symbol, _Period, 0, need, closeArr)  < need) return prev_calculated;
+  if (CopyBuffer(h_EMA200, 0, 0,            need, ema200Arr) < need) return prev_calculated;
 
   const double arrowOffset = InpArrowOffsetPts * _Point;
 
-  // Phát hiện giao cắt RSI vs WMA45 và vẽ mũi tên lên chart chính
+  // Phát hiện giao cắt RSI vs WMA45, chỉ vẽ khi khớp với trend EMA200
   for (int i = barsToScan; i >= 1; i--)
   {
-    // Tránh truy cập vượt quá phạm vi buffer
-    if (i + 1 >= rates_total) continue;
+    if (i + 1 >= rates_total)        continue;
+    if (i + trendN >= rates_total)   continue; // không đủ lịch sử cho N nến trend
+    if (ema200Arr[i] <= 0.0)         continue; // EMA200 chưa tính đủ bars
 
     const bool crossUp   = (buf_RSI[i+1] <= buf_WMA45[i+1]) && (buf_RSI[i] > buf_WMA45[i]);
     const bool crossDown = (buf_RSI[i+1] >= buf_WMA45[i+1]) && (buf_RSI[i] < buf_WMA45[i]);
 
     if (!crossUp && !crossDown) continue;
 
+    // Lọc theo trend EMA200: cần N nến LIÊN TIẾP gần nhất đều đóng cùng phía
+    // Quét từ nến tín hiệu i → i+N-1
+    bool trendUp   = true;
+    bool trendDown = true;
+    for (int k = 0; k < trendN; k++)
+    {
+      const int idx = i + k;
+      if (ema200Arr[idx] <= 0.0) { trendUp = false; trendDown = false; break; }
+      if (closeArr[idx] <= ema200Arr[idx]) trendUp   = false;
+      if (closeArr[idx] >= ema200Arr[idx]) trendDown = false;
+      if (!trendUp && !trendDown) break;
+    }
+
+    // Vị trí EMA9 vs WMA45 — kiểm tra "lực mua/bán mới bắt đầu chiếm ưu thế"
+    //   BUY:  EMA9 vẫn dưới WMA45 (lực mua chỉ vừa nhú lên qua RSI cross)
+    //   SELL: EMA9 vẫn trên WMA45 (lực bán chỉ vừa nhú xuống)
+    const bool ema9BelowWma = (buf_EMA9[i] < buf_WMA45[i]);
+    const bool ema9AboveWma = (buf_EMA9[i] > buf_WMA45[i]);
+
+    // Slope EMA9 — phải đang hướng cùng chiều với tín hiệu
+    const bool ema9SlopeUp   = (buf_EMA9[i] > buf_EMA9[i+1]);
+    const bool ema9SlopeDown = (buf_EMA9[i] < buf_EMA9[i+1]);
+
+    // Lọc RSI extreme — không mua đỉnh, không bán đáy
+    //   RSI ≥ overbought  → bỏ tín hiệu BUY
+    //   RSI ≤ oversold    → bỏ tín hiệu SELL
+    const bool rsiOkBuy  = (buf_RSI[i] < InpRSIOverbought);
+    const bool rsiOkSell = (buf_RSI[i] > InpRSIOversold);
+
+    // Tín hiệu hợp lệ khi đủ 5 điều kiện
+    const bool validBuy  = crossUp   && trendUp   && ema9BelowWma && ema9SlopeUp   && rsiOkBuy;
+    const bool validSell = crossDown && trendDown && ema9AboveWma && ema9SlopeDown && rsiOkSell;
+
+    if (!validBuy && !validSell) continue;
+
     // Dùng timestamp làm tên duy nhất để tránh tạo trùng object
     const string arrowName = OBJ_PREFIX + "CR_" + IntegerToString((int)timeArr[i]);
-    if (ObjectFind(0, arrowName) >= 0) continue; // đã có → bỏ qua
+    if (ObjectFind(0, arrowName) >= 0) continue;
 
-    if (crossUp)
+    if (validBuy)
     {
-      // Mũi tên lên dưới đáy nến
+      // Mũi tên lên (↑) đặt dưới đáy nến — tín hiệu BUY trong uptrend
+      // ANCHOR_TOP: điểm anchor là đỉnh icon → arrow nằm xuôi xuống dưới price
+      // → tip ↑ ở phía trên, sát đáy nến (cách lowArr[i] một khoảng arrowOffset)
       const double price = lowArr[i] - arrowOffset;
       ObjectCreate(0, arrowName, OBJ_ARROW, 0, timeArr[i], price);
-      ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE,  233);           // ↑ Wingdings
+      ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE,  233);
+      ObjectSetInteger(0, arrowName, OBJPROP_ANCHOR,     ANCHOR_TOP);
       ObjectSetInteger(0, arrowName, OBJPROP_COLOR,      InpArrowUpColor);
       ObjectSetInteger(0, arrowName, OBJPROP_WIDTH,      InpArrowSize);
       ObjectSetInteger(0, arrowName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, arrowName, OBJPROP_HIDDEN,     true);
       ObjectSetString (0, arrowName, OBJPROP_TOOLTIP,
-                       StringFormat("RSI cắt lên WMA45 | %s | RSI=%.2f WMA45=%.2f",
+                       StringFormat("BUY signal\n%s\nRSI=%.2f  EMA9=%.2f (slope+)  WMA45=%.2f\nEMA200=%.5f (Uptrend)",
                                     TimeToString(timeArr[i], TIME_DATE|TIME_MINUTES),
-                                    buf_RSI[i], buf_WMA45[i]));
+                                    buf_RSI[i], buf_EMA9[i], buf_WMA45[i], ema200Arr[i]));
     }
-    else // crossDown
+    else // validSell
     {
-      // Mũi tên xuống trên đỉnh nến
+      // Mũi tên xuống (↓) đặt trên đỉnh nến — tín hiệu SELL trong downtrend
+      // ANCHOR_BOTTOM: điểm anchor là đáy icon → arrow nằm ngược lên trên price
+      // → tip ↓ ở phía dưới, sát đỉnh nến (cách highArr[i] một khoảng arrowOffset)
       const double price = highArr[i] + arrowOffset;
       ObjectCreate(0, arrowName, OBJ_ARROW, 0, timeArr[i], price);
-      ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE,  234);           // ↓ Wingdings
+      ObjectSetInteger(0, arrowName, OBJPROP_ARROWCODE,  234);
+      ObjectSetInteger(0, arrowName, OBJPROP_ANCHOR,     ANCHOR_BOTTOM);
       ObjectSetInteger(0, arrowName, OBJPROP_COLOR,      InpArrowDownColor);
       ObjectSetInteger(0, arrowName, OBJPROP_WIDTH,      InpArrowSize);
       ObjectSetInteger(0, arrowName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, arrowName, OBJPROP_HIDDEN,     true);
       ObjectSetString (0, arrowName, OBJPROP_TOOLTIP,
-                       StringFormat("RSI cắt xuống WMA45 | %s | RSI=%.2f WMA45=%.2f",
+                       StringFormat("SELL signal\n%s\nRSI=%.2f  EMA9=%.2f (slope-)  WMA45=%.2f\nEMA200=%.5f (Downtrend)",
                                     TimeToString(timeArr[i], TIME_DATE|TIME_MINUTES),
-                                    buf_RSI[i], buf_WMA45[i]));
+                                    buf_RSI[i], buf_EMA9[i], buf_WMA45[i], ema200Arr[i]));
     }
   }
 
   // Cập nhật panel thông tin (dùng nến vừa đóng = index 1)
-  if (InpShowPanel && rates_total > 2)
+  // closeArr và ema200Arr đã được copy ở trên — dùng lại luôn
+  if (InpShowPanel && rates_total > trendN + 1 && ema200Arr[1] > 0.0)
   {
-    double ema200Arr[];
-    ArraySetAsSeries(ema200Arr, true);
-
-    double closeArr[];
-    ArraySetAsSeries(closeArr, true);
-
-    bool panelOk = (CopyBuffer(h_EMA200,  0, 0, 3, ema200Arr) >= 3) &&
-                   (CopyClose(_Symbol, _Period, 0, 3, closeArr) >= 3);
-
-    if (panelOk && ema200Arr[1] > 0.0)
+    // Áp dụng cùng quy tắc N nến liên tiếp cho panel hiển thị
+    bool panelTrendUp   = true;
+    bool panelTrendDown = true;
+    for (int k = 0; k < trendN; k++)
     {
-      const bool  trendUp  = (closeArr[1] > ema200Arr[1]);
-      const color trendClr = trendUp ? InpArrowUpColor : InpArrowDownColor;
-      const string trendTxt = trendUp
-                              ? "Trend :  UPTREND  (Close > EMA200)"
-                              : "Trend :  DOWNTREND (Close < EMA200)";
-
-      UpdateLabel(LBL_TREND,    trendTxt,                                                trendClr);
-      UpdateLabel(LBL_RSI_VAL,  StringFormat("RSI   : %6.2f", buf_RSI[1]),   clrMediumOrchid);
-      UpdateLabel(LBL_EMA9VAL,  StringFormat("EMA9  : %6.2f", buf_EMA9[1]),  clrDarkOrange);
-      UpdateLabel(LBL_WMA45VAL, StringFormat("WMA45 : %6.2f", buf_WMA45[1]), clrDodgerBlue);
+      const int idx = 1 + k;
+      if (ema200Arr[idx] <= 0.0) { panelTrendUp = false; panelTrendDown = false; break; }
+      if (closeArr[idx] <= ema200Arr[idx]) panelTrendUp   = false;
+      if (closeArr[idx] >= ema200Arr[idx]) panelTrendDown = false;
     }
+
+    string trendTxt;
+    color  trendClr;
+    if      (panelTrendUp)   { trendTxt = StringFormat("Trend :  UPTREND   (%d closes > EMA200)", trendN); trendClr = InpArrowUpColor; }
+    else if (panelTrendDown) { trendTxt = StringFormat("Trend :  DOWNTREND (%d closes < EMA200)", trendN); trendClr = InpArrowDownColor; }
+    else                     { trendTxt = "Trend :  RANGE / SWITCHING";                                    trendClr = clrSilver; }
+
+    UpdateLabel(LBL_TREND,    trendTxt,                                               trendClr);
+    UpdateLabel(LBL_RSI_VAL,  StringFormat("RSI   : %6.2f", buf_RSI[1]),  clrMediumOrchid);
+    UpdateLabel(LBL_EMA9VAL,  StringFormat("EMA9  : %6.2f", buf_EMA9[1]), clrDarkOrange);
+    UpdateLabel(LBL_WMA45VAL, StringFormat("WMA45 : %6.2f", buf_WMA45[1]),clrDodgerBlue);
   }
 
   ChartRedraw(0);
