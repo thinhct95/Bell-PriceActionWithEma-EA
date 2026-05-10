@@ -7,7 +7,7 @@
 #property copyright   "RsiMomentumIndicator"
 #property version     "1.00"
 #property indicator_separate_window
-#property indicator_buffers 3
+#property indicator_buffers 6
 #property indicator_plots   3
 #property indicator_minimum 0
 #property indicator_maximum 100
@@ -40,7 +40,7 @@ input group "Chỉ báo"
 input int   InpRSIPeriod    = 14;
 input int   InpEMA9Period   = 9;
 input int   InpWMA45Period  = 45;
-input int   InpEMA200Period = 200;
+input int   InpEMATrendPeriod = 200;
 
 input group "Bộ lọc trend"
 input int   InpTrendConfirmBars = 2;   // số nến liên tiếp phải đóng cùng phía EMA200
@@ -48,6 +48,9 @@ input int   InpTrendConfirmBars = 2;   // số nến liên tiếp phải đóng 
 input group "Bộ lọc RSI"
 input double InpRSIOverbought = 70.0;   // RSI ≥ ngưỡng này → bỏ qua tín hiệu BUY
 input double InpRSIOversold   = 30.0;   // RSI ≤ ngưỡng này → bỏ qua tín hiệu SELL
+
+input group "Bộ lọc EMA9 vs WMA45 (chống nhiễu)"
+input int    InpEma9PersistBars = 3;    // EMA9 phải ở cùng phía WMA45 N nến liên tiếp (gồm cả bar signal); 0 hoặc 1 = tắt
 
 input group "Mũi tên giao cắt"
 input color InpArrowUpColor   = clrLime;     // màu mũi tên khi RSI cắt lên WMA45
@@ -64,6 +67,9 @@ input bool  InpShowPanel = true;
 double buf_RSI[];
 double buf_EMA9[];
 double buf_WMA45[];
+double buf_Signal[];   // hidden — +1 BUY, -1 SELL, 0 none
+double buf_EMA200[];   // hidden — giá trị EMA200 (cho EA hiển thị)
+double buf_Trend[];    // hidden — +1 UP, -1 DOWN, 0 RANGE/SWITCHING
 
 int h_RSI    = INVALID_HANDLE;
 int h_EMA9   = INVALID_HANDLE;
@@ -110,13 +116,19 @@ void UpdateLabel(const string name, const string text, const color clr)
 int OnInit()
 {
   // Đăng ký buffer — đặt AS_SERIES để [0] = nến hiện tại
-  SetIndexBuffer(0, buf_RSI,   INDICATOR_DATA);
-  SetIndexBuffer(1, buf_EMA9,  INDICATOR_DATA);
-  SetIndexBuffer(2, buf_WMA45, INDICATOR_DATA);
+  SetIndexBuffer(0, buf_RSI,    INDICATOR_DATA);
+  SetIndexBuffer(1, buf_EMA9,   INDICATOR_DATA);
+  SetIndexBuffer(2, buf_WMA45,  INDICATOR_DATA);
+  SetIndexBuffer(3, buf_Signal, INDICATOR_CALCULATIONS); // ẩn — phục vụ EA
+  SetIndexBuffer(4, buf_EMA200, INDICATOR_CALCULATIONS); // ẩn — EMA200 cho EA
+  SetIndexBuffer(5, buf_Trend,  INDICATOR_CALCULATIONS); // ẩn — trend cho EA
 
-  ArraySetAsSeries(buf_RSI,   true);
-  ArraySetAsSeries(buf_EMA9,  true);
-  ArraySetAsSeries(buf_WMA45, true);
+  ArraySetAsSeries(buf_RSI,    true);
+  ArraySetAsSeries(buf_EMA9,   true);
+  ArraySetAsSeries(buf_WMA45,  true);
+  ArraySetAsSeries(buf_Signal, true);
+  ArraySetAsSeries(buf_EMA200, true);
+  ArraySetAsSeries(buf_Trend,  true);
 
   IndicatorSetString (INDICATOR_SHORTNAME, StringFormat("RsiMom(%d)", InpRSIPeriod));
   IndicatorSetInteger(INDICATOR_DIGITS, 2);
@@ -135,7 +147,7 @@ int OnInit()
   if (h_WMA45 == INVALID_HANDLE)
     { Print("[RsiMom] Không tạo được handle WMA45(RSI)"); return INIT_FAILED; }
 
-  h_EMA200 = iMA(_Symbol, _Period, InpEMA200Period, 0, MODE_EMA, PRICE_CLOSE);
+  h_EMA200 = iMA(_Symbol, _Period, InpEMATrendPeriod, 0, MODE_EMA, PRICE_CLOSE);
   if (h_EMA200 == INVALID_HANDLE)
     { Print("[RsiMom] Không tạo được handle EMA200"); return INIT_FAILED; }
 
@@ -195,10 +207,20 @@ int OnCalculate(const int rates_total,
   const int wmaBars    = BarsCalculated(h_WMA45);
   const int ema200Bars = BarsCalculated(h_EMA200);
   if (rsiBars <= 0 || ema9Bars <= 0 || wmaBars <= 0 || ema200Bars <= 0)
+  {
+    static datetime lastWarn = 0;
+    if (TimeCurrent() - lastWarn > 30)
+    {
+      PrintFormat("[RsiMom] Source not ready yet: RSI=%d EMA9=%d WMA45=%d EMA200=%d (rates_total=%d)",
+                  rsiBars, ema9Bars, wmaBars, ema200Bars, rates_total);
+      lastWarn = TimeCurrent();
+    }
     return 0; // chưa có dữ liệu — return 0 để MT5 retry ngay
+  }
 
-  // Chỉ copy số bar mà tất cả source đã tính xong (tránh return giữa chừng)
-  const int srcMin = MathMin(MathMin(rsiBars, ema9Bars), wmaBars);
+  // Chỉ copy số bar mà TẤT CẢ source (incl. EMA200) đã tính xong
+  // → tránh CopyBuffer EMA200 fail giữa chừng làm buf_EMA200/buf_Trend stale
+  const int srcMin = MathMin(MathMin(MathMin(rsiBars, ema9Bars), wmaBars), ema200Bars);
   const int copyN  = MathMin(srcMin, rates_total);
   if (copyN < minBars) return 0;
 
@@ -235,20 +257,24 @@ int OnCalculate(const int rates_total,
 
   const double arrowOffset = InpArrowOffsetPts * _Point;
 
+  // Reset buffer cho bar 0 (đang hình thành) — đặt giá trị mặc định
+  buf_Signal[0] = 0.0;
+  buf_Trend [0] = 0.0;
+  buf_EMA200[0] = (need > 0) ? ema200Arr[0] : 0.0;
+
   // Phát hiện giao cắt RSI vs WMA45, chỉ vẽ khi khớp với trend EMA200
   for (int i = barsToScan; i >= 1; i--)
   {
+    buf_Signal[i] = 0.0; // mặc định: không có tín hiệu
+    buf_Trend [i] = 0.0;
+    buf_EMA200[i] = (i < need) ? ema200Arr[i] : 0.0;
+
     if (i + 1 >= rates_total)  continue;
     if (i + trendN >= need)    continue; // ngoài phạm vi mảng cục bộ (timeArr/closeArr/ema200Arr)
     if (ema200Arr[i] <= 0.0)   continue; // EMA200 chưa tính đủ bars
 
-    const bool crossUp   = (buf_RSI[i+1] <= buf_WMA45[i+1]) && (buf_RSI[i] > buf_WMA45[i]);
-    const bool crossDown = (buf_RSI[i+1] >= buf_WMA45[i+1]) && (buf_RSI[i] < buf_WMA45[i]);
-
-    if (!crossUp && !crossDown) continue;
-
     // Lọc theo trend EMA200: cần N nến LIÊN TIẾP gần nhất đều đóng cùng phía
-    // Quét từ nến tín hiệu i → i+N-1
+    // Quét từ nến tín hiệu i → i+N-1 (tính LUÔN, kể cả khi không có cross)
     bool trendUp   = true;
     bool trendDown = true;
     for (int k = 0; k < trendN; k++)
@@ -259,12 +285,46 @@ int OnCalculate(const int rates_total,
       if (closeArr[idx] >= ema200Arr[idx]) trendDown = false;
       if (!trendUp && !trendDown) break;
     }
+    buf_Trend[i] = trendUp ? 1.0 : (trendDown ? -1.0 : 0.0);
 
-    // Vị trí EMA9 vs WMA45 — kiểm tra "lực mua/bán mới bắt đầu chiếm ưu thế"
+    const bool crossUp   = (buf_RSI[i+1] <= buf_WMA45[i+1]) && (buf_RSI[i] > buf_WMA45[i]);
+    const bool crossDown = (buf_RSI[i+1] >= buf_WMA45[i+1]) && (buf_RSI[i] < buf_WMA45[i]);
+
+    if (!crossUp && !crossDown) continue;
+
+    // Vị trí EMA9 vs WMA45 tại nến signal — "lực mua/bán mới bắt đầu chiếm ưu thế"
     //   BUY:  EMA9 vẫn dưới WMA45 (lực mua chỉ vừa nhú lên qua RSI cross)
     //   SELL: EMA9 vẫn trên WMA45 (lực bán chỉ vừa nhú xuống)
     const bool ema9BelowWma = (buf_EMA9[i] < buf_WMA45[i]);
     const bool ema9AboveWma = (buf_EMA9[i] > buf_WMA45[i]);
+
+    // ── Filter PERSIST (chống nhiễu) ─────────────────────────────────────
+    // Yêu cầu EMA9 ở CÙNG PHÍA WMA45 trong N nến liên tiếp (i, i+1, …, i+N-1)
+    //   - Tránh trường hợp EMA9 cắt lên/xuống WMA45 liên tục (lực không rõ)
+    //   - Mặc định N=5: EMA9 phải đã ổn định 1 phía ít nhất 5 bar
+    //   - N <= 1 → tắt filter (chỉ check tại bar signal như cũ)
+    const int persistN = MathMax(1, InpEma9PersistBars);
+    bool ema9PersistBelow = ema9BelowWma;
+    bool ema9PersistAbove = ema9AboveWma;
+    if (persistN > 1)
+    {
+      // Cần thêm (persistN - 1) bar trước nến signal cùng phía
+      // Đảm bảo không vượt phạm vi buffer (i + persistN - 1 < rates_total)
+      if (i + persistN - 1 >= rates_total)
+      {
+        ema9PersistBelow = false;
+        ema9PersistAbove = false;
+      }
+      else
+      {
+        for (int k = 1; k < persistN; k++)
+        {
+          if (buf_EMA9[i+k] >= buf_WMA45[i+k]) ema9PersistBelow = false;
+          if (buf_EMA9[i+k] <= buf_WMA45[i+k]) ema9PersistAbove = false;
+          if (!ema9PersistBelow && !ema9PersistAbove) break;
+        }
+      }
+    }
 
     // Slope EMA9 — phải đang hướng cùng chiều với tín hiệu
     const bool ema9SlopeUp   = (buf_EMA9[i] > buf_EMA9[i+1]);
@@ -276,9 +336,9 @@ int OnCalculate(const int rates_total,
     const bool rsiOkBuy  = (buf_RSI[i] < InpRSIOverbought);
     const bool rsiOkSell = (buf_RSI[i] > InpRSIOversold);
 
-    // Tín hiệu hợp lệ khi đủ 5 điều kiện
-    const bool validBuy  = crossUp   && trendUp   && ema9BelowWma && ema9SlopeUp   && rsiOkBuy;
-    const bool validSell = crossDown && trendDown && ema9AboveWma && ema9SlopeDown && rsiOkSell;
+    // Tín hiệu hợp lệ khi đủ 6 điều kiện (thêm filter PERSIST)
+    const bool validBuy  = crossUp   && trendUp   && ema9PersistBelow && ema9SlopeUp   && rsiOkBuy;
+    const bool validSell = crossDown && trendDown && ema9PersistAbove && ema9SlopeDown && rsiOkSell;
 
     if (!validBuy && !validSell) continue;
 
@@ -288,6 +348,8 @@ int OnCalculate(const int rates_total,
 
     if (validBuy)
     {
+      buf_Signal[i] = 1.0; // ghi tín hiệu cho EA đọc qua iCustom
+
       // Mũi tên lên (↑) đặt dưới đáy nến — tín hiệu BUY trong uptrend
       // ANCHOR_TOP: điểm anchor là đỉnh icon → arrow nằm xuôi xuống dưới price
       // → tip ↑ ở phía trên, sát đáy nến (cách lowArr[i] một khoảng arrowOffset)
@@ -300,12 +362,14 @@ int OnCalculate(const int rates_total,
       ObjectSetInteger(0, arrowName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, arrowName, OBJPROP_HIDDEN,     true);
       ObjectSetString (0, arrowName, OBJPROP_TOOLTIP,
-                       StringFormat("BUY signal\n%s\nRSI=%.2f  EMA9=%.2f (slope+)  WMA45=%.2f\nEMA200=%.5f (Uptrend)",
+                       StringFormat("BUY signal\n%s\nRSI=%.2f  EMA9=%.2f (slope+)  WMA45=%.2f\nEMA200=%.5f (Uptrend)\nEMA9 below WMA45 ≥ %d bars",
                                     TimeToString(timeArr[i], TIME_DATE|TIME_MINUTES),
-                                    buf_RSI[i], buf_EMA9[i], buf_WMA45[i], ema200Arr[i]));
+                                    buf_RSI[i], buf_EMA9[i], buf_WMA45[i], ema200Arr[i], persistN));
     }
     else // validSell
     {
+      buf_Signal[i] = -1.0; // ghi tín hiệu cho EA đọc qua iCustom
+
       // Mũi tên xuống (↓) đặt trên đỉnh nến — tín hiệu SELL trong downtrend
       // ANCHOR_BOTTOM: điểm anchor là đáy icon → arrow nằm ngược lên trên price
       // → tip ↓ ở phía dưới, sát đỉnh nến (cách highArr[i] một khoảng arrowOffset)
@@ -318,9 +382,9 @@ int OnCalculate(const int rates_total,
       ObjectSetInteger(0, arrowName, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, arrowName, OBJPROP_HIDDEN,     true);
       ObjectSetString (0, arrowName, OBJPROP_TOOLTIP,
-                       StringFormat("SELL signal\n%s\nRSI=%.2f  EMA9=%.2f (slope-)  WMA45=%.2f\nEMA200=%.5f (Downtrend)",
+                       StringFormat("SELL signal\n%s\nRSI=%.2f  EMA9=%.2f (slope-)  WMA45=%.2f\nEMA200=%.5f (Downtrend)\nEMA9 above WMA45 ≥ %d bars",
                                     TimeToString(timeArr[i], TIME_DATE|TIME_MINUTES),
-                                    buf_RSI[i], buf_EMA9[i], buf_WMA45[i], ema200Arr[i]));
+                                    buf_RSI[i], buf_EMA9[i], buf_WMA45[i], ema200Arr[i], persistN));
     }
   }
 
@@ -352,6 +416,29 @@ int OnCalculate(const int rates_total,
   }
 
   ChartRedraw(0);
+
+  // Diagnostic: log lần đầu OnCalculate hoàn thành full để xác minh data
+  static bool firstSuccess = false;
+  if (!firstSuccess && copyN >= rates_total)
+  {
+    firstSuccess = true;
+    int upCount = 0, downCount = 0, rangeCount = 0, zeroEma = 0;
+    const int n = MathMin(500, rates_total - 2);
+    for (int i = 1; i <= n; i++)
+    {
+      if (buf_EMA200[i] <= 0.0) zeroEma++;
+      if      (buf_Trend[i] >  0.5) upCount++;
+      else if (buf_Trend[i] < -0.5) downCount++;
+      else                          rangeCount++;
+    }
+    PrintFormat("[RsiMom] First-pass OK rates_total=%d copyN=%d trendN=%d need=%d",
+                rates_total, copyN, trendN, need);
+    PrintFormat("[RsiMom]   bar1: RSI=%.2f EMA9=%.2f WMA45=%.2f EMA200=%.5f Trend=%.0f Signal=%.0f close[1]=%.5f",
+                buf_RSI[1], buf_EMA9[1], buf_WMA45[1], buf_EMA200[1], buf_Trend[1], buf_Signal[1], closeArr[1]);
+    PrintFormat("[RsiMom]   last %d bars trend dist: UP=%d DOWN=%d RANGE=%d  (zeroEma200=%d)",
+                n, upCount, downCount, rangeCount, zeroEma);
+  }
+
   // Return số bar thật sự đã xử lý — nếu copyN < rates_total thì lần sau MT5
   // sẽ scan tiếp phần còn lại (do chênh prev_calculated)
   return copyN;
