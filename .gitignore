@@ -2,3 +2,5 @@ Profiles/
 Experts/*.ex5
 *.dat
 Include/
+Indicators/*.ex5
+Logs/*.log
