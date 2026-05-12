@@ -1,7 +1,7 @@
 //+------------------------------------------------------------------+
 //| RsiMomentumIndicator.mq5                                         |
 //| Hiển thị trong cửa sổ phụ: RSI14, EMA9(RSI), WMA45(RSI)         |
-//| Hiển thị trên chart chính: EMA200 + mũi tên đánh dấu giao cắt   |
+//| Trên chart chính: mũi tên giao cắt (EMA200 chỉ tính nội bộ).     |
 //| Panel góc trên-phải: trend, giá trị RSI / EMA9 / WMA45           |
 //|                                                                  |
 //| Source code được tách thành các module trong thư mục Lib/:       |

@@ -1,7 +1,8 @@
 //+------------------------------------------------------------------+
 //| Handles.mqh                                                      |
 //| Tạo / giải phóng indicator handles (RSI, EMA9/RSI, WMA45/RSI,    |
-//| EMA200) và attach EMA200 lên main chart window.                   |
+//| EMA200). EMA200 chỉ dùng qua CopyBuffer — không ChartIndicatorAdd |
+//| (tránh ERR_CHART_INDICATOR_CANNOT_ADD trong Tester / iCustom).  |
 //+------------------------------------------------------------------+
 #ifndef RSIMOM_HANDLES_MQH
 #define RSIMOM_HANDLES_MQH
@@ -28,10 +29,6 @@ bool Handles_CreateAll()
   h_EMA200 = iMA(_Symbol, _Period, InpEMATrendPeriod, 0, MODE_EMA, PRICE_CLOSE);
   if (h_EMA200 == INVALID_HANDLE)
     { Print("[RsiMom] Không tạo được handle EMA200"); return false; }
-
-  // Gắn EMA200 lên cửa sổ chính (window 0) của chart hiện tại
-  if (!ChartIndicatorAdd(ChartID(), 0, h_EMA200))
-    PrintFormat("[RsiMom] Không thể gắn EMA200 lên chart (err=%d)", GetLastError());
 
   return true;
 }
