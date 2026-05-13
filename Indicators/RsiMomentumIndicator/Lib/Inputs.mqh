@@ -13,7 +13,7 @@ input int   InpWMA45Period  = 45;
 input int   InpEMATrendPeriod = 200;
 
 input group "Bộ lọc trend"
-input int   InpTrendConfirmBars = 2;   // số nến liên tiếp phải đóng cùng phía EMA200
+input int   InpTrendConfirmBars = 1;   // số nến liên tiếp phải đóng cùng phía EMA200
 
 input group "Bộ lọc RSI"
 input double InpRSIOverbought = 70.0;   // RSI ≥ ngưỡng này → bỏ qua tín hiệu BUY
