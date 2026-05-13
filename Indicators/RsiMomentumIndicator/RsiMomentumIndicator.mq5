@@ -1,8 +1,7 @@
 //+------------------------------------------------------------------+
 //| RsiMomentumIndicator.mq5                                         |
-//| Hiển thị trong cửa sổ phụ: RSI14, EMA9(RSI), WMA45(RSI)         |
-//| Trên chart chính: mũi tên giao cắt (EMA200 chỉ tính nội bộ).     |
-//| Panel góc trên-phải: trend, giá trị RSI / EMA9 / WMA45           |
+//| Chỉ để hiển thị + trade thủ công: cửa sổ phụ RSI/EMA9/WMA45,     |
+//| mũi tên + panel + cảnh báo entry. Không export buffer cho EA.   |
 //|                                                                  |
 //| Source code được tách thành các module trong thư mục Lib/:       |
 //|   Inputs.mqh       — input parameters                            |
@@ -14,9 +13,9 @@
 //|   Diagnostics.mqh  — log chẩn đoán lần đầu                       |
 //+------------------------------------------------------------------+
 #property copyright   "RsiMomentumIndicator"
-#property version     "1.10"
+#property version     "1.20"
 #property indicator_separate_window
-#property indicator_buffers 6
+#property indicator_buffers 3
 #property indicator_plots   3
 #property indicator_minimum 0
 #property indicator_maximum 100
@@ -67,9 +66,6 @@ int OnInit()
   SetIndexBuffer(0, buf_RSI,    INDICATOR_DATA);
   SetIndexBuffer(1, buf_EMA9,   INDICATOR_DATA);
   SetIndexBuffer(2, buf_WMA45,  INDICATOR_DATA);
-  SetIndexBuffer(3, buf_Signal, INDICATOR_CALCULATIONS); // ẩn — phục vụ EA
-  SetIndexBuffer(4, buf_EMA200, INDICATOR_CALCULATIONS); // ẩn — EMA200 cho EA
-  SetIndexBuffer(5, buf_Trend,  INDICATOR_CALCULATIONS); // ẩn — trend cho EA
 
   ArraySetAsSeries(buf_RSI,    true);
   ArraySetAsSeries(buf_EMA9,   true);
@@ -117,6 +113,14 @@ int OnCalculate(const int rates_total,
   const int minBars = InpWMA45Period + InpRSIPeriod + 5;
   if (rates_total < minBars) return 0;
 
+  // Mảng nội bộ (alert / diagnostics) — không bind buffer nên tự resize
+  ArrayResize(buf_Signal, rates_total);
+  ArrayResize(buf_EMA200, rates_total);
+  ArrayResize(buf_Trend,  rates_total);
+  ArraySetAsSeries(buf_Signal, true);
+  ArraySetAsSeries(buf_EMA200, true);
+  ArraySetAsSeries(buf_Trend,  true);
+
   // Đảm bảo các source indicator đã tính xong (quan trọng khi cold-start
   // hoặc khi thị trường đóng — không có tick để retry)
   const int rsiBars    = BarsCalculated(h_RSI);
@@ -136,7 +140,7 @@ int OnCalculate(const int rates_total,
   }
 
   // Chỉ copy số bar mà TẤT CẢ source (incl. EMA200) đã tính xong
-  // → tránh CopyBuffer EMA200 fail giữa chừng làm buf_EMA200/buf_Trend stale
+  // → tránh CopyBuffer EMA200 fail giữa chừng làm mảng nội bộ stale
   const int srcMin = MathMin(MathMin(MathMin(rsiBars, ema9Bars), wmaBars), ema200Bars);
   const int copyN  = MathMin(srcMin, rates_total);
   if (copyN < minBars) return 0;

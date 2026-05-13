@@ -1,20 +1,20 @@
 //+------------------------------------------------------------------+
 //| State.mqh                                                        |
-//| Toàn bộ biến global: indicator buffers, handles, hằng số,        |
-//| state notification. KHÔNG chứa logic — chỉ khai báo.             |
+//| Buffer plot (RSI, EMA9, WMA45) + mảng nội bộ cho alert/diag.    |
+//| KHÔNG chứa logic — chỉ khai báo.                                 |
 //+------------------------------------------------------------------+
 #ifndef RSIMOM_STATE_MQH
 #define RSIMOM_STATE_MQH
 
 //+------------------------------------------------------------------+
-//| Indicator buffers                                                |
+//| Buffers hiển thị (plot) + mảng làm việc nội bộ                  |
 //+------------------------------------------------------------------+
 double buf_RSI[];
 double buf_EMA9[];
 double buf_WMA45[];
-double buf_Signal[];   // hidden — +1 BUY, -1 SELL, 0 none
-double buf_EMA200[];   // hidden — giá trị EMA200 (cho EA hiển thị)
-double buf_Trend[];    // hidden — +1 UP, -1 DOWN, 0 RANGE/SWITCHING
+double buf_Signal[];   // nội bộ — +1 BUY, -1 SELL, 0 none (Alerts)
+double buf_EMA200[];   // nội bộ — snapshot EMA200 theo bar (diag)
+double buf_Trend[];    // nội bộ — +1 UP, -1 DOWN, 0 RANGE (diag)
 
 //+------------------------------------------------------------------+
 //| Indicator handles                                                |

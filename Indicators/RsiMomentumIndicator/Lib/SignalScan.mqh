@@ -12,8 +12,8 @@
 #define RSIMOM_SIGNALSCAN_MQH
 
 //+------------------------------------------------------------------+
-//| Quét signal từ bar `barsToScan` về bar 1, ghi vào buf_Signal /    |
-//| buf_Trend / buf_EMA200 và tạo OBJ_ARROW khi có tín hiệu hợp lệ.   |
+//| Quét signal từ bar `barsToScan` về bar 1, ghi mảng nội bộ         |
+//| buf_Signal / buf_Trend / buf_EMA200 + vẽ OBJ_ARROW.              |
 //+------------------------------------------------------------------+
 void SignalScan_Run(const int barsToScan,
                     const int rates_total,
@@ -118,7 +118,7 @@ void SignalScan_Run(const int barsToScan,
 
     if (validBuy)
     {
-      buf_Signal[i] = 1.0; // ghi tín hiệu cho EA đọc qua iCustom
+      buf_Signal[i] = 1.0;
 
       // Mũi tên lên (↑) đặt dưới đáy nến — tín hiệu BUY trong uptrend
       // ANCHOR_TOP: điểm anchor là đỉnh icon → arrow nằm xuôi xuống dưới price
@@ -138,7 +138,7 @@ void SignalScan_Run(const int barsToScan,
     }
     else // validSell
     {
-      buf_Signal[i] = -1.0; // ghi tín hiệu cho EA đọc qua iCustom
+      buf_Signal[i] = -1.0;
 
       // Mũi tên xuống (↓) đặt trên đỉnh nến — tín hiệu SELL trong downtrend
       // ANCHOR_BOTTOM: điểm anchor là đáy icon → arrow nằm ngược lên trên price

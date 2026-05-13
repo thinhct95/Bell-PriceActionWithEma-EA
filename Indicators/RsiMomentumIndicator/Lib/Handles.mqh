@@ -1,8 +1,7 @@
 //+------------------------------------------------------------------+
 //| Handles.mqh                                                      |
-//| Tạo / giải phóng indicator handles (RSI, EMA9/RSI, WMA45/RSI,    |
-//| EMA200). EMA200 chỉ dùng qua CopyBuffer — không ChartIndicatorAdd |
-//| (tránh ERR_CHART_INDICATOR_CANNOT_ADD trong Tester / iCustom).  |
+//| Tạo / giải phóng handle RSI, EMA9/WMA45 trên RSI, EMA200(close). |
+//| EMA200 chỉ CopyBuffer — không ChartIndicatorAdd.               |
 //+------------------------------------------------------------------+
 #ifndef RSIMOM_HANDLES_MQH
 #define RSIMOM_HANDLES_MQH
