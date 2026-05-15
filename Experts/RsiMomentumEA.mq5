@@ -4,7 +4,9 @@
 //| RSI + EMA9/WMA45 trên RSI + EMA200(close), signal, mũi tên, panel |
 //+------------------------------------------------------------------+
 #property copyright "RsiMomentumEA"
-#property version   "3.01"
+#property version   "3.13"
+
+#include <Trade/Trade.mqh>
 
 //--- Input (khớp Indicators/RsiMomentumIndicator/Lib/Inputs.mqh)
 input group "Chỉ báo"
@@ -31,6 +33,8 @@ input int    InpArrowSize         = 1;
 
 input group "Panel thông tin"
 input bool   InpShowPanel         = true;
+input color  InpPanelColorEMA9   = clrGold;        // chữ giá trị EMA9 (vàng)
+input color  InpPanelColorWMA45  = clrDodgerBlue; // chữ giá trị WMA45 (xanh dương)
 
 input group "Cảnh báo / Notification (khi có entry mới)"
 input bool   InpAlertPush         = true;
@@ -40,6 +44,20 @@ input string InpSoundBuy          = "alert.wav";
 input string InpSoundSell         = "alert2.wav";
 input bool   InpAlertEmail        = false;
 input bool   InpAlertOnBar0       = false;
+
+input group "Giao dịch tự động"
+input bool   InpTradeEnabled      = true;
+input ulong  InpMagic             = 202602;
+input double InpRiskPercent       = 1.0;   // % balance mất nếu SL khớp (theo lot tính từ SL)
+input double InpRewardRiskRatio   = 1.1;   // R:R — khoảng TP = tỷ lệ này × khoảng SL (ví dụ 1.5 = 1:1.5)
+input int    InpSwingMaxBars      = 30;   // quét swing pivot / fallback min-max
+input int    InpSlippagePoints    = 30;
+input bool   InpOnePositionFlat   = true;
+
+input group "Thống kê (góc dưới-trái chart)"
+input bool   InpShowStats          = true;
+input int    InpStatFontSize       = 9;
+input color  InpStatColor          = clrSilver;
 
 //--- Buffers & state (trùng State.mqh)
 double buf_RSI[];
@@ -61,12 +79,44 @@ const string LBL_RSI_VAL  = OBJ_PREFIX + "rsi";
 const string LBL_EMA9VAL  = OBJ_PREFIX + "ema9";
 const string LBL_WMA45VAL = OBJ_PREFIX + "wma45";
 
+const string STAT_PREFIX = "RsiMomEA_ST_";
+const string STAT_L1     = STAT_PREFIX + "line1";
+const string STAT_L2     = STAT_PREFIX + "line2";
+const string STAT_L3     = STAT_PREFIX + "line3";
+// Khoảng cách dọc giữa các dòng thống kê (pixel): bước = fontSize + STAT_LINE_PAD
+const int    STAT_Y_ANCHOR = 18;
+const int    STAT_LINE_PAD = 16;
+
+long   g_statExitDeals = 0;
+long   g_statSL        = 0;
+long   g_statTP        = 0;
+long   g_statOther     = 0;
+long   g_statWins      = 0;
+double g_statSumProfit = 0.0;
+
 datetime g_lastAlertBuyBar  = 0;
 datetime g_lastAlertSellBar = 0;
 bool     g_firstCalc        = true;
 static int g_prevCalculated = 0;
 
+datetime g_tradeBarAnchor = 0;
+
+CTrade g_trade;
+
 long ActChart() { return ChartID(); }
+
+void   SetTradeFillingFromSymbol();
+bool   NearestSwingSlTp(const bool isBuy, const double entry, const int dig, double &sl, double &tp);
+bool   StopsValid(const bool isBuy, const double price, const double sl, const double tp);
+int    CountMyMagicPositions();
+double NormalizeLots(double v);
+double VolumeForRiskPercent(const bool isBuy, const double entryRef, const double slPrice);
+void   TradeTryOnBarOpen(const int calcRet);
+void   Stats_CreateObjects();
+void   Stats_UpdateDisplay();
+void   OnTradeTransaction(const MqlTradeTransaction &trans,
+                          const MqlTradeRequest &request,
+                          const MqlTradeResult &result);
 
 //+------------------------------------------------------------------+
 bool Handles_CreateAll()
@@ -143,8 +193,8 @@ void Panel_CreateAll()
   CreateLabel(LBL_TITLE,    "─ RSI MOMENTUM (EA) ─", clrWhite,        10, 14, 10);
   CreateLabel(LBL_TREND,    "Trend : ---",         clrSilver,        10, 34, 9);
   CreateLabel(LBL_RSI_VAL,  "RSI   : ---",         clrMediumOrchid,  10, 51, 9);
-  CreateLabel(LBL_EMA9VAL,  "EMA9  : ---",         clrDarkOrange,    10, 68, 9);
-  CreateLabel(LBL_WMA45VAL, "WMA45 : ---",         clrDodgerBlue,    10, 85, 9);
+  CreateLabel(LBL_EMA9VAL,  "EMA9  : ---",         InpPanelColorEMA9,   10, 68, 9);
+  CreateLabel(LBL_WMA45VAL, "WMA45 : ---",         InpPanelColorWMA45,  10, 85, 9);
 }
 
 //+------------------------------------------------------------------+
@@ -173,8 +223,8 @@ void Panel_Update(const double &closeArr[], const double &ema200Arr[],
 
   UpdateLabel(LBL_TREND,    trendTxt, trendClr);
   UpdateLabel(LBL_RSI_VAL,  StringFormat("RSI   : %6.2f", buf_RSI[1]),  clrMediumOrchid);
-  UpdateLabel(LBL_EMA9VAL,  StringFormat("EMA9  : %6.2f", buf_EMA9[1]), clrDarkOrange);
-  UpdateLabel(LBL_WMA45VAL, StringFormat("WMA45 : %6.2f", buf_WMA45[1]), clrDodgerBlue);
+  UpdateLabel(LBL_EMA9VAL,  StringFormat("EMA9  : %6.2f", buf_EMA9[1]), InpPanelColorEMA9);
+  UpdateLabel(LBL_WMA45VAL, StringFormat("WMA45 : %6.2f", buf_WMA45[1]), InpPanelColorWMA45);
 }
 
 //+------------------------------------------------------------------+
@@ -462,12 +512,26 @@ int OnInit()
   g_lastAlertSellBar = 0;
   g_firstCalc        = true;
   g_prevCalculated   = 0;
+  g_tradeBarAnchor   = iTime(_Symbol, _Period, 0);
+
+  g_statExitDeals = 0;
+  g_statSL        = 0;
+  g_statTP        = 0;
+  g_statOther     = 0;
+  g_statWins      = 0;
+  g_statSumProfit = 0.0;
+
+  g_trade.SetExpertMagicNumber(InpMagic);
+  g_trade.SetDeviationInPoints(InpSlippagePoints);
+  SetTradeFillingFromSymbol();
 
   if (!Handles_CreateAll())
     return INIT_FAILED;
 
   Panel_CreateAll();
-  Print("[RsiMomEA] Init OK — logic nhúng, prefix object: ", OBJ_PREFIX);
+  Stats_CreateObjects();
+  Stats_UpdateDisplay();
+  Print("[RsiMomEA] Init OK — trade=", InpTradeEnabled ? "on" : "off", " risk%=", InpRiskPercent);
   return INIT_SUCCEEDED;
 }
 
@@ -476,6 +540,7 @@ void OnDeinit(const int reason)
 {
   Handles_ReleaseAll();
   ObjectsDeleteAll(ActChart(), OBJ_PREFIX);
+  ObjectsDeleteAll(ActChart(), STAT_PREFIX);
   ChartRedraw(ActChart());
 }
 
@@ -486,6 +551,349 @@ void OnTick()
   const int ret = RsiMomentum_OnCalculate(rates_total, g_prevCalculated);
   if (ret != 0)
     g_prevCalculated = ret;
+
+  const datetime t0 = iTime(_Symbol, _Period, 0);
+  if (t0 != 0 && t0 != g_tradeBarAnchor)
+  {
+    g_tradeBarAnchor = t0;
+    TradeTryOnBarOpen(ret);
+  }
+}
+
+//+------------------------------------------------------------------+
+void TradeTryOnBarOpen(const int calcRet)
+{
+  if (!InpTradeEnabled)
+    return;
+  if (!MQLInfoInteger(MQL_TESTER) && !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+    return;
+  if (calcRet <= 0)
+    return;
+  if (ArraySize(buf_Signal) < 2)
+    return;
+
+  const double s = buf_Signal[1];
+  if (s > -0.5 && s < 0.5)
+    return;
+
+  const bool isBuy = (s > 0.5);
+
+  if (InpOnePositionFlat && CountMyMagicPositions() > 0)
+    return;
+
+  MqlTick tk;
+  if (!SymbolInfoTick(_Symbol, tk))
+    return;
+
+  const int    dig   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+  const double entry = isBuy ? tk.ask : tk.bid;
+  double       sl = 0.0, tp = 0.0;
+
+  if (!NearestSwingSlTp(isBuy, entry, dig, sl, tp))
+  {
+    Print("[RsiMomEA] Trade skip: SL/TP swing không hợp lệ");
+    return;
+  }
+  if (!StopsValid(isBuy, entry, sl, tp))
+  {
+    Print("[RsiMomEA] Trade skip: STOPS_LEVEL / FREEZE");
+    return;
+  }
+
+  const double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+  const double riskMoney = balance * (InpRiskPercent / 100.0);
+  double       vol       = VolumeForRiskPercent(isBuy, entry, sl);
+  vol = NormalizeLots(vol);
+  if (vol <= 0.0)
+  {
+    Print("[RsiMomEA] Trade skip: volume=0");
+    return;
+  }
+
+  const bool ok = isBuy
+                  ? g_trade.Buy(vol, _Symbol, tk.ask, sl, tp, "RsiMom BUY")
+                  : g_trade.Sell(vol, _Symbol, tk.bid, sl, tp, "RsiMom SELL");
+
+  if (!ok)
+    Print("[RsiMomEA] Order fail ", g_trade.ResultRetcode(), " ", g_trade.ResultComment());
+  else
+    Print("[RsiMomEA] Order OK #", g_trade.ResultOrder(), " ", isBuy ? "BUY" : "SELL",
+          " vol=", vol, " SL=", DoubleToString(sl, dig), " TP=", DoubleToString(tp, dig));
+}
+
+//+------------------------------------------------------------------+
+bool NearestSwingSlTp(const bool isBuy, const double entry, const int dig, double &sl, double &tp)
+{
+  const double rr = MathMax(0.01, InpRewardRiskRatio);
+  const int mx = MathMax(5, InpSwingMaxBars);
+  const int spr = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+  const double buf = spr * _Point;
+
+  if (isBuy)
+  {
+    double pivotLow = 0.0;
+    bool   found = false;
+    for (int i = 2; i <= mx; i++)
+    {
+      const double L = iLow(_Symbol, _Period, i);
+      if (L < iLow(_Symbol, _Period, i - 1) && L < iLow(_Symbol, _Period, i + 1))
+      {
+        pivotLow = L;
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+    {
+      pivotLow = iLow(_Symbol, _Period, 2);
+      for (int j = 3; j <= mx; j++)
+        pivotLow = MathMin(pivotLow, iLow(_Symbol, _Period, j));
+    }
+    sl = NormalizeDouble(pivotLow - buf, dig);
+    const double risk = entry - sl;
+    if (risk <= _Point * 2)
+      return false;
+    tp = NormalizeDouble(entry + risk * rr, dig);
+  }
+  else
+  {
+    double pivotHigh = 0.0;
+    bool   found = false;
+    for (int i = 2; i <= mx; i++)
+    {
+      const double H = iHigh(_Symbol, _Period, i);
+      if (H > iHigh(_Symbol, _Period, i - 1) && H > iHigh(_Symbol, _Period, i + 1))
+      {
+        pivotHigh = H;
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+    {
+      pivotHigh = iHigh(_Symbol, _Period, 2);
+      for (int j = 3; j <= mx; j++)
+        pivotHigh = MathMax(pivotHigh, iHigh(_Symbol, _Period, j));
+    }
+    sl = NormalizeDouble(pivotHigh + buf, dig);
+    const double risk = sl - entry;
+    if (risk <= _Point * 2)
+      return false;
+    tp = NormalizeDouble(entry - risk * rr, dig);
+  }
+  return true;
+}
+
+//+------------------------------------------------------------------+
+bool StopsValid(const bool isBuy, const double price, const double sl, const double tp)
+{
+  const int    stops  = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+  const int    freeze = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+  const double md = (stops > freeze ? stops : freeze) * _Point;
+  if (md <= 0.0)
+    return true;
+
+  if (isBuy)
+  {
+    if (price - sl < md - _Point) return false;
+    if (tp - price < md - _Point) return false;
+  }
+  else
+  {
+    if (sl - price < md - _Point) return false;
+    if (price - tp < md - _Point) return false;
+  }
+  return true;
+}
+
+//+------------------------------------------------------------------+
+int CountMyMagicPositions()
+{
+  int n = 0;
+  for (int i = PositionsTotal() - 1; i >= 0; i--)
+  {
+    if (!PositionGetTicket(i))
+      continue;
+    if (PositionGetString(POSITION_SYMBOL) != _Symbol)
+      continue;
+    if ((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+      continue;
+    n++;
+  }
+  return n;
+}
+
+//+------------------------------------------------------------------+
+double VolumeForRiskPercent(const bool isBuy, const double entryRef, const double slPrice)
+{
+  if (MathAbs(entryRef - slPrice) < _Point)
+    return 0.0;
+
+  const double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+  const double riskMoney = balance * (InpRiskPercent / 100.0);
+
+  double profit = 0.0;
+  if (!OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,
+                       _Symbol, 1.0, entryRef, slPrice, profit))
+    return 0.0;
+
+  const double lossPerLot = MathAbs(profit);
+  if (lossPerLot < DBL_EPSILON)
+    return 0.0;
+
+  return riskMoney / lossPerLot;
+}
+
+//+------------------------------------------------------------------+
+double NormalizeLots(double v)
+{
+  const double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+  const double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+  const double vmax = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+  if (step <= 0.0)
+    return 0.0;
+  v = MathFloor(v / step) * step;
+  if (v < vmin - 1e-12)
+    return 0.0;
+  if (v > vmax)
+    v = vmax;
+  return NormalizeDouble(v, 8);
+}
+
+//+------------------------------------------------------------------+
+void SetTradeFillingFromSymbol()
+{
+  const long fm = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+  if ((fm & SYMBOL_FILLING_IOC) != 0)
+    g_trade.SetTypeFilling(ORDER_FILLING_IOC);
+  else if ((fm & SYMBOL_FILLING_FOK) != 0)
+    g_trade.SetTypeFilling(ORDER_FILLING_FOK);
+  else
+    g_trade.SetTypeFilling(ORDER_FILLING_RETURN);
+}
+
+//+------------------------------------------------------------------+
+void Stats_CreateObjects()
+{
+  const long ch = ActChart();
+  const int  fs = MathMax(7, InpStatFontSize);
+  const int  step = fs + STAT_LINE_PAD;
+
+  for (int k = 0; k < 3; k++)
+  {
+    const string name = (k == 0) ? STAT_L1 : ((k == 1) ? STAT_L2 : STAT_L3);
+    if (ObjectFind(ch, name) >= 0)
+      continue;
+    ObjectCreate(ch, name, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(ch, name, OBJPROP_CORNER,      CORNER_LEFT_LOWER);
+    ObjectSetInteger(ch, name, OBJPROP_XDISTANCE,   8);
+    ObjectSetInteger(ch, name, OBJPROP_YDISTANCE,   STAT_Y_ANCHOR + k * step);
+    ObjectSetInteger(ch, name, OBJPROP_FONTSIZE,    fs);
+    ObjectSetString (ch, name, OBJPROP_FONT,      "Consolas");
+    ObjectSetInteger(ch, name, OBJPROP_COLOR,       InpStatColor);
+    ObjectSetInteger(ch, name, OBJPROP_BACK,      false);
+    ObjectSetInteger(ch, name, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(ch, name, OBJPROP_HIDDEN,    false);
+    ObjectSetString (ch, name, OBJPROP_TEXT,      "");
+  }
+}
+
+//+------------------------------------------------------------------+
+void Stats_UpdateDisplay()
+{
+  const long ch = ActChart();
+
+  if (ObjectFind(ch, STAT_L1) < 0)
+    return;
+
+  if (!InpShowStats)
+  {
+    ObjectSetString(ch, STAT_L1, OBJPROP_TEXT, "");
+    ObjectSetString(ch, STAT_L2, OBJPROP_TEXT, "");
+    ObjectSetString(ch, STAT_L3, OBJPROP_TEXT, "");
+    ChartRedraw(ch);
+    return;
+  }
+
+  const int fs   = MathMax(7, InpStatFontSize);
+  const int step = fs + STAT_LINE_PAD;
+  for (int k = 0; k < 3; k++)
+  {
+    const string nm = (k == 0) ? STAT_L1 : ((k == 1) ? STAT_L2 : STAT_L3);
+    ObjectSetInteger(ch, nm, OBJPROP_FONTSIZE,  fs);
+    ObjectSetInteger(ch, nm, OBJPROP_YDISTANCE, STAT_Y_ANCHOR + k * step);
+  }
+
+  string line1 = StringFormat("Total: %I64d | SL %I64d | TP %I64d",
+                              g_statExitDeals, g_statSL, g_statTP);
+  if (g_statOther > 0)
+    line1 += StringFormat(" | Other %I64d", g_statOther);
+
+  double winrate = 0.0;
+  if (g_statExitDeals > 0)
+    winrate = 100.0 * (double)g_statWins / (double)g_statExitDeals;
+
+  const string cur = AccountInfoString(ACCOUNT_CURRENCY);
+  double avg = 0.0;
+  if (g_statExitDeals > 0)
+    avg = g_statSumProfit / (double)g_statExitDeals;
+
+  const string line2 = StringFormat("Winrate: %.1f%%", winrate);
+  const string line3 = StringFormat("Average Profit / trade: %s %s",
+                                     DoubleToString(avg, 2), cur);
+
+  ObjectSetString (ch, STAT_L1, OBJPROP_TEXT, line1);
+  ObjectSetInteger(ch, STAT_L1, OBJPROP_COLOR, InpStatColor);
+  ObjectSetString (ch, STAT_L2, OBJPROP_TEXT, line2);
+  ObjectSetInteger(ch, STAT_L2, OBJPROP_COLOR, InpStatColor);
+  ObjectSetString (ch, STAT_L3, OBJPROP_TEXT, line3);
+  ObjectSetInteger(ch, STAT_L3, OBJPROP_COLOR, InpStatColor);
+  ChartRedraw(ch);
+}
+
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+  if (trans.type != TRADE_TRANSACTION_DEAL_ADD)
+    return;
+
+  const ulong dealTicket = trans.deal;
+  if (dealTicket == 0)
+    return;
+
+  if (!HistoryDealSelect(dealTicket))
+    return;
+
+  if (HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol)
+    return;
+  if ((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic)
+    return;
+
+  const long entry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+  if (entry != DEAL_ENTRY_OUT)
+    return;
+
+  const double profit = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                       + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+                       + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+
+  const ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(dealTicket, DEAL_REASON);
+
+  g_statExitDeals++;
+  g_statSumProfit += profit;
+  if (profit > 0.0)
+    g_statWins++;
+
+  if (reason == DEAL_REASON_SL)
+    g_statSL++;
+  else if (reason == DEAL_REASON_TP)
+    g_statTP++;
+  else
+    g_statOther++;
+
+  Stats_UpdateDisplay();
 }
 
 //+------------------------------------------------------------------+
