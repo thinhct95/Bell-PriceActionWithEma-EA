@@ -3,8 +3,8 @@
 //| Big/Small structure + State machine (NO_TREND → PULLBACK → …)    |
 //+------------------------------------------------------------------+
 #property copyright "MyICT"
-#property version   "1.04"
-#property description "ICT states: pullback discount/premium | limit/trade tracking"
+#property version   "1.05"
+#property description "ICT trigger: 2L/2H small + discount/premium | R% | stats"
 
 #include <Trade/Trade.mqh>
 
@@ -37,9 +37,23 @@ input group "══ Discount / Premium (sóng Big) ══"
 input double          InpZoneEqPct         = 50.0;   // % từ đáy/đỉnh sóng → equilibrium
 input double          InpZoneTolPoints     = 5.0;    // dung sai (point)
 
-input group "══ Trade (limit — trigger bổ sung sau) ══"
+input group "══ Trigger & quản lý lệnh ══"
+input bool            InpTradeEnabled      = true;
 input ulong           InpMagic             = 20260620;
-input bool            InpAutoLimitOnZone   = false; // true: đặt limit khi WAITING_TRIGGER
+input double          InpRiskPercent       = 1.0;    // 1R = % balance
+input int             InpATRPeriod         = 14;
+input double          InpSlAtrMult         = 0.25;   // SL dưới/trên 2 đáy/đỉnh small + ATR×
+input double          InpTpAtrBuffer       = 0.25;   // TP trước H0/L0 big −/+ ATR×
+input double          InpDoubleTolAtrMult  = 0.15;   // 2 đáy/đỉnh “bằng nhau” (×ATR)
+input int             InpSlippagePoints    = 30;
+input bool            InpOnePosition       = true;
+
+input group "══ Thống kê (góc dưới-trái) ══"
+input bool            InpShowStats         = true;
+input int             InpStatFontSize      = 9;
+input int             InpStatCornerX       = 8;
+input int             InpStatCornerY       = 8;
+input color           InpStatColor         = clrSilver;
 
 input group "══ Hiển thị chart ══"
 input bool            InpDrawSwings       = true;
@@ -89,7 +103,10 @@ struct BigWaveZone
    double premiumBottom; // sell: giá >= premiumBottom = trong premium
 };
 
-const string OBJ_PFX = "MYICT_";
+const string OBJ_CH_PFX  = "MYICTC_";
+const string STAT_PREFIX = "MYICTS_";
+const string STAT_LINE1  = STAT_PREFIX + "L1";
+const string STAT_LINE2  = STAT_PREFIX + "L2";
 
 TrendSnapshot   g_big;
 TrendSnapshot   g_small;
@@ -98,6 +115,12 @@ ENUM_ICT_STATE  g_state = ICT_STATE_NO_TREND;
 ENUM_ICT_STATE  g_statePrev = ICT_STATE_NO_TREND;
 bool            g_biasBuy = false;
 datetime        g_lastBar = 0;
+datetime        g_lastTriggerBar = 0;
+
+int             g_hAtr = INVALID_HANDLE;
+long            g_statWins  = 0;
+long            g_statLoss = 0;
+long            g_statTotal = 0;
 
 CTrade          g_trade;
 
@@ -129,6 +152,257 @@ void DeleteObjectsByPrefix(const string prefix)
       if(StringFind(name, prefix) == 0)
          ObjectDelete(ch, name);
    }
+}
+
+//+------------------------------------------------------------------+
+double GetAtr(const string sym, const ENUM_TIMEFRAMES tf, const int shift)
+{
+   if(g_hAtr == INVALID_HANDLE)
+      return 0.0;
+   double b[];
+   ArraySetAsSeries(b, true);
+   if(CopyBuffer(g_hAtr, 0, shift, 1, b) < 1)
+      return 0.0;
+   return b[0];
+}
+
+//+------------------------------------------------------------------+
+double DoubleTolerance(const string sym, const double atr)
+{
+   const double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   return MathMax(pt * 10.0, atr * InpDoubleTolAtrMult);
+}
+
+//+------------------------------------------------------------------+
+bool IsSmallDoubleBottom(const double l0, const double l1, const double tol)
+{
+   if(MathAbs(l0 - l1) <= tol)
+      return true;
+   if(l0 > l1 + _Point)
+      return true;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool IsSmallDoubleTop(const double h0, const double h1, const double tol)
+{
+   if(MathAbs(h0 - h1) <= tol)
+      return true;
+   if(h0 < h1 - _Point)
+      return true;
+   return false;
+}
+
+//+------------------------------------------------------------------+
+bool TriggerPatternOk()
+{
+   const double atr = GetAtr(_Symbol, ChartTf(), 1);
+   if(atr <= 0.0)
+      return false;
+   const double tol = DoubleTolerance(_Symbol, atr);
+
+   if(g_biasBuy)
+   {
+      if(!g_small.hasL0 || !g_small.hasL1)
+         return false;
+      return IsSmallDoubleBottom(g_small.l0.price, g_small.l1.price, tol);
+   }
+
+   if(!g_small.hasH0 || !g_small.hasH1)
+      return false;
+   return IsSmallDoubleTop(g_small.h0.price, g_small.h1.price, tol);
+}
+
+//+------------------------------------------------------------------+
+double NormalizeVolume(const string sym, double v)
+{
+   const double step = SymbolInfoDouble(sym, SYMBOL_VOLUME_STEP);
+   const double vmin = SymbolInfoDouble(sym, SYMBOL_VOLUME_MIN);
+   const double vmax = SymbolInfoDouble(sym, SYMBOL_VOLUME_MAX);
+   if(step <= 0.0)
+      return 0.0;
+   v = MathFloor(v / step) * step;
+   if(v < vmin - 1e-12)
+      return 0.0;
+   if(v > vmax)
+      v = vmax;
+   return NormalizeDouble(v, 8);
+}
+
+//+------------------------------------------------------------------+
+double VolumeForRisk(const string sym, const bool isBuy,
+                     const double entry, const double sl)
+{
+   const double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   if(MathAbs(entry - sl) < pt)
+      return 0.0;
+   const double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPercent / 100.0);
+   double profit = 0.0;
+   if(!OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL,
+                       sym, 1.0, entry, sl, profit))
+      return 0.0;
+   const double lossPerLot = MathAbs(profit);
+   if(lossPerLot < DBL_EPSILON)
+      return 0.0;
+   return riskMoney / lossPerLot;
+}
+
+//+------------------------------------------------------------------+
+bool StopsValid(const string sym, const bool isBuy,
+                const double entry, const double sl, const double tp)
+{
+   const double pt = SymbolInfoDouble(sym, SYMBOL_POINT);
+   const int stops = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
+   const int freeze = (int)SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
+   const double md = MathMax(stops, freeze) * pt;
+   if(md <= 0.0)
+      return true;
+   if(isBuy)
+   {
+      if(entry - sl < md - pt) return false;
+      if(tp - entry < md - pt) return false;
+   }
+   else
+   {
+      if(sl - entry < md - pt) return false;
+      if(entry - tp < md - pt) return false;
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
+bool CalcTriggerStops(const bool isBuy, const double atr,
+                      double &sl, double &tp, string &reason)
+{
+   const int dig = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+   const double buf = atr * InpSlAtrMult;
+   const double tpBuf = atr * InpTpAtrBuffer;
+
+   if(isBuy)
+   {
+      if(!g_small.hasL0 || !g_small.hasL1 || !g_big.hasH0)
+      {
+         reason = "thiếu swing small L hoặc Big H0";
+         return false;
+      }
+      const double low2 = MathMin(g_small.l0.price, g_small.l1.price);
+      sl = NormalizeDouble(low2 - buf, dig);
+      tp = NormalizeDouble(g_big.h0.price - tpBuf, dig);
+      reason = "2L small + TP trước Big H0";
+   }
+   else
+   {
+      if(!g_small.hasH0 || !g_small.hasH1 || !g_big.hasL0)
+      {
+         reason = "thiếu swing small H hoặc Big L0";
+         return false;
+      }
+      const double high2 = MathMax(g_small.h0.price, g_small.h1.price);
+      sl = NormalizeDouble(high2 + buf, dig);
+      tp = NormalizeDouble(g_big.l0.price + tpBuf, dig);
+      reason = "2H small + TP trước Big L0";
+   }
+   return true;
+}
+
+//+------------------------------------------------------------------+
+bool TryExecuteTrigger(const string sym, const ENUM_TIMEFRAMES tf)
+{
+   if(!InpTradeEnabled)
+      return false;
+   if(g_state != ICT_STATE_WAITING_TRIGGER)
+      return false;
+   if(InpOnePosition && HasMyPosition(sym))
+      return false;
+
+   const datetime tBar = iTime(sym, tf, 1);
+   if(tBar == 0 || tBar == g_lastTriggerBar)
+      return false;
+
+   const double refClose = iClose(sym, tf, 1);
+   if(g_biasBuy)
+   {
+      if(!PriceInDiscount(refClose))
+         return false;
+   }
+   else
+   {
+      if(!PriceInPremium(refClose))
+         return false;
+   }
+
+   if(!TriggerPatternOk())
+      return false;
+
+   const double atr = GetAtr(sym, tf, 1);
+   if(atr <= 0.0)
+      return false;
+
+   double sl = 0.0, tp = 0.0;
+   string reason = "";
+   if(!CalcTriggerStops(g_biasBuy, atr, sl, tp, reason))
+   {
+      Dbg("Trigger skip: " + reason);
+      return false;
+   }
+
+   MqlTick tk;
+   if(!SymbolInfoTick(sym, tk))
+      return false;
+
+   const int dig = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
+   const double entry = NormalizeDouble(g_biasBuy ? tk.ask : tk.bid, dig);
+
+   if(g_biasBuy)
+   {
+      if(tp <= entry || sl >= entry)
+      {
+         Dbg("Trigger skip Buy: TP/SL không hợp lệ");
+         return false;
+      }
+   }
+   else
+   {
+      if(tp >= entry || sl <= entry)
+      {
+         Dbg("Trigger skip Sell: TP/SL không hợp lệ");
+         return false;
+      }
+   }
+
+   if(!StopsValid(sym, g_biasBuy, entry, sl, tp))
+   {
+      Dbg("Trigger skip: STOPS_LEVEL");
+      return false;
+   }
+
+   double vol = NormalizeVolume(sym, VolumeForRisk(sym, g_biasBuy, entry, sl));
+   if(vol <= 0.0)
+   {
+      Dbg("Trigger skip: volume=0");
+      return false;
+   }
+
+   g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(InpSlippagePoints);
+   SetTradeFilling();
+
+   const string cmt = g_biasBuy ? "MyICT_BUY" : "MyICT_SELL";
+   const bool ok = g_biasBuy
+                   ? g_trade.Buy(vol, sym, 0.0, sl, tp, cmt)
+                   : g_trade.Sell(vol, sym, 0.0, sl, tp, cmt);
+
+   if(!ok)
+   {
+      Print("[MyICT] Trigger fail ", g_trade.ResultRetcode(), " ", g_trade.ResultComment());
+      return false;
+   }
+
+   g_lastTriggerBar = tBar;
+   g_state = ICT_STATE_ON_TRADE;
+   PrintFormat("[MyICT] TRIGGER %s | %s | vol=%.2f entry=%.5f SL=%.5f TP=%.5f",
+               cmt, reason, vol, entry, sl, tp);
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -417,32 +691,6 @@ void SetTradeFilling()
 }
 
 //+------------------------------------------------------------------+
-// Placeholder: trigger chi tiết sẽ bổ sung — tạm đặt limit tại equilibrium
-bool TryPlaceLimitFromState(const string sym)
-{
-   if(!InpAutoLimitOnZone || g_state != ICT_STATE_WAITING_TRIGGER)
-      return false;
-   if(!g_zone.valid || HasMyPosition(sym) || HasMyPendingLimit(sym))
-      return false;
-
-   const int dig = (int)SymbolInfoInteger(sym, SYMBOL_DIGITS);
-   const double px = NormalizeDouble(g_zone.equilibrium, dig);
-
-   g_trade.SetExpertMagicNumber(InpMagic);
-   SetTradeFilling();
-
-   bool ok = false;
-   if(g_biasBuy)
-      ok = g_trade.BuyLimit(0.01, sym, px, 0.0, 0.0, ORDER_TIME_GTC, 0, "MyICT limit buy");
-   else
-      ok = g_trade.SellLimit(0.01, sym, px, 0.0, 0.0, ORDER_TIME_GTC, 0, "MyICT limit sell");
-
-   if(ok)
-      Dbg("Đặt limit tại equilibrium (placeholder)");
-   return ok;
-}
-
-//+------------------------------------------------------------------+
 ENUM_ICT_STATE ComputeStructureState(const string sym, const ENUM_TIMEFRAMES tf)
 {
    if(!BigTrendIsClear())
@@ -499,7 +747,7 @@ void UpdateStateMachine(const string sym, const ENUM_TIMEFRAMES tf)
    g_state = ComputeStructureState(sym, tf);
 
    if(g_state == ICT_STATE_WAITING_TRIGGER)
-      TryPlaceLimitFromState(sym);
+      TryExecuteTrigger(sym, tf);
 
    if(g_state != g_statePrev && InpDebug)
       Dbg(StringFormat("State %s → %s", StateText(g_statePrev), StateText(g_state)));
@@ -511,8 +759,8 @@ void DrawArrowTag(const string tag, const datetime t, const double price,
                   const int width)
 {
    const long ch = ActChart();
-   const string arr = OBJ_PFX + tag + "_AR";
-   const string txt = OBJ_PFX + tag + "_TX";
+   const string arr = OBJ_CH_PFX + tag + "_AR";
+   const string txt = OBJ_CH_PFX + tag + "_TX";
 
    if(ObjectFind(ch, arr) < 0)
       ObjectCreate(ch, arr, OBJ_ARROW, 0, t, price);
@@ -622,10 +870,10 @@ void DrawLayer(const string tag, const TrendSnapshot &snap,
    if(!InpDrawTrendLines)
       return;
    if(snap.hasH0 && snap.hasH1)
-      DrawSegLine(OBJ_PFX + tag + "_LNH", snap.h1.time, snap.h1.price,
+      DrawSegLine(OBJ_CH_PFX + tag + "_LNH", snap.h1.time, snap.h1.price,
                   snap.h0.time, snap.h0.price, clrHi, lineWidth);
    if(snap.hasL0 && snap.hasL1)
-      DrawSegLine(OBJ_PFX + tag + "_LNL", snap.l1.time, snap.l1.price,
+      DrawSegLine(OBJ_CH_PFX + tag + "_LNL", snap.l1.time, snap.l1.price,
                   snap.l0.time, snap.l0.price, clrLo, lineWidth);
 }
 
@@ -647,25 +895,25 @@ void DrawZones(const string sym, const ENUM_TIMEFRAMES tf)
    const uchar premAlpha = (activePullback && !g_biasBuy)
                            ? InpZoneActiveAlpha : InpZoneFillAlpha;
 
-   DrawZoneRect(OBJ_PFX + "Z_DISC", t1, t2,
+   DrawZoneRect(OBJ_CH_PFX + "Z_DISC", t1, t2,
                 g_zone.discountTop, g_zone.waveLow,
                 InpClrDiscount, discAlpha,
                 "Discount — nửa dưới sóng Big (Buy)");
 
-   DrawZoneRect(OBJ_PFX + "Z_PREM", t1, t2,
+   DrawZoneRect(OBJ_CH_PFX + "Z_PREM", t1, t2,
                 g_zone.waveHigh, g_zone.premiumBottom,
                 InpClrPremium, premAlpha,
                 "Premium — nửa trên sóng Big (Sell)");
 
-   DrawSegLine(OBJ_PFX + "Z_EQ", t1, g_zone.equilibrium, t2, g_zone.equilibrium,
+   DrawSegLine(OBJ_CH_PFX + "Z_EQ", t1, g_zone.equilibrium, t2, g_zone.equilibrium,
                clrGold, 1);
-   ObjectSetInteger(ActChart(), OBJ_PFX + "Z_EQ", OBJPROP_STYLE, STYLE_DOT);
-   ObjectSetInteger(ActChart(), OBJ_PFX + "Z_EQ", OBJPROP_WIDTH, 2);
+   ObjectSetInteger(ActChart(), OBJ_CH_PFX + "Z_EQ", OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(ActChart(), OBJ_CH_PFX + "Z_EQ", OBJPROP_WIDTH, 2);
 
    const double midDisc = (g_zone.waveLow + g_zone.discountTop) * 0.5;
    const double midPrem = (g_zone.premiumBottom + g_zone.waveHigh) * 0.5;
-   DrawZoneTag(OBJ_PFX + "LBL_DISC", t2, midDisc, " DISCOUNT ", InpClrZoneLabel);
-   DrawZoneTag(OBJ_PFX + "LBL_PREM", t2, midPrem, " PREMIUM ", InpClrZoneLabel);
+   DrawZoneTag(OBJ_CH_PFX + "LBL_DISC", t2, midDisc, " DISCOUNT ", InpClrZoneLabel);
+   DrawZoneTag(OBJ_CH_PFX + "LBL_PREM", t2, midPrem, " PREMIUM ", InpClrZoneLabel);
 }
 
 //+------------------------------------------------------------------+
@@ -695,7 +943,7 @@ string StateBlock()
 void DrawPanel(const string body)
 {
    const long ch = ActChart();
-   const string name = OBJ_PFX + "PANEL";
+   const string name = OBJ_CH_PFX + "PANEL";
 
    if(ObjectFind(ch, name) < 0)
       ObjectCreate(ch, name, OBJ_LABEL, 0, 0, 0);
@@ -712,12 +960,99 @@ void DrawPanel(const string body)
 }
 
 //+------------------------------------------------------------------+
+void StatsEnsureLabel(const long ch, const string name, const int yDist)
+{
+   if(ObjectFind(ch, name) < 0)
+      ObjectCreate(ch, name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(ch, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+   ObjectSetInteger(ch, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
+   ObjectSetInteger(ch, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(ch, name, OBJPROP_XDISTANCE, InpStatCornerX);
+   ObjectSetInteger(ch, name, OBJPROP_YDISTANCE, MathMax(0, yDist));
+   ObjectSetInteger(ch, name, OBJPROP_FONTSIZE, MathMax(7, InpStatFontSize));
+   ObjectSetString(ch, name, OBJPROP_FONT, "Consolas");
+   ObjectSetInteger(ch, name, OBJPROP_COLOR, InpStatColor);
+}
+
+//+------------------------------------------------------------------+
+void StatsUpdate()
+{
+   if(!InpShowStats)
+   {
+      ObjectDelete(ActChart(), STAT_LINE1);
+      ObjectDelete(ActChart(), STAT_LINE2);
+      return;
+   }
+
+   const long ch = ActChart();
+   const int gap = (int)(MathMax(7, InpStatFontSize) * 2.2) + 12;
+   StatsEnsureLabel(ch, STAT_LINE1, InpStatCornerY);
+   StatsEnsureLabel(ch, STAT_LINE2, InpStatCornerY + gap);
+
+   const long closed = g_statWins + g_statLoss;
+   const double wr = (closed > 0) ? 100.0 * (double)g_statWins / (double)closed : 0.0;
+
+   const string l1 = StringFormat("MyICT | 1R=%.1f%% | SL/TP ATR×", InpRiskPercent);
+   string l2;
+   if(closed > 0)
+      l2 = StringFormat("Đóng %I64d | Thắng %I64d | Thua %I64d | Winrate %.1f%%",
+                        g_statTotal, g_statWins, g_statLoss, wr);
+   else
+      l2 = StringFormat("Đóng %I64d | Thắng %I64d | Thua %I64d | Winrate: —",
+                        g_statTotal, g_statWins, g_statLoss);
+
+   ObjectSetString(ch, STAT_LINE1, OBJPROP_TEXT, l1);
+   ObjectSetString(ch, STAT_LINE2, OBJPROP_TEXT, l2);
+}
+
+//+------------------------------------------------------------------+
+void StatsCountExitDeal(const ulong dealTicket)
+{
+   if(dealTicket == 0 || !HistoryDealSelect(dealTicket))
+      return;
+   if(HistoryDealGetString(dealTicket, DEAL_SYMBOL) != _Symbol)
+      return;
+   if((ulong)HistoryDealGetInteger(dealTicket, DEAL_MAGIC) != InpMagic)
+      return;
+   if(HistoryDealGetInteger(dealTicket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+      return;
+
+   g_statTotal++;
+   const ENUM_DEAL_REASON dr = (ENUM_DEAL_REASON)HistoryDealGetInteger(dealTicket, DEAL_REASON);
+   if(dr == DEAL_REASON_TP)
+      g_statWins++;
+   else if(dr == DEAL_REASON_SL)
+      g_statLoss++;
+   else
+   {
+      const double net = HistoryDealGetDouble(dealTicket, DEAL_PROFIT)
+                       + HistoryDealGetDouble(dealTicket, DEAL_SWAP)
+                       + HistoryDealGetDouble(dealTicket, DEAL_COMMISSION);
+      if(net > 0.0) g_statWins++;
+      else if(net < 0.0) g_statLoss++;
+   }
+}
+
+//+------------------------------------------------------------------+
+void StatsRebuildFromHistory()
+{
+   g_statWins = g_statLoss = g_statTotal = 0;
+   if(!HistorySelect(0, TimeCurrent()))
+      return;
+   const int n = HistoryDealsTotal();
+   for(int i = 0; i < n; i++)
+      StatsCountExitDeal(HistoryDealGetTicket(i));
+}
+
+//+------------------------------------------------------------------+
 void RedrawChart(const string sym, const ENUM_TIMEFRAMES tf)
 {
-   DeleteObjectsByPrefix(OBJ_PFX);
+   DeleteObjectsByPrefix(OBJ_CH_PFX);
 
    string panel = StringFormat("MyICT | %s %s\n", sym, EnumToString(tf));
    panel += StateBlock() + "\n";
+   if(g_state == ICT_STATE_WAITING_TRIGGER && TriggerPatternOk())
+      panel += "  >> Trigger pattern OK (2L/2H)\n";
    panel += LayerBlock("BigTrend", InpBigSwingRange, g_big) + "\n";
    panel += LayerBlock("SmallTrend", InpSmallSwingRange, g_small);
 
@@ -725,6 +1060,7 @@ void RedrawChart(const string sym, const ENUM_TIMEFRAMES tf)
    DrawLayer("BIG", g_big, InpClrBigHigh, InpClrBigLow, 2);
    DrawLayer("SML", g_small, InpClrSmallHigh, InpClrSmallLow, 1);
    DrawZones(sym, tf);
+   StatsUpdate();
    ChartRedraw(ActChart());
 }
 
@@ -754,10 +1090,22 @@ void OnNewBar(const string sym)
 int OnInit()
 {
    g_lastBar = 0;
+   g_lastTriggerBar = 0;
    g_state = ICT_STATE_NO_TREND;
    g_statePrev = ICT_STATE_NO_TREND;
+
+   g_hAtr = iATR(_Symbol, ChartTf(), InpATRPeriod);
+   if(g_hAtr == INVALID_HANDLE)
+   {
+      Print("[MyICT] Không tạo ATR");
+      return INIT_FAILED;
+   }
+
    g_trade.SetExpertMagicNumber(InpMagic);
+   g_trade.SetDeviationInPoints(InpSlippagePoints);
    SetTradeFilling();
+
+   StatsRebuildFromHistory();
    OnNewBar(_Symbol);
    Print("[MyICT] Init state=", StateText(g_state));
    return INIT_SUCCEEDED;
@@ -766,7 +1114,11 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-   DeleteObjectsByPrefix(OBJ_PFX);
+   DeleteObjectsByPrefix(OBJ_CH_PFX);
+   ObjectDelete(ActChart(), STAT_LINE1);
+   ObjectDelete(ActChart(), STAT_LINE2);
+   if(g_hAtr != INVALID_HANDLE)
+      IndicatorRelease(g_hAtr);
    Comment("");
 }
 
@@ -790,6 +1142,7 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(entry != DEAL_ENTRY_OUT)
       return;
 
+   StatsCountExitDeal(deal);
    g_state = ICT_STATE_NONE;
    Dbg("OnTradeTransaction → NONE (đóng lệnh)");
    RedrawChart(_Symbol, ChartTf());
