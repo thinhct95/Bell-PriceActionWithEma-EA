@@ -29,7 +29,7 @@ enum ENUM_ICT_STATE
 
 //+------------------------------------------------------------------+
 input group "══ Swing (nến trước/sau pivot) ══"
-input int             InpBigSwingRange    = 12;
+input int             InpBigSwingRange    = 24;
 input int             InpSmallSwingRange  = 2;
 input int             InpSwingLookback    = 400;
 
