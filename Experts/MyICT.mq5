@@ -3,7 +3,7 @@
 //| Big/Small structure + State machine (NO_TREND → PULLBACK → …)    |
 //+------------------------------------------------------------------+
 #property copyright "MyICT"
-#property version   "1.10"
+#property version   "1.11"
 #property description "ICT MSS: sweep + BOS + FVG → limit @ breaker | R% | stats"
 
 #include <Trade/Trade.mqh>
@@ -120,7 +120,8 @@ struct TrendSnapshot
 struct BigWaveZone
 {
    bool   valid;
-   bool   legExtended;   // sóng kéo tới giá mới (không chỉ H0-L0 cũ)
+   bool   legExtended;      // kéo thuận chiều Big (phá L0 khi giảm / phá H0 khi tăng)
+   bool   legCounterTrend;  // phá ngược Big (phá H0 khi giảm / phá L0 khi tăng)
    double waveHigh;
    double waveLow;
    double equilibrium;
@@ -1097,6 +1098,7 @@ void CalcBigWaveZone(const string sym, const ENUM_TIMEFRAMES tf)
       return;
 
    g_zone.legExtended = false;
+   g_zone.legCounterTrend = false;
    g_zone.waveHigh = g_big.h0.price;
    g_zone.waveLow  = g_big.l0.price;
 
@@ -1106,12 +1108,12 @@ void CalcBigWaveZone(const string sym, const ENUM_TIMEFRAMES tf)
 
    const int shH0 = MathMax(0, g_big.h0.shift);
    const int shL0 = MathMax(0, g_big.l0.shift);
-   const int shNow = 0;   // gồm nến đang hình thành (trước chỉ tới shift=1 → trễ)
+   const int shNow = 0;
 
    const double liveLow  = MathMin(iLow(sym, tf, 0),  iLow(sym, tf, 1));
    const double liveHigh = MathMax(iHigh(sym, tf, 0), iHigh(sym, tf, 1));
 
-   // Big giảm + giá phá dưới Big L0 → H0 → đáy mới (logic; draw dùng cùng g_zone)
+   // Big GIẢM — thuận: phá dưới L0 → H0 → đáy mới
    if(BigIsBearish() && liveLow < g_big.l0.price - tol)
    {
       double extLow = ExtremeLowBetween(sym, tf, shH0, shNow);
@@ -1124,7 +1126,20 @@ void CalcBigWaveZone(const string sym, const ENUM_TIMEFRAMES tf)
       g_zone.waveLow  = extLow;
       g_zone.legExtended = (extLow < g_big.l0.price - tol * 0.5);
    }
-   // Big tăng + giá phá trên Big H0 → L0 → đỉnh mới
+   // Big GIẢM — ngược: phá trên H0 → L0 → đỉnh cao nhất (chưa có Big H0 mới)
+   else if(BigIsBearish() && liveHigh > g_big.h0.price + tol)
+   {
+      double extHigh = ExtremeHighBetween(sym, tf, shL0, shNow);
+      if(extHigh <= 0.0)
+         extHigh = liveHigh;
+      else
+         extHigh = MathMax(extHigh, liveHigh);
+
+      g_zone.waveLow  = g_big.l0.price;
+      g_zone.waveHigh = extHigh;
+      g_zone.legCounterTrend = (extHigh > g_big.h0.price + tol * 0.5);
+   }
+   // Big TĂNG — thuận: phá trên H0 → L0 → đỉnh mới
    else if(BigIsBullish() && liveHigh > g_big.h0.price + tol)
    {
       double extHigh = ExtremeHighBetween(sym, tf, shL0, shNow);
@@ -1136,6 +1151,19 @@ void CalcBigWaveZone(const string sym, const ENUM_TIMEFRAMES tf)
       g_zone.waveLow  = g_big.l0.price;
       g_zone.waveHigh = extHigh;
       g_zone.legExtended = (extHigh > g_big.h0.price + tol * 0.5);
+   }
+   // Big TĂNG — ngược: phá dưới L0 → H0 → đáy thấp nhất
+   else if(BigIsBullish() && liveLow < g_big.l0.price - tol)
+   {
+      double extLow = ExtremeLowBetween(sym, tf, shH0, shNow);
+      if(extLow <= 0.0)
+         extLow = liveLow;
+      else
+         extLow = MathMin(extLow, liveLow);
+
+      g_zone.waveHigh = g_big.h0.price;
+      g_zone.waveLow  = extLow;
+      g_zone.legCounterTrend = (extLow < g_big.l0.price - tol * 0.5);
    }
 
    if(g_zone.waveHigh < g_zone.waveLow)
@@ -1155,9 +1183,10 @@ void CalcBigWaveZone(const string sym, const ENUM_TIMEFRAMES tf)
    g_zone.premiumBottom = g_zone.equilibrium;
    g_zone.valid = true;
 
-   if(g_zone.legExtended && InpDebug)
-      Dbg(StringFormat("Zone extended | H=%.5f L=%.5f Eq=%.5f liveL=%.5f",
-           g_zone.waveHigh, g_zone.waveLow, g_zone.equilibrium, liveLow));
+   if((g_zone.legExtended || g_zone.legCounterTrend) && InpDebug)
+      Dbg(StringFormat("Zone %s | H=%.5f L=%.5f Eq=%.5f",
+           g_zone.legCounterTrend ? "phá cấu trúc Big" : "kéo thuận chiều",
+           g_zone.waveHigh, g_zone.waveLow, g_zone.equilibrium));
 }
 
 //+------------------------------------------------------------------+
@@ -1424,7 +1453,14 @@ void DrawZones(const string sym, const ENUM_TIMEFRAMES tf)
 
    const datetime t2 = iTime(sym, tf, 0) + (datetime)PeriodSeconds(tf);
    datetime t1 = iTime(sym, tf, MathMin(60, Bars(sym, tf) - 1));
-   if(g_zone.legExtended)
+   if(g_zone.legCounterTrend)
+   {
+      if(BigIsBearish() && g_big.hasL0)
+         t1 = g_big.l0.time;
+      else if(BigIsBullish() && g_big.hasH0)
+         t1 = g_big.h0.time;
+   }
+   else if(g_zone.legExtended)
    {
       if(BigIsBearish() && g_big.hasH0)
          t1 = g_big.h0.time;
@@ -1441,7 +1477,11 @@ void DrawZones(const string sym, const ENUM_TIMEFRAMES tf)
    const uchar premAlpha = (activePullback && !g_biasBuy)
                            ? InpZoneActiveAlpha : InpZoneFillAlpha;
 
-   const string extTip = g_zone.legExtended ? " (kéo theo giá)" : "";
+   string extTip = "";
+   if(g_zone.legCounterTrend)
+      extTip = " (phá cấu trúc Big — L0↔đỉnh/đáy mới)";
+   else if(g_zone.legExtended)
+      extTip = " (kéo thuận chiều Big)";
    DrawZoneRect(OBJ_CH_PFX + "Z_DISC", t1, t2,
                 g_zone.discountTop, g_zone.waveLow,
                 InpClrDiscount, discAlpha,
@@ -1518,7 +1558,12 @@ string StateBlock()
    {
       s += StringFormat("\n  Zone H=%.2f L=%.2f Eq=%.2f (%.0f%%)",
                         g_zone.waveHigh, g_zone.waveLow, g_zone.equilibrium, InpZoneEqPct);
-      s += g_zone.legExtended ? " [sóng kéo theo giá]" : " [H0-L0]";
+      if(g_zone.legCounterTrend)
+         s += " [P/D phá Big H0/L0]";
+      else if(g_zone.legExtended)
+         s += " [P/D kéo thuận chiều]";
+      else
+         s += " [H0-L0]";
       s += StringFormat(" | %s", g_biasBuy ? "Discount" : "Premium");
    }
    if(g_setup.valid)
