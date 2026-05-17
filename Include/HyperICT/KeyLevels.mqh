@@ -1,5 +1,14 @@
 //+------------------------------------------------------------------+
-//| KeyLevels.mqh — Key LV1/L2, supply/demand OB (body break)        |
+//| KeyLevels.mqh                                                    |
+//| Key LV1/L2, vùng cung-cầu OB, phá level bằng body (§1.2)        |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT:                                                   |
+//|  • Bull Key LV1=L0, Key LV2=H0 (đỉnh cao nhất L0→H0 = H0)       |
+//|  • Bear Key LV1=H0, Key LV2=L0                                   |
+//|  • Vùng cung: L0 → high nến đỏ OB | Vùng cầu: H0 → low nến xanh |
+//|  • Phá Key = body close (shift 1), không dùng wick                 |
+//|  • Giá Pullback giữa L0–H0 / H0–L0 — PriceBetween                |
+//| CHƯA: OB mitigation filter đầy đủ ICT                            |
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_KEYLEVELS_MQH
 #define HYPERICT_KEYLEVELS_MQH
@@ -7,10 +16,10 @@
 #include <HyperICT/Types.mqh>
 #include <HyperICT/Config.mqh>
 
-//+------------------------------------------------------------------+
 class CKeyLevels
 {
 public:
+   //--- Thân nến (§: phá Key LV bằng body, không wick)
    static double BodyTop(const string sym, const ENUM_TIMEFRAMES tf, const int shift)
    {
       return MathMax(iOpen(sym, tf, shift), iClose(sym, tf, shift));
@@ -31,7 +40,7 @@ public:
       return iClose(sym, tf, shift) > iOpen(sym, tf, shift);
    }
 
-   // Nến đỏ cuối cùng trước/at swing low (supply @ L0)
+   //--- §1.2.3 vùng cung @ L0: nến đỏ cuối cùng gần đáy Key LV1
    static bool FindSupplyOB(const string sym, const ENUM_TIMEFRAMES tf,
                             const SwingPoint &swingLow,
                             OrderBlockZone &out)
@@ -60,7 +69,7 @@ public:
       return false;
    }
 
-   // Nến xanh cuối cùng tại swing high (demand @ H0)
+   //--- §1.2.4 vùng cầu @ H0: nến xanh cuối cùng gần đỉnh Key LV2 (bull)
    static bool FindDemandOB(const string sym, const ENUM_TIMEFRAMES tf,
                             const SwingPoint &swingHigh,
                             OrderBlockZone &out)
@@ -89,6 +98,7 @@ public:
       return false;
    }
 
+   //--- Gán Key LV1/L2 + zone OB theo bias bull/bear
    static void BuildKeyLevels(const string sym, const ENUM_TIMEFRAMES tf,
                               const ENUM_STRUCT_BIAS bias,
                               const SwingSet &sw,

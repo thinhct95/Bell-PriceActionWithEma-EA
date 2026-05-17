@@ -1,5 +1,13 @@
 //+------------------------------------------------------------------+
-//| Draw.mqh — labels H0–L1, vùng Key LV1/L2                         |
+//| Draw.mqh                                                         |
+//| Vẽ chart §1.3                                                    |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT:                                                   |
+//|  • Label H0, H1, L0, L1 tại pivot đã khóa                        |
+//|  • Label newH0, newL0, newL02 khi đang §1.4 update               |
+//|  • Rectangle Key LV1 & LV2: swing → hết OB (kéo tới bar hiện tại)|
+//|  • Màu supply/demand theo Config                                 |
+//| CHƯA: vẽ trên chart HTF khác chart đang mở (luôn ChartID hiện tại)|
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_DRAW_MQH
 #define HYPERICT_DRAW_MQH
@@ -8,7 +16,6 @@
 #include <HyperICT/Config.mqh>
 #include <HyperICT/KeyLevels.mqh>
 
-//+------------------------------------------------------------------+
 class CDraw
 {
    static long Chart() { return ChartID(); }
@@ -45,6 +52,7 @@ class CDraw
       ObjectSetInteger(ch, id, OBJPROP_SELECTABLE, false);
    }
 
+   //--- §1.3: chiều cao rect = từ swing tới biên OB
    static void DrawZoneRect(const string id,
                           const datetime t1, const double top, const double bottom,
                           const color fillClr, const string tip)
@@ -77,6 +85,7 @@ public:
 
       const string p = HICT_OBJ_PFX;
 
+      //--- §1.3 labels swing khóa
       if(InpDrawSwings && ctx.swings.IsComplete())
       {
          DrawSwingLabel(p + "H0", "H0", ctx.swings.h0.time, ctx.swings.h0.price, true, InpClrBullHi);

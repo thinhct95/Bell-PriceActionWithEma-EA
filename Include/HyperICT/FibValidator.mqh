@@ -1,5 +1,13 @@
 //+------------------------------------------------------------------+
-//| FibValidator.mqh — Fib 0.382 chỉ cho tiên quyết trend ban đầu     |
+//| FibValidator.mqh                                                 |
+//| Điều kiện tiên quyết Fibonacci (§ đầu spec)                      |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT:                                                   |
+//|  • Bull HH-HL & Bear LH-LL: kiểm tra ở SwingEngine.Classify      |
+//|  • Sóng hồi H1→L0 >= 0.382 × sóng L1→H1 (bull & bear cùng công thức) |
+//|  • Fib fail → HTF_BULL/BEAR_INCOMPLETE (không Neutral)           |
+//| KHÔNG DÙNG FIB TRONG:                                            |
+//|  • §1.4 CHoCH / Continue — xác nhận đỉnh/đáy = InpSwingRange     |
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_FIBVALIDATOR_MQH
 #define HYPERICT_FIBVALIDATOR_MQH
@@ -15,7 +23,7 @@ public:
       return MathAbs(to - from);
    }
 
-   // Sóng hồi H1→L0 >= ratio × sóng L1→H1 (bull & bear, chỉ lúc lock trend)
+   // § tiên quyết: pullback H1→L0 đủ sâu so với impulse L1→H1
    static bool IsPullbackValid(const SwingSet &sw, const double ratio)
    {
       if(!sw.IsComplete())

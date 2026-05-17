@@ -1,6 +1,20 @@
 //+------------------------------------------------------------------+
 //| HyperICT.mq5                                                     |
-//| HTF structure: swings, Key LV, CHoCH / Continue (modular)        |
+//| EA đọc cấu trúc HTF — không giao dịch                           |
+//| Docs: Include/HyperICT/README.md                                 |
+//| Mở folder workspace: .../MQL5 (không mở riêng Include/HyperICT)|
+//+------------------------------------------------------------------+
+//| MAP SPEC → MODULE:                                               |
+//|  § tiên quyết Fib + HH-HL     → FibValidator, SwingEngine        |
+//|  §1.1 trạng thái trend       → Classifier, Panel                 |
+//|  §1.2 Key LV + OB            → KeyLevels, Draw                   |
+//|  §1.3 vẽ label/rect          → Draw                              |
+//|  §1.4 CHoCH/Continue         → UpdateEngine, SwingEngine roll    |
+//|  Pipeline                    → StateMachine                      |
+//|  Input HTF/swing/fib         → Config                            |
+//|  Kiểu dữ liệu                → Types                              |
+//|                                                                  |
+//| CHƯA CÓ TRONG DỰ ÁN: đặt lệnh, LTF, session, alert             |
 //+------------------------------------------------------------------+
 #property copyright "HyperICT"
 #property version   "0.11"
@@ -14,6 +28,8 @@
 
 HtfContext g_ctx;
 
+//+------------------------------------------------------------------+
+//| Khóa snapshot swing HTF + vẽ lần đầu                             |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -42,6 +58,9 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
+//| Mỗi tick: logic HTF chỉ trên nến HTF mới (StateMachine)          |
+//| Vẽ rectangle kéo dài mỗi tick                                    |
+//+------------------------------------------------------------------+
 void OnTick()
 {
    CStateMachine::OnChartEvent(g_ctx);
@@ -49,6 +68,8 @@ void OnTick()
    CPanel::Render(g_ctx);
 }
 
+//+------------------------------------------------------------------+
+//| API cho EA/script khác đọc state                                 |
 //+------------------------------------------------------------------+
 ENUM_HTF_STATE HyperICT_GetState() { return g_ctx.state; }
 

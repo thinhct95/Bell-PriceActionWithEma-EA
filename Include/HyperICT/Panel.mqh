@@ -1,5 +1,8 @@
 //+------------------------------------------------------------------+
-//| Panel.mqh — nhãn trạng thái góc chart                            |
+//| Panel.mqh                                                        |
+//| Panel trạng thái HTF (đọc nhanh §1.1)                            |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT: hiển thị structure, Fib, state, Key LV, phase §1.4 |
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_PANEL_MQH
 #define HYPERICT_PANEL_MQH
@@ -8,7 +11,6 @@
 #include <HyperICT/Config.mqh>
 #include <HyperICT/Classifier.mqh>
 
-//+------------------------------------------------------------------+
 class CPanel
 {
 public:

@@ -1,6 +1,18 @@
 //+------------------------------------------------------------------+
-//| UpdateEngine.mqh — §1.4: xác nhận đỉnh/đáy bằng InpSwingRange    |
-//| (Fib chỉ dùng lúc lock trend ban đầu — xem FibValidator)          |
+//| UpdateEngine.mqh                                                 |
+//| §1.4 CHoCH & Trend Continue — cập nhật incremental               |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT:                                                   |
+//|  • Chỉ chạy khi nến HTF mới đóng; không quét lại full lookback   |
+//|  • Phá Key LV1 (body) → CHoCH | Phá Key LV2 → Continue           |
+//|  • §1.4a Bull Continue P1: track newH0 (nến xanh), newL0 (đáy)   |
+//|  • §1.4a P2: IsConfirmedSwingHigh(newH0) → roll, khóa newH0    |
+//|  • §1.4b Bull CHoCH P1–2: track newL0 → swing low confirm → P3   |
+//|  • §1.4b P3 case1: phá H0 → newH0 confirm → roll (L1 giữ)       |
+//|  • §1.4b P3 case2: phá newL0 → newH0+newL02 confirm → bear roll|
+//|  • §1.4c/d Bear: đối xứng Continue & CHoCH                       |
+//|  • Xác nhận đỉnh/đáy = InpSwingRange (KHÔNG dùng Fib ở đây)      |
+//| CHƯA TỐI ƯU: gắn OB chính xác cho newL0 mỗi leg; edge case đa tín hiệu |
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_UPDATEENGINE_MQH
 #define HYPERICT_UPDATEENGINE_MQH
@@ -66,6 +78,7 @@ public:
       return t0 != 0 && t0 != ctx.lastHtfBar;
    }
 
+   //--- Phát hiện body phá Key LV1/L2 lần đầu → bật BUILD
    static void DetectBreakEvents(HtfContext &ctx)
    {
       if(ctx.update.phase != UPD_PHASE_IDLE)
@@ -118,6 +131,7 @@ public:
       }
    }
 
+   //--- §1.4a Bull Continue — P1 track + P2 swing high confirm → roll
    static void ProcessBullContinueBuild(HtfContext &ctx, const int sh)
    {
       if(CKeyLevels::IsBullCandle(ctx.symbol, ctx.htf, sh))
@@ -160,6 +174,7 @@ public:
       Dbg("Bear Continue — swing low confirmed, rolled");
    }
 
+   //--- §1.4b Bull CHoCH — P1 track newL0, P2 swing low confirm → CHOCH_RESOLVE
    static void ProcessBullChochBuild(HtfContext &ctx, const int sh)
    {
       TrackNewLow(ctx.symbol, ctx.htf, sh, ctx.update.newL0, ctx.update.newLLocked);
@@ -192,6 +207,7 @@ public:
       Dbg("Bear CHoCH — newH0 swing confirmed → phase 3");
    }
 
+   //--- §1.4b Bull CHoCH P3 — case1 về bull / case2 confirm bear
    static void ProcessBullChochResolve(HtfContext &ctx, const int sh)
    {
       if(CKeyLevels::BodyBreakAbove(ctx.symbol, ctx.htf, sh, ctx.swings.h0.price))

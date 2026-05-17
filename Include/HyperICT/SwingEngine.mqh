@@ -1,5 +1,14 @@
 //+------------------------------------------------------------------+
-//| SwingEngine.mqh — pivot, H0–L1, snapshot khóa                    |
+//| SwingEngine.mqh                                                  |
+//| Pivot HTF, H0–L1, khóa snapshot, roll swing §1.4                 |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT:                                                   |
+//|  • §1: H0,H1,L0,L1 từ giá hiện tại về trước (2 high + 2 low)     |
+//|  • HH-HL / LH-LL — ClassifyStructure                             |
+//|  • Khóa swing lúc bot chạy — LockInitialSnapshot (không đổi mỗi nến) |
+//|  • §1.4 roll: Continue, CHoCH case1 (L1 giữ), CHoCH case2 bear   |
+//|  • Xác nhận pivot sau phá Key — IsConfirmedSwingHigh/Low + range   |
+//| CHƯA TỐI ƯU: quét OB chất lượng ICT (mitigation)                 |
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_SWINGENGINE_MQH
 #define HYPERICT_SWINGENGINE_MQH
@@ -7,10 +16,10 @@
 #include <HyperICT/Types.mqh>
 #include <HyperICT/Config.mqh>
 
-//+------------------------------------------------------------------+
 class CSwingEngine
 {
 public:
+   //--- Pivot chuẩn: `range` nến mỗi phía (dùng cho §1.4 confirm đỉnh/đáy)
    static bool IsSwingHigh(const string sym, const ENUM_TIMEFRAMES tf,
                            const int shift, const int range)
    {
@@ -144,6 +153,7 @@ public:
       has1 = true;
    }
 
+   //--- §1.1 tiên quyết đặc điểm 1: HH-HL hoặc LH-LL
    static ENUM_STRUCT_BIAS ClassifyStructure(const SwingSet &sw)
    {
       if(!sw.IsComplete())
@@ -167,6 +177,7 @@ public:
       return out.IsComplete();
    }
 
+   //--- § chú ý: snapshot HTF cố định từ khi bot chạy (chỉ đổi qua UpdateEngine)
    static bool LockInitialSnapshot(HtfContext &ctx)
    {
       ctx.swings.Clear();
@@ -178,6 +189,7 @@ public:
       return true;
    }
 
+   //--- §1.4a Bull Continue P2: H0→H1, L0→L1, newH0→H0, newL0→L0
    static void RollBullContinue(SwingSet &sw, const SwingPoint &newH0, const SwingPoint &newL0)
    {
       sw.h1 = sw.h0;
@@ -190,17 +202,19 @@ public:
       sw.hasL0 = true;
    }
 
+   //--- §1.4b Bull CHoCH P3 case1: H0→H1, L1 giữ, newL0→L0, newH0→H0
    static void RollBullChochCase1(SwingSet &sw, const SwingPoint &newH0, const SwingPoint &newL0)
    {
       sw.h1 = sw.h0;
       sw.hasH1 = sw.hasH0;
-      // L1 giữ nguyên (spec)
+      // L1 giữ nguyên theo spec
       sw.l0 = newL0;
       sw.hasL0 = true;
       sw.h0 = newH0;
       sw.hasH0 = true;
    }
 
+   //--- §1.4b Bull CHoCH P3 case2: confirm bear — H0→H1, newH0→H0, newL0→L1, newL02→L0
    static void RollBullChochCase2(SwingSet &sw,
                                   const SwingPoint &newH0,
                                   const SwingPoint &newL0,
@@ -216,6 +230,7 @@ public:
       sw.hasL0 = true;
    }
 
+   //--- §1.4c Bear Continue (đối xứng bull continue)
    static void RollBearContinue(SwingSet &sw, const SwingPoint &newH0, const SwingPoint &newL0)
    {
       sw.l1 = sw.l0;

@@ -1,5 +1,13 @@
 //+------------------------------------------------------------------+
-//| StateMachine.mqh — pipeline đánh giá HTF mỗi bar                 |
+//| StateMachine.mqh                                                 |
+//| Pipeline: Init → mỗi nến HTF → Update → Fib/Key → Classify       |
+//+------------------------------------------------------------------+
+//| ĐÃ GIẢI QUYẾT:                                                   |
+//|  • OnInit: LockInitialSnapshot (swing cố định từ lúc bot chạy)   |
+//|  • Mỗi nến HTF mới: UpdateEngine → RefreshDerived → state        |
+//|  • RefreshDerived: Fib tiên quyết + KeyLevels + Classifier       |
+//|  • Sau roll swing: tính lại structBias, fibOk, key, state        |
+//| KHÔNG: trading logic, OnTimer intrabar cho update                |
 //+------------------------------------------------------------------+
 #ifndef HYPERICT_STATEMACHINE_MQH
 #define HYPERICT_STATEMACHINE_MQH
@@ -12,7 +20,6 @@
 #include <HyperICT/Classifier.mqh>
 #include <HyperICT/UpdateEngine.mqh>
 
-//+------------------------------------------------------------------+
 class CStateMachine
 {
    static void Dbg(const string msg)
@@ -23,7 +30,7 @@ class CStateMachine
 
    static void RefreshDerived(HtfContext &ctx)
    {
-      // Fib 0.382 chỉ kiểm tra tiên quyết trên bộ swing hiện tại (không dùng trong §1.4)
+      // Fib 0.382: chỉ ý nghĩa tiên quyết pullback trên bộ swing hiện tại
       ctx.fibOk = CFibValidator::IsPullbackValid(ctx.swings, InpFibMinRatio);
       CKeyLevels::BuildKeyLevels(ctx.symbol, ctx.htf, ctx.structBias,
                                  ctx.swings, ctx.keyLv1, ctx.keyLv2);
@@ -58,8 +65,8 @@ public:
       if(newBar)
       {
          ctx.lastHtfBar = iTime(ctx.symbol, ctx.htf, 0);
-         CUpdateEngine::OnHtfBarClose(ctx);
-         RefreshDerived(ctx);
+         CUpdateEngine::OnHtfBarClose(ctx);   // §1.4 trước
+         RefreshDerived(ctx);                 // §1.1 + §1.2 sau
          if(InpDebug)
             Dbg("HTF bar → " + CClassifier::StateText(ctx.state));
       }
