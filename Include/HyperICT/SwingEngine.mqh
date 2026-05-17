@@ -3,7 +3,9 @@
 //| Pivot HTF, H0–L1, khóa snapshot, roll swing §1.4                 |
 //+------------------------------------------------------------------+
 //| ĐÃ GIẢI QUYẾT:                                                   |
-//|  • §1: H0,H1,L0,L1 từ giá hiện tại về trước (2 high + 2 low)     |
+//|  • H0–L1 ghép theo leg (Key LV1 tạo Key LV2), không 2H+2L tách rời |
+//|  • Bear: L0=KeyLV2, H0=đỉnh trước L1 (tạo đáy L0); đỉnh sau L0→newH0 |
+//|  • Bull: H0=KeyLV2, L0=đáy trước H1 (tạo đỉnh H0)               |
 //|  • HH-HL / LH-LL — ClassifyStructure                             |
 //|  • Khóa swing lúc bot chạy — LockInitialSnapshot (không đổi mỗi nến) |
 //|  • §1.4 roll: Continue, CHoCH case1 (L1 giữ), CHoCH case2 bear   |
@@ -140,17 +142,93 @@ public:
       SortByTime(lows, nL);
    }
 
-   static void PickLastTwo(const SwingPoint &pts[], const int count,
-                           SwingPoint &s0, SwingPoint &s1,
-                           bool &has0, bool &has1)
+   // Pivot cũ hơn anchor (shift > anchor) và GẦN anchor nhất (shift nhỏ nhất trong các ứng viên)
+   static bool FindMostRecentOlder(const SwingPoint &pts[], const int count,
+                                   const int anchorShift,
+                                   SwingPoint &out)
    {
-      has0 = has1 = false;
-      if(count < 1) return;
-      s0 = pts[count - 1];
-      has0 = true;
-      if(count < 2) return;
-      s1 = pts[count - 2];
-      has1 = true;
+      int best = -1;
+      for(int i = 0; i < count; i++)
+      {
+         if(pts[i].shift <= anchorShift)
+            continue;
+         if(best < 0 || pts[i].shift < pts[best].shift)
+            best = i;
+      }
+      if(best < 0)
+         return false;
+      out = pts[best];
+      return true;
+   }
+
+   // Thứ tự thời gian (cũ → mới): Bear H1→L1→H0→L0 | Bull L1→H1→L0→H0
+   static bool ValidateSwingChronology(const SwingSet &sw, const ENUM_STRUCT_BIAS bias)
+   {
+      if(!sw.IsComplete())
+         return false;
+      if(bias == STRUCT_BEAR)
+         return sw.h1.shift > sw.l1.shift &&
+                sw.l1.shift > sw.h0.shift &&
+                sw.h0.shift > sw.l0.shift;
+      if(bias == STRUCT_BULL)
+         return sw.l1.shift > sw.h1.shift &&
+                sw.h1.shift > sw.l0.shift &&
+                sw.l0.shift > sw.h0.shift;
+      return false;
+   }
+
+   //--- Bear: L0=KeyLV2, H0=KeyLV1 | Chuỗi: H1 → L1 → H0 → L0
+   static bool PickStructuralBear(const SwingPoint &highs[], const int nH,
+                                  const SwingPoint &lows[], const int nL,
+                                  SwingSet &out)
+   {
+      out.Clear();
+      if(nH < 2 || nL < 2)
+         return false;
+
+      out.l0 = lows[nL - 1];
+      out.hasL0 = true;
+
+      if(!FindMostRecentOlder(lows, nL, out.l0.shift, out.l1))
+         return false;
+      out.hasL1 = true;
+
+      if(!FindMostRecentOlder(highs, nH, out.l1.shift, out.h0))
+         return false;
+      out.hasH0 = true;
+
+      if(!FindMostRecentOlder(highs, nH, out.h0.shift, out.h1))
+         return false;
+      out.hasH1 = true;
+
+      return true;
+   }
+
+   //--- Bull: H0=KeyLV2, L0=KeyLV1 | Chuỗi: L1 → H1 → L0 → H0
+   static bool PickStructuralBull(const SwingPoint &highs[], const int nH,
+                                  const SwingPoint &lows[], const int nL,
+                                  SwingSet &out)
+   {
+      out.Clear();
+      if(nH < 2 || nL < 2)
+         return false;
+
+      out.h0 = highs[nH - 1];
+      out.hasH0 = true;
+
+      if(!FindMostRecentOlder(lows, nL, out.h0.shift, out.l0))
+         return false;
+      out.hasL0 = true;
+
+      if(!FindMostRecentOlder(highs, nH, out.l0.shift, out.h1))
+         return false;
+      out.hasH1 = true;
+
+      if(!FindMostRecentOlder(lows, nL, out.h1.shift, out.l1))
+         return false;
+      out.hasL1 = true;
+
+      return true;
    }
 
    //--- §1.1 tiên quyết đặc điểm 1: HH-HL hoặc LH-LL
@@ -172,8 +250,43 @@ public:
       out.Clear();
       SwingPoint highs[], lows[];
       CollectSwings(sym, tf, range, lookback, highs, lows);
-      PickLastTwo(highs, ArraySize(highs), out.h0, out.h1, out.hasH0, out.hasH1);
-      PickLastTwo(lows, ArraySize(lows), out.l0, out.l1, out.hasL0, out.hasL1);
+      const int nH = ArraySize(highs);
+      const int nL = ArraySize(lows);
+
+      SwingSet bear, bull;
+      const bool hasBear = PickStructuralBear(highs, nH, lows, nL, bear);
+      const bool hasBull = PickStructuralBull(highs, nH, lows, nL, bull);
+
+      const ENUM_STRUCT_BIAS biasBear = hasBear ? ClassifyStructure(bear) : STRUCT_NONE;
+      const ENUM_STRUCT_BIAS biasBull = hasBull ? ClassifyStructure(bull) : STRUCT_NONE;
+
+      ENUM_STRUCT_BIAS chosen = STRUCT_NONE;
+      if(biasBear == STRUCT_BEAR)
+      {
+         out = bear;
+         chosen = STRUCT_BEAR;
+      }
+      else if(biasBull == STRUCT_BULL)
+      {
+         out = bull;
+         chosen = STRUCT_BULL;
+      }
+      else if(hasBear)
+      {
+         out = bear;
+         chosen = ClassifyStructure(bear);
+      }
+      else if(hasBull)
+      {
+         out = bull;
+         chosen = ClassifyStructure(bull);
+      }
+      else
+         return false;
+
+      if(InpDebug && chosen != STRUCT_NONE && !ValidateSwingChronology(out, chosen))
+         Print("[HyperICT/Swing] Cảnh báo: thứ tự H/L không khớp chuỗi chuẩn");
+
       return out.IsComplete();
    }
 

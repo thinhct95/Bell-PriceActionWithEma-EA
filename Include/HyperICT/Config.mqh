@@ -17,7 +17,7 @@
 
 input group "══ HTF Structure ══"
 input ENUM_TIMEFRAMES InpHtf              = PERIOD_H1;  // §1: timeframe cấu trúc HTF
-input int             InpSwingRange       = 3;        // §1.4: số nến mỗi bên pivot (confirm đỉnh/đáy)
+input int             InpSwingRange       = 5;        // §1.4: số nến mỗi bên pivot (confirm đỉnh/đáy)
 input int             InpSwingLookback    = 400;      // quét swing lúc lock ban đầu
 input double          InpFibMinRatio      = 0.382;    // § tiên quyết: H1→L0 vs L1→H1 (chỉ lúc lock trend)
 

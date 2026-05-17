@@ -65,11 +65,19 @@ MQL5/
 - **Fib fail** → state `BULL/BEAR (Fib pending)` — *không* coi là Neutral.
 - **Neutral** chỉ khi không đủ 4 swing hoặc cấu trúc không HH-HL / LH-LL.
 
-### Swing H0, H1, L0, L1
+### Swing H0, H1, L0, L1 (ghép theo leg — không lấy 2 đỉnh + 2 đáy tách rời)
 
-- Đếm từ **giá hiện tại về trước** trên HTF (mặc định H1).
-- **H0 / L0** = đỉnh/đáy gần nhất; **H1 / L1** = đỉnh/đáy trước đó.
-- **Khóa snapshot** khi bot chạy (`OnInit`) — **không** đổi mỗi nến mới.
+Trên HTF, pivot được gán sao cho **Key LV1 tạo ra Key LV2** (đúng thứ tự thời gian):
+
+| Bias | Key LV1 | Key LV2 | Cách gán |
+|------|---------|---------|----------|
+| **Bear** | **H0** = Key LV1 (đỉnh trước L0) | **L0** = Key LV2 | Thời gian: **H1 → L1 → H0 → L0** |
+| **Bull** | **L0** = Key LV1 (đáy trước H0) | **H0** = Key LV2 | Thời gian: **L1 → H1 → L0 → H0** |
+
+Gán pivot: từ L0/H0 gần nhất, lùi từng bước tới pivot cũ **kề** (không nhảy tới đỉnh/đáy xa hơn).
+
+- **Đỉnh/đáy hình thành sau Key LV2** (ví dụ đỉnh nhỏ sau L0 trong bear) **không** gán là H0 — thuộc `newH0` / `UpdateEngine` §1.4.
+- **Khóa snapshot** khi bot chạy — chỉ đổi khi phá Key (§1.4).
 
 ### Key Level (§1.2)
 

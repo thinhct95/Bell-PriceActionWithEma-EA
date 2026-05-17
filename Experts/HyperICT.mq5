@@ -17,7 +17,7 @@
 //| CHƯA CÓ TRONG DỰ ÁN: đặt lệnh, LTF, session, alert             |
 //+------------------------------------------------------------------+
 #property copyright "HyperICT"
-#property version   "0.11"
+#property version   "1.11"
 #property description "HTF structure | Fib=init only | pivot confirm=InpSwingRange"
 
 #include <HyperICT/Config.mqh>
