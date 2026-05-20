@@ -4,7 +4,7 @@
 //| RSI + EMA9/WMA45 trên RSI + EMA200(close), signal, mũi tên, panel |
 //+------------------------------------------------------------------+
 #property copyright "RsiMomentumEA"
-#property version   "3.13"
+#property version   "3.22"
 
 #include <Trade/Trade.mqh>
 
@@ -24,6 +24,20 @@ input double InpRSIOversold       = 30.0;
 
 input group "Bộ lọc EMA9 vs WMA45 (chống nhiễu)"
 input int    InpEma9PersistBars   = 3;
+
+input group "Bộ lọc cấu trúc 4 swing (H0 H1 L0 L1)"
+input bool   InpStructFilterEnabled = false; // BUY: chặn LH-LL | SELL: chặn HH-HL | false = tắt
+input int    InpStructSwingRange    = 2;     // pivot: N nến mỗi phía (giống HyperICT)
+input int    InpStructLookbackBars  = 120;   // quét tối đa bao nhiêu nến về quá khứ
+
+input group "FVG + lệnh Limit (5 nến từ nến hiện tại)"
+input bool   InpFvgFilterEnabled    = true;  // không có FVG hợp lệ trong 5 nến → bỏ lệnh
+input int    InpFvgScanBars         = 5;     // số nến quét (từ shift 0 hoặc signal về trước)
+input int    InpFvgMinGapPoints     = 0;     // khe FVG tối thiểu (point)
+input int    InpFvgLimitExpireBars  = 20;    // hủy pending nếu không khớp sau N nến
+input int    InpFvgWaitBarsAfterSignal = 1;  // đợi thêm N nến đóng sau tín hiệu rồi mới quét FVG
+input double InpFvgLimitMidRatio      = 0.5;  // giá Limit trong FVG: 0.5 = 50% (CE)
+input bool   InpFvgUseSignalBarWindow = false; // false: quét từ nến 0 | true: từ nến signal (1)
 
 input group "Mũi tên giao cắt"
 input color  InpArrowUpColor      = clrLime;
@@ -54,10 +68,23 @@ input int    InpSwingMaxBars      = 30;   // quét swing pivot / fallback min-ma
 input int    InpSlippagePoints    = 30;
 input bool   InpOnePositionFlat   = true;
 
+input group "SL buffer theo ATR (đẩy SL xa đáy/đỉnh swing)"
+input bool   InpSlAtrBufferEnabled = true;
+input int    InpSlAtrPeriod         = 14;
+input double InpSlAtrMultiplier     = 0.5;   // khoảng cách thêm = ATR(shift 1) × hệ số
+input bool   InpSlAtrAddSpread      = true;  // cộng thêm buffer spread vào SL
+
 input group "Thống kê (góc dưới-trái chart)"
 input bool   InpShowStats          = true;
 input int    InpStatFontSize       = 9;
+input int    InpStatLinePad        = 26;    // khoảng cách dọc giữa các dòng (pixel)
+input int    InpStatBottomMargin   = 28;    // lề dưới block thống kê
 input color  InpStatColor          = clrSilver;
+
+input group "Nhãn lý do vào/không vào (dưới mũi tên)"
+input bool   InpShowSignalReason   = true;
+input int    InpReasonFontSize     = 8;
+input int    InpReasonOffsetPts    = 45;    // khoảng cách dưới/ trên mũi tên (point)
 
 //--- Buffers & state (trùng State.mqh)
 double buf_RSI[];
@@ -71,6 +98,7 @@ int h_RSI    = INVALID_HANDLE;
 int h_EMA9   = INVALID_HANDLE;
 int h_WMA45  = INVALID_HANDLE;
 int h_EMA200 = INVALID_HANDLE;
+int h_ATR    = INVALID_HANDLE;
 
 const string OBJ_PREFIX   = "RsiMomEA_";
 const string LBL_TITLE    = OBJ_PREFIX + "title";
@@ -83,9 +111,7 @@ const string STAT_PREFIX = "RsiMomEA_ST_";
 const string STAT_L1     = STAT_PREFIX + "line1";
 const string STAT_L2     = STAT_PREFIX + "line2";
 const string STAT_L3     = STAT_PREFIX + "line3";
-// Khoảng cách dọc giữa các dòng thống kê (pixel): bước = fontSize + STAT_LINE_PAD
-const int    STAT_Y_ANCHOR = 18;
-const int    STAT_LINE_PAD = 16;
+const string REASON_PREFIX = OBJ_PREFIX + "RSN_";
 
 long   g_statExitDeals = 0;
 long   g_statSL        = 0;
@@ -100,18 +126,47 @@ bool     g_firstCalc        = true;
 static int g_prevCalculated = 0;
 
 datetime g_tradeBarAnchor = 0;
+datetime g_pendingPlacedBarTime = 0;
+datetime g_deferSignalBarTime = 0;
+bool     g_deferIsBuy = false;
 
 CTrade g_trade;
 
 long ActChart() { return ChartID(); }
 
 void   SetTradeFillingFromSymbol();
+double Sl_GetBufferDistance(const int atrShift = 1);
 bool   NearestSwingSlTp(const bool isBuy, const double entry, const int dig, double &sl, double &tp);
 bool   StopsValid(const bool isBuy, const double price, const double sl, const double tp);
 int    CountMyMagicPositions();
+int    CountMyMagicPendingOrders();
+bool   HasMyMagicPositionOrPending();
 double NormalizeLots(double v);
 double VolumeForRiskPercent(const bool isBuy, const double entryRef, const double slPrice);
 void   TradeTryOnBarOpen(const int calcRet);
+void   TradeExecuteOrder(const bool isBuy);
+void   Pending_ManageExpiry();
+bool   Pending_CancelMine();
+bool   Struct_IsSwingHigh(const int shift, const int range);
+bool   Struct_IsSwingLow(const int shift, const int range);
+bool   Struct_CollectHL2(const int fromShift, double &h0, double &h1, double &l0, double &l1);
+bool   Struct_IsHHHL(const int fromShift);
+bool   Struct_IsLHLL(const int fromShift);
+bool   Struct_AllowsBuy(const int fromShift);
+bool   Struct_AllowsSell(const int fromShift);
+int    Fvg_TradeWindowStart();
+bool   Fvg_TryBullZone(const int s0, double &limitPrice);
+bool   Fvg_TryBearZone(const int s0, double &limitPrice);
+bool   Fvg_SelectBestBuyLimit(const int windowStart, const int scanBars, double &limitPrice);
+bool   Fvg_SelectBestSellLimit(const int windowStart, const int scanBars, double &limitPrice);
+bool   Fvg_AllowsBuy(const int windowStart);
+bool   Fvg_AllowsSell(const int windowStart);
+string Signal_ReasonBuy(const bool trendUp, const bool ema9PersistBelow, const bool ema9SlopeUp,
+                          const bool rsiOkBuy, const bool structOkBuy, const bool fvgOkBuy, const bool valid);
+string Signal_ReasonSell(const bool trendDown, const bool ema9PersistAbove, const bool ema9SlopeDown,
+                           const bool rsiOkSell, const bool structOkSell, const bool fvgOkSell, const bool valid);
+void   Signal_DrawReasonLabel(const long ch, const datetime barTime, const double anchorPrice,
+                              const bool isBuy, const bool canEnter, const string detail);
 void   Stats_CreateObjects();
 void   Stats_UpdateDisplay();
 void   OnTradeTransaction(const MqlTradeTransaction &trans,
@@ -145,6 +200,12 @@ bool Handles_CreateAll()
     Print("[RsiMomEA] Không tạo được handle EMA200");
     return false;
   }
+  h_ATR = iATR(_Symbol, _Period, MathMax(1, InpSlAtrPeriod));
+  if (h_ATR == INVALID_HANDLE)
+  {
+    Print("[RsiMomEA] Không tạo được handle ATR");
+    return false;
+  }
   return true;
 }
 
@@ -155,7 +216,8 @@ void Handles_ReleaseAll()
   if (h_EMA9   != INVALID_HANDLE) IndicatorRelease(h_EMA9);
   if (h_WMA45  != INVALID_HANDLE) IndicatorRelease(h_WMA45);
   if (h_EMA200 != INVALID_HANDLE) IndicatorRelease(h_EMA200);
-  h_RSI = h_EMA9 = h_WMA45 = h_EMA200 = INVALID_HANDLE;
+  if (h_ATR    != INVALID_HANDLE) IndicatorRelease(h_ATR);
+  h_RSI = h_EMA9 = h_WMA45 = h_EMA200 = h_ATR = INVALID_HANDLE;
 }
 
 //+------------------------------------------------------------------+
@@ -297,6 +359,345 @@ void Alerts_CheckAndFire(const datetime &timeArr[], const double &closeArr[],
 }
 
 //+------------------------------------------------------------------+
+//| Pivot swing trên giá (độc lập HyperICT) — H0/L0 = gần nhất       |
+//+------------------------------------------------------------------+
+bool Struct_IsSwingHigh(const int shift, const int range)
+{
+  const int str = MathMax(1, range);
+  const double h = iHigh(_Symbol, _Period, shift);
+  for(int k = 1; k <= str; k++)
+  {
+    if(shift + k >= Bars(_Symbol, _Period) || shift - k < 0)
+      return false;
+    if(h <= iHigh(_Symbol, _Period, shift + k) || h <= iHigh(_Symbol, _Period, shift - k))
+      return false;
+  }
+  return true;
+}
+
+bool Struct_IsSwingLow(const int shift, const int range)
+{
+  const int str = MathMax(1, range);
+  const double l = iLow(_Symbol, _Period, shift);
+  for(int k = 1; k <= str; k++)
+  {
+    if(shift + k >= Bars(_Symbol, _Period) || shift - k < 0)
+      return false;
+    if(l >= iLow(_Symbol, _Period, shift + k) || l >= iLow(_Symbol, _Period, shift - k))
+      return false;
+  }
+  return true;
+}
+
+bool Struct_CollectHL2(const int fromShift, double &h0, double &h1, double &l0, double &l1)
+{
+  const int rng = MathMax(1, InpStructSwingRange);
+  const int lb  = MathMax(20, InpStructLookbackBars);
+  const int start = fromShift + rng;
+  const int bars  = Bars(_Symbol, _Period);
+  const int last  = MathMin(lb, bars - rng - 1);
+  if(start > last)
+    return false;
+
+  double   hiP[], loP[];
+  datetime hiT[], loT[];
+  ArrayResize(hiP, 0);
+  ArrayResize(loP, 0);
+  ArrayResize(hiT, 0);
+  ArrayResize(loT, 0);
+
+  for(int sh = start; sh <= last; sh++)
+  {
+    if(Struct_IsSwingHigh(sh, rng))
+    {
+      const int n = ArraySize(hiP);
+      ArrayResize(hiP, n + 1);
+      ArrayResize(hiT, n + 1);
+      hiP[n] = iHigh(_Symbol, _Period, sh);
+      hiT[n] = iTime(_Symbol, _Period, sh);
+    }
+    if(Struct_IsSwingLow(sh, rng))
+    {
+      const int n = ArraySize(loP);
+      ArrayResize(loP, n + 1);
+      ArrayResize(loT, n + 1);
+      loP[n] = iLow(_Symbol, _Period, sh);
+      loT[n] = iTime(_Symbol, _Period, sh);
+    }
+  }
+
+  const int nH = ArraySize(hiP);
+  const int nL = ArraySize(loP);
+  if(nH < 2 || nL < 2)
+    return false;
+
+  int iNewH = 0;
+  for(int j = 1; j < nH; j++)
+    if(hiT[j] > hiT[iNewH])
+      iNewH = j;
+  int iOldH = -1;
+  for(int j = 0; j < nH; j++)
+  {
+    if(j == iNewH)
+      continue;
+    if(iOldH < 0 || hiT[j] > hiT[iOldH])
+      iOldH = j;
+  }
+
+  int iNewL = 0;
+  for(int j = 1; j < nL; j++)
+    if(loT[j] > loT[iNewL])
+      iNewL = j;
+  int iOldL = -1;
+  for(int j = 0; j < nL; j++)
+  {
+    if(j == iNewL)
+      continue;
+    if(iOldL < 0 || loT[j] > loT[iOldL])
+      iOldL = j;
+  }
+
+  h0 = hiP[iNewH];
+  h1 = hiP[iOldH];
+  l0 = loP[iNewL];
+  l1 = loP[iOldL];
+  return true;
+}
+
+bool Struct_IsHHHL(const int fromShift)
+{
+  double h0 = 0, h1 = 0, l0 = 0, l1 = 0;
+  if(!Struct_CollectHL2(fromShift, h0, h1, l0, l1))
+    return false;
+  return (h0 > h1 && l0 > l1);
+}
+
+bool Struct_IsLHLL(const int fromShift)
+{
+  double h0 = 0, h1 = 0, l0 = 0, l1 = 0;
+  if(!Struct_CollectHL2(fromShift, h0, h1, l0, l1))
+    return false;
+  return (h0 < h1 && l0 < l1);
+}
+
+// BUY: chỉ chặn khi 4 swing = LH-LL (ngược tín hiệu mua). HH-HL hoặc lộn xộn = OK.
+bool Struct_AllowsBuy(const int fromShift)
+{
+  if(!InpStructFilterEnabled)
+    return true;
+  return !Struct_IsLHLL(fromShift);
+}
+
+// SELL: chỉ chặn khi 4 swing = HH-HL (ngược tín hiệu bán). LH-LL hoặc lộn xộn = OK.
+bool Struct_AllowsSell(const int fromShift)
+{
+  if(!InpStructFilterEnabled)
+    return true;
+  return !Struct_IsHHHL(fromShift);
+}
+
+//+------------------------------------------------------------------+
+//| FVG ICT 3 nến trong cửa sổ scanBars (mọi vị trí s0..s0+2)        |
+//| Bull zone: [High(s2) .. Low(s0)] — Buy Limit tại % FVG (mặc định 50% CE) |
+//| Bear zone: [High(s0) .. Low(s2)] — Sell Limit tại % FVG (mặc định 50% CE) |
+//+------------------------------------------------------------------+
+int Fvg_TradeWindowStart()
+{
+  return InpFvgUseSignalBarWindow ? 1 : 0;
+}
+
+bool Fvg_TryBullZone(const int s0, double &limitPrice)
+{
+  const int s2 = s0 + 2;
+  if(s2 >= Bars(_Symbol, _Period))
+    return false;
+
+  const double minGap = InpFvgMinGapPoints * _Point;
+  const double bottom = iHigh(_Symbol, _Period, s2);
+  const double top    = iLow(_Symbol, _Period, s0);
+  if(top - bottom <= minGap)
+    return false;
+
+  const double ratio = MathMax(0.0, MathMin(1.0, InpFvgLimitMidRatio));
+  limitPrice = bottom + (top - bottom) * ratio;
+  return true;
+}
+
+bool Fvg_TryBearZone(const int s0, double &limitPrice)
+{
+  const int s2 = s0 + 2;
+  if(s2 >= Bars(_Symbol, _Period))
+    return false;
+
+  const double minGap = InpFvgMinGapPoints * _Point;
+  const double top    = iLow(_Symbol, _Period, s2);
+  const double bottom = iHigh(_Symbol, _Period, s0);
+  if(top - bottom <= minGap)
+    return false;
+
+  const double ratio = MathMax(0.0, MathMin(1.0, InpFvgLimitMidRatio));
+  limitPrice = top + (bottom - top) * ratio;
+  return true;
+}
+
+bool Fvg_SelectBestBuyLimit(const int windowStart, const int scanBars, double &limitPrice)
+{
+  const int bars = MathMax(3, scanBars);
+  const int wEnd = windowStart + bars - 1;
+  if(wEnd + 2 >= Bars(_Symbol, _Period))
+    return false;
+
+  const int dig = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+  bool   found = false;
+  double best  = 0.0;
+
+  for(int s0 = windowStart; s0 <= wEnd - 2; s0++)
+  {
+    double lp = 0.0;
+    if(!Fvg_TryBullZone(s0, lp))
+      continue;
+    lp = NormalizeDouble(lp, dig);
+    if(!found || lp > best)
+    {
+      best  = lp;
+      found = true;
+    }
+  }
+
+  if(found)
+    limitPrice = best;
+  return found;
+}
+
+bool Fvg_SelectBestSellLimit(const int windowStart, const int scanBars, double &limitPrice)
+{
+  const int bars = MathMax(3, scanBars);
+  const int wEnd = windowStart + bars - 1;
+  if(wEnd + 2 >= Bars(_Symbol, _Period))
+    return false;
+
+  const int dig = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+  bool   found = false;
+  double best  = 0.0;
+
+  for(int s0 = windowStart; s0 <= wEnd - 2; s0++)
+  {
+    double lp = 0.0;
+    if(!Fvg_TryBearZone(s0, lp))
+      continue;
+    lp = NormalizeDouble(lp, dig);
+    if(!found || lp < best)
+    {
+      best  = lp;
+      found = true;
+    }
+  }
+
+  if(found)
+    limitPrice = best;
+  return found;
+}
+
+bool Fvg_AllowsBuy(const int windowStart)
+{
+  if(!InpFvgFilterEnabled)
+    return true;
+  double lp = 0.0;
+  return Fvg_SelectBestBuyLimit(windowStart, InpFvgScanBars, lp);
+}
+
+bool Fvg_AllowsSell(const int windowStart)
+{
+  if(!InpFvgFilterEnabled)
+    return true;
+  double lp = 0.0;
+  return Fvg_SelectBestSellLimit(windowStart, InpFvgScanBars, lp);
+}
+
+//+------------------------------------------------------------------+
+string Signal_ReasonBuy(const bool trendUp, const bool ema9PersistBelow, const bool ema9SlopeUp,
+                        const bool rsiOkBuy, const bool structOkBuy, const bool fvgOkBuy, const bool valid)
+{
+  if(valid)
+  {
+    string s = "RSI cross | trend | EMA9 | struct OK";
+    if(InpFvgFilterEnabled)
+    {
+      s += " | FVG";
+      if(InpFvgWaitBarsAfterSignal > 0)
+        s += StringFormat(" (đợi %d nến)", InpFvgWaitBarsAfterSignal);
+      s += StringFormat(" Limit %.0f%% FVG", InpFvgLimitMidRatio * 100.0);
+    }
+    return s;
+  }
+
+  string f = "";
+  if(!trendUp)           f += "trend ";
+  if(!ema9PersistBelow)  f += "EMA9<WMA45 ";
+  if(!ema9SlopeUp)       f += "EMA9 slope ";
+  if(!rsiOkBuy)          f += "RSI OB ";
+  if(!structOkBuy)       f += "swing LH-LL ";
+  if(!fvgOkBuy)          f += "no FVG ";
+  return f;
+}
+
+string Signal_ReasonSell(const bool trendDown, const bool ema9PersistAbove, const bool ema9SlopeDown,
+                         const bool rsiOkSell, const bool structOkSell, const bool fvgOkSell, const bool valid)
+{
+  if(valid)
+  {
+    string s = "RSI cross | trend | EMA9 | struct OK";
+    if(InpFvgFilterEnabled)
+    {
+      s += " | FVG";
+      if(InpFvgWaitBarsAfterSignal > 0)
+        s += StringFormat(" (đợi %d nến)", InpFvgWaitBarsAfterSignal);
+      s += StringFormat(" Limit %.0f%% FVG", InpFvgLimitMidRatio * 100.0);
+    }
+    return s;
+  }
+
+  string f = "";
+  if(!trendDown)          f += "trend ";
+  if(!ema9PersistAbove)   f += "EMA9>WMA45 ";
+  if(!ema9SlopeDown)      f += "EMA9 slope ";
+  if(!rsiOkSell)          f += "RSI OS ";
+  if(!structOkSell)       f += "swing HH-HL ";
+  if(!fvgOkSell)          f += "no FVG ";
+  return f;
+}
+
+void Signal_DrawReasonLabel(const long ch, const datetime barTime, const double anchorPrice,
+                            const bool isBuy, const bool canEnter, const string detail)
+{
+  if(!InpShowSignalReason || barTime == 0)
+    return;
+
+  const string name = REASON_PREFIX + IntegerToString((int)barTime) + (isBuy ? "_B" : "_S");
+  const double yOff = InpReasonOffsetPts * _Point;
+  const double y    = isBuy ? (anchorPrice - yOff) : (anchorPrice + yOff);
+  const string txt  = (canEnter ? "VÀO: " : "KHÔNG: ") + detail;
+  const color  clr  = canEnter ? (isBuy ? InpArrowUpColor : InpArrowDownColor) : clrDarkGray;
+
+  if(ObjectFind(ch, name) < 0)
+  {
+    PrintFormat("[RsiMomEA] %s | %s %s", TimeToString(barTime, TIME_DATE | TIME_MINUTES), txt, _Symbol);
+    ObjectCreate(ch, name, OBJ_TEXT, 0, barTime, y);
+    ObjectSetInteger(ch, name, OBJPROP_ANCHOR,     isBuy ? ANCHOR_UPPER : ANCHOR_LOWER);
+    ObjectSetInteger(ch, name, OBJPROP_FONTSIZE,   MathMax(7, InpReasonFontSize));
+    ObjectSetString (ch, name, OBJPROP_FONT,     "Consolas");
+    ObjectSetInteger(ch, name, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(ch, name, OBJPROP_HIDDEN,     true);
+    ObjectSetInteger(ch, name, OBJPROP_BACK,       false);
+  }
+
+  ObjectSetDouble (ch, name, OBJPROP_PRICE,      0, y);
+  ObjectSetString (ch, name, OBJPROP_TEXT,     txt);
+  ObjectSetInteger(ch, name, OBJPROP_COLOR,    clr);
+  ObjectSetInteger(ch, name, OBJPROP_FONTSIZE, MathMax(7, InpReasonFontSize));
+}
+
+//+------------------------------------------------------------------+
 void SignalScan_Run(const int barsToScan, const int rates_total, const int need, const int trendN,
                     const datetime &timeArr[], const double &highArr[], const double &lowArr[],
                     const double &closeArr[], const double &ema200Arr[])
@@ -363,38 +764,61 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
     const bool rsiOkBuy     = (buf_RSI[i] < InpRSIOverbought);
     const bool rsiOkSell    = (buf_RSI[i] > InpRSIOversold);
 
-    const bool validBuy  = crossUp   && trendUp   && ema9PersistBelow && ema9SlopeUp   && rsiOkBuy;
-    const bool validSell = crossDown && trendDown && ema9PersistAbove && ema9SlopeDown && rsiOkSell;
-    if (!validBuy && !validSell) continue;
+    const bool structOkBuy  = Struct_AllowsBuy(i);
+    const bool structOkSell = Struct_AllowsSell(i);
+    const bool fvgOkBuy     = Fvg_AllowsBuy(i);
+    const bool fvgOkSell    = Fvg_AllowsSell(i);
 
-    const string arrowName = OBJ_PREFIX + "CR_" + IntegerToString((int)timeArr[i]);
-    if (ObjectFind(ch, arrowName) >= 0) continue;
-
-    if (validBuy)
+    if(crossUp)
     {
-      buf_Signal[i] = 1.0;
-      const double price = lowArr[i] - arrowOffset;
-      ObjectCreate(ch, arrowName, OBJ_ARROW, 0, timeArr[i], price);
-      ObjectSetInteger(ch, arrowName, OBJPROP_ARROWCODE,  233);
-      ObjectSetInteger(ch, arrowName, OBJPROP_ANCHOR,     ANCHOR_TOP);
-      ObjectSetInteger(ch, arrowName, OBJPROP_COLOR,      InpArrowUpColor);
-      ObjectSetInteger(ch, arrowName, OBJPROP_WIDTH,      InpArrowSize);
-      ObjectSetInteger(ch, arrowName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(ch, arrowName, OBJPROP_HIDDEN,     true);
-      ObjectSetString (ch, arrowName, OBJPROP_TOOLTIP, "BUY (EA)");
+      const bool validBuy = trendUp && ema9PersistBelow && ema9SlopeUp && rsiOkBuy && structOkBuy && fvgOkBuy;
+      const string reason = Signal_ReasonBuy(trendUp, ema9PersistBelow, ema9SlopeUp, rsiOkBuy,
+                                             structOkBuy, fvgOkBuy, validBuy);
+      const double arrowPrice = lowArr[i] - arrowOffset;
+      Signal_DrawReasonLabel(ch, timeArr[i], arrowPrice, true, validBuy, reason);
+
+      if(validBuy)
+      {
+        const string arrowName = OBJ_PREFIX + "CR_" + IntegerToString((int)timeArr[i]);
+        if(ObjectFind(ch, arrowName) < 0)
+        {
+          buf_Signal[i] = 1.0;
+          ObjectCreate(ch, arrowName, OBJ_ARROW, 0, timeArr[i], arrowPrice);
+          ObjectSetInteger(ch, arrowName, OBJPROP_ARROWCODE,  233);
+          ObjectSetInteger(ch, arrowName, OBJPROP_ANCHOR,     ANCHOR_TOP);
+          ObjectSetInteger(ch, arrowName, OBJPROP_COLOR,      InpArrowUpColor);
+          ObjectSetInteger(ch, arrowName, OBJPROP_WIDTH,      InpArrowSize);
+          ObjectSetInteger(ch, arrowName, OBJPROP_SELECTABLE, false);
+          ObjectSetInteger(ch, arrowName, OBJPROP_HIDDEN,     true);
+          ObjectSetString (ch, arrowName, OBJPROP_TOOLTIP, "BUY | " + reason);
+        }
+      }
     }
-    else
+
+    if(crossDown)
     {
-      buf_Signal[i] = -1.0;
-      const double price = highArr[i] + arrowOffset;
-      ObjectCreate(ch, arrowName, OBJ_ARROW, 0, timeArr[i], price);
-      ObjectSetInteger(ch, arrowName, OBJPROP_ARROWCODE,  234);
-      ObjectSetInteger(ch, arrowName, OBJPROP_ANCHOR,     ANCHOR_BOTTOM);
-      ObjectSetInteger(ch, arrowName, OBJPROP_COLOR,      InpArrowDownColor);
-      ObjectSetInteger(ch, arrowName, OBJPROP_WIDTH,      InpArrowSize);
-      ObjectSetInteger(ch, arrowName, OBJPROP_SELECTABLE, false);
-      ObjectSetInteger(ch, arrowName, OBJPROP_HIDDEN,     true);
-      ObjectSetString (ch, arrowName, OBJPROP_TOOLTIP, "SELL (EA)");
+      const bool validSell = trendDown && ema9PersistAbove && ema9SlopeDown && rsiOkSell && structOkSell && fvgOkSell;
+      const string reason = Signal_ReasonSell(trendDown, ema9PersistAbove, ema9SlopeDown, rsiOkSell,
+                                              structOkSell, fvgOkSell, validSell);
+      const double arrowPrice = highArr[i] + arrowOffset;
+      Signal_DrawReasonLabel(ch, timeArr[i], arrowPrice, false, validSell, reason);
+
+      if(validSell)
+      {
+        const string arrowName = OBJ_PREFIX + "CR_" + IntegerToString((int)timeArr[i]);
+        if(ObjectFind(ch, arrowName) < 0)
+        {
+          buf_Signal[i] = -1.0;
+          ObjectCreate(ch, arrowName, OBJ_ARROW, 0, timeArr[i], arrowPrice);
+          ObjectSetInteger(ch, arrowName, OBJPROP_ARROWCODE,  234);
+          ObjectSetInteger(ch, arrowName, OBJPROP_ANCHOR,     ANCHOR_BOTTOM);
+          ObjectSetInteger(ch, arrowName, OBJPROP_COLOR,      InpArrowDownColor);
+          ObjectSetInteger(ch, arrowName, OBJPROP_WIDTH,      InpArrowSize);
+          ObjectSetInteger(ch, arrowName, OBJPROP_SELECTABLE, false);
+          ObjectSetInteger(ch, arrowName, OBJPROP_HIDDEN,     true);
+          ObjectSetString (ch, arrowName, OBJPROP_TOOLTIP, "SELL | " + reason);
+        }
+      }
     }
   }
 }
@@ -512,7 +936,10 @@ int OnInit()
   g_lastAlertSellBar = 0;
   g_firstCalc        = true;
   g_prevCalculated   = 0;
-  g_tradeBarAnchor   = iTime(_Symbol, _Period, 0);
+  g_tradeBarAnchor        = iTime(_Symbol, _Period, 0);
+  g_pendingPlacedBarTime  = 0;
+  g_deferSignalBarTime    = 0;
+  g_deferIsBuy            = false;
 
   g_statExitDeals = 0;
   g_statSL        = 0;
@@ -538,6 +965,7 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+  Pending_CancelMine();
   Handles_ReleaseAll();
   ObjectsDeleteAll(ActChart(), OBJ_PREFIX);
   ObjectsDeleteAll(ActChart(), STAT_PREFIX);
@@ -547,6 +975,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+  Pending_ManageExpiry();
+
   const int rates_total = Bars(_Symbol, _Period);
   const int ret = RsiMomentum_OnCalculate(rates_total, g_prevCalculated);
   if (ret != 0)
@@ -557,6 +987,113 @@ void OnTick()
   {
     g_tradeBarAnchor = t0;
     TradeTryOnBarOpen(ret);
+  }
+}
+
+//+------------------------------------------------------------------+
+void TradeExecuteOrder(const bool isBuy)
+{
+  if (isBuy && !Struct_AllowsBuy(1))
+  {
+    Print("[RsiMomEA] Trade skip BUY: 4 swing = LH-LL (ngược tín hiệu mua)");
+    return;
+  }
+  if (!isBuy && !Struct_AllowsSell(1))
+  {
+    Print("[RsiMomEA] Trade skip SELL: 4 swing = HH-HL (ngược tín hiệu bán)");
+    return;
+  }
+
+  if (InpOnePositionFlat && HasMyMagicPositionOrPending())
+    return;
+
+  const int  dig     = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+  const int  fvgWin  = Fvg_TradeWindowStart();
+  double     entryPx = 0.0;
+  bool       useLimit = InpFvgFilterEnabled;
+
+  if (useLimit)
+  {
+    if (isBuy)
+    {
+      if (!Fvg_SelectBestBuyLimit(fvgWin, InpFvgScanBars, entryPx))
+      {
+        Print("[RsiMomEA] Trade skip BUY: không có FVG bull trong ", InpFvgScanBars,
+              " nến (từ shift ", fvgWin, ")");
+        return;
+      }
+    }
+    else
+    {
+      if (!Fvg_SelectBestSellLimit(fvgWin, InpFvgScanBars, entryPx))
+      {
+        Print("[RsiMomEA] Trade skip SELL: không có FVG bear trong ", InpFvgScanBars,
+              " nến (từ shift ", fvgWin, ")");
+        return;
+      }
+    }
+  }
+  else
+  {
+    MqlTick tk;
+    if (!SymbolInfoTick(_Symbol, tk))
+      return;
+    entryPx = isBuy ? tk.ask : tk.bid;
+    useLimit = false;
+  }
+
+  Pending_CancelMine();
+
+  double sl = 0.0, tp = 0.0;
+  if (!NearestSwingSlTp(isBuy, entryPx, dig, sl, tp))
+  {
+    Print("[RsiMomEA] Trade skip: SL/TP swing không hợp lệ");
+    return;
+  }
+  if (!StopsValid(isBuy, entryPx, sl, tp))
+  {
+    Print("[RsiMomEA] Trade skip: STOPS_LEVEL / FREEZE");
+    return;
+  }
+
+  double vol = VolumeForRiskPercent(isBuy, entryPx, sl);
+  vol = NormalizeLots(vol);
+  if (vol <= 0.0)
+  {
+    Print("[RsiMomEA] Trade skip: volume=0");
+    return;
+  }
+
+  bool ok = false;
+  if (useLimit)
+  {
+    ok = isBuy
+         ? g_trade.BuyLimit(vol, entryPx, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "RsiMom BUY FVG")
+         : g_trade.SellLimit(vol, entryPx, _Symbol, sl, tp, ORDER_TIME_GTC, 0, "RsiMom SELL FVG");
+    if (!ok)
+      Print("[RsiMomEA] Limit fail ", g_trade.ResultRetcode(), " ", g_trade.ResultComment());
+    else
+    {
+      g_pendingPlacedBarTime = iTime(_Symbol, _Period, 0);
+      Print("[RsiMomEA] Limit OK #", g_trade.ResultOrder(), " ", isBuy ? "BUY" : "SELL",
+            " @ ", DoubleToString(entryPx, dig),
+            " vol=", vol, " SL=", DoubleToString(sl, dig), " TP=", DoubleToString(tp, dig),
+            " expireBars=", InpFvgLimitExpireBars);
+    }
+  }
+  else
+  {
+    MqlTick tk;
+    if (!SymbolInfoTick(_Symbol, tk))
+      return;
+    ok = isBuy
+         ? g_trade.Buy(vol, _Symbol, tk.ask, sl, tp, "RsiMom BUY")
+         : g_trade.Sell(vol, _Symbol, tk.bid, sl, tp, "RsiMom SELL");
+    if (!ok)
+      Print("[RsiMomEA] Market fail ", g_trade.ResultRetcode(), " ", g_trade.ResultComment());
+    else
+      Print("[RsiMomEA] Market OK #", g_trade.ResultOrder(), " ", isBuy ? "BUY" : "SELL",
+            " vol=", vol, " SL=", DoubleToString(sl, dig), " TP=", DoubleToString(tp, dig));
   }
 }
 
@@ -572,62 +1109,181 @@ void TradeTryOnBarOpen(const int calcRet)
   if (ArraySize(buf_Signal) < 2)
     return;
 
+  const int waitBars = MathMax(0, InpFvgWaitBarsAfterSignal);
+
+  if (g_deferSignalBarTime != 0 && InpFvgFilterEnabled && waitBars > 0)
+  {
+    const int sh = iBarShift(_Symbol, _Period, g_deferSignalBarTime, true);
+    if (sh < 0)
+    {
+      g_deferSignalBarTime = 0;
+      return;
+    }
+
+    if (sh < 1 + waitBars)
+      return;
+
+    const bool isBuy = g_deferIsBuy;
+    g_deferSignalBarTime = 0;
+    Print("[RsiMomEA] Đã đợi ", waitBars, " nến sau tín hiệu — quét FVG và đặt lệnh");
+    TradeExecuteOrder(isBuy);
+    return;
+  }
+
   const double s = buf_Signal[1];
   if (s > -0.5 && s < 0.5)
     return;
 
   const bool isBuy = (s > 0.5);
 
-  if (InpOnePositionFlat && CountMyMagicPositions() > 0)
-    return;
-
-  MqlTick tk;
-  if (!SymbolInfoTick(_Symbol, tk))
-    return;
-
-  const int    dig   = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-  const double entry = isBuy ? tk.ask : tk.bid;
-  double       sl = 0.0, tp = 0.0;
-
-  if (!NearestSwingSlTp(isBuy, entry, dig, sl, tp))
+  if (isBuy && !Struct_AllowsBuy(1))
   {
-    Print("[RsiMomEA] Trade skip: SL/TP swing không hợp lệ");
+    Print("[RsiMomEA] Trade skip BUY: 4 swing = LH-LL (ngược tín hiệu mua)");
     return;
   }
-  if (!StopsValid(isBuy, entry, sl, tp))
+  if (!isBuy && !Struct_AllowsSell(1))
   {
-    Print("[RsiMomEA] Trade skip: STOPS_LEVEL / FREEZE");
+    Print("[RsiMomEA] Trade skip SELL: 4 swing = HH-HL (ngược tín hiệu bán)");
     return;
   }
 
-  const double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
-  const double riskMoney = balance * (InpRiskPercent / 100.0);
-  double       vol       = VolumeForRiskPercent(isBuy, entry, sl);
-  vol = NormalizeLots(vol);
-  if (vol <= 0.0)
+  if (InpFvgFilterEnabled && waitBars > 0)
   {
-    Print("[RsiMomEA] Trade skip: volume=0");
+    const datetime tSig = iTime(_Symbol, _Period, 1);
+    if (tSig == 0)
+      return;
+
+    if (tSig == g_deferSignalBarTime)
+      return;
+
+    g_deferSignalBarTime = tSig;
+    g_deferIsBuy         = isBuy;
+    Print("[RsiMomEA] Tín hiệu ", isBuy ? "BUY" : "SELL",
+          " — đợi ", waitBars, " nến đóng rồi quét FVG (bar ", TimeToString(tSig, TIME_DATE | TIME_MINUTES), ")");
     return;
   }
 
-  const bool ok = isBuy
-                  ? g_trade.Buy(vol, _Symbol, tk.ask, sl, tp, "RsiMom BUY")
-                  : g_trade.Sell(vol, _Symbol, tk.bid, sl, tp, "RsiMom SELL");
+  TradeExecuteOrder(isBuy);
+}
 
-  if (!ok)
-    Print("[RsiMomEA] Order fail ", g_trade.ResultRetcode(), " ", g_trade.ResultComment());
-  else
-    Print("[RsiMomEA] Order OK #", g_trade.ResultOrder(), " ", isBuy ? "BUY" : "SELL",
-          " vol=", vol, " SL=", DoubleToString(sl, dig), " TP=", DoubleToString(tp, dig));
+//+------------------------------------------------------------------+
+int CountMyMagicPendingOrders()
+{
+  int n = 0;
+  for (int i = OrdersTotal() - 1; i >= 0; i--)
+  {
+    const ulong ticket = OrderGetTicket(i);
+    if (ticket == 0)
+      continue;
+    if (OrderGetString(ORDER_SYMBOL) != _Symbol)
+      continue;
+    if ((ulong)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+      continue;
+    const ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+    if (t == ORDER_TYPE_BUY_LIMIT || t == ORDER_TYPE_SELL_LIMIT)
+      n++;
+  }
+  return n;
+}
+
+bool HasMyMagicPositionOrPending()
+{
+  return (CountMyMagicPositions() > 0 || CountMyMagicPendingOrders() > 0);
+}
+
+bool Pending_CancelMine()
+{
+  bool any = false;
+  for (int i = OrdersTotal() - 1; i >= 0; i--)
+  {
+    const ulong ticket = OrderGetTicket(i);
+    if (ticket == 0)
+      continue;
+    if (OrderGetString(ORDER_SYMBOL) != _Symbol)
+      continue;
+    if ((ulong)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+      continue;
+    const ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+    if (t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT)
+      continue;
+    if (g_trade.OrderDelete(ticket))
+      any = true;
+  }
+  if (any)
+    g_pendingPlacedBarTime = 0;
+  return any;
+}
+
+void Pending_ManageExpiry()
+{
+  if (InpFvgLimitExpireBars <= 0)
+    return;
+  if (g_pendingPlacedBarTime == 0)
+    return;
+
+  int pendingCount = 0;
+  for (int i = OrdersTotal() - 1; i >= 0; i--)
+  {
+    const ulong ticket = OrderGetTicket(i);
+    if (ticket == 0)
+      continue;
+    if (OrderGetString(ORDER_SYMBOL) != _Symbol)
+      continue;
+    if ((ulong)OrderGetInteger(ORDER_MAGIC) != InpMagic)
+      continue;
+    const ENUM_ORDER_TYPE t = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+    if (t != ORDER_TYPE_BUY_LIMIT && t != ORDER_TYPE_SELL_LIMIT)
+      continue;
+    pendingCount++;
+  }
+
+  if (pendingCount == 0)
+  {
+    g_pendingPlacedBarTime = 0;
+    return;
+  }
+
+  const int shift = iBarShift(_Symbol, _Period, g_pendingPlacedBarTime, true);
+  if (shift < 0)
+    return;
+
+  if (shift >= InpFvgLimitExpireBars)
+  {
+    Print("[RsiMomEA] Hủy Limit sau ", shift, " nến (max ", InpFvgLimitExpireBars, ")");
+    Pending_CancelMine();
+  }
+}
+
+//+------------------------------------------------------------------+
+//| Khoảng cách đẩy SL ra xa pivot: spread (+) ATR×mult nếu bật      |
+//+------------------------------------------------------------------+
+double Sl_GetBufferDistance(const int atrShift = 1)
+{
+  double dist = 0.0;
+
+  if (InpSlAtrAddSpread)
+  {
+    const int spr = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+    dist += spr * _Point;
+  }
+
+  if (InpSlAtrBufferEnabled && h_ATR != INVALID_HANDLE)
+  {
+    double atrBuf[];
+    ArraySetAsSeries(atrBuf, true);
+    if (CopyBuffer(h_ATR, 0, atrShift, 1, atrBuf) > 0 && atrBuf[0] > 0.0)
+      dist += atrBuf[0] * MathMax(0.0, InpSlAtrMultiplier);
+  }
+
+  return dist;
 }
 
 //+------------------------------------------------------------------+
 bool NearestSwingSlTp(const bool isBuy, const double entry, const int dig, double &sl, double &tp)
 {
-  const double rr = MathMax(0.01, InpRewardRiskRatio);
-  const int mx = MathMax(5, InpSwingMaxBars);
-  const int spr = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
-  const double buf = spr * _Point;
+  const double rr  = MathMax(0.01, InpRewardRiskRatio);
+  const int    mx  = MathMax(5, InpSwingMaxBars);
+  const double buf = Sl_GetBufferDistance(1);
 
   if (isBuy)
   {
@@ -773,11 +1429,17 @@ void SetTradeFillingFromSymbol()
 }
 
 //+------------------------------------------------------------------+
+int Stats_LineStepPx()
+{
+  return MathMax(12, InpStatFontSize + MathMax(8, InpStatLinePad));
+}
+
 void Stats_CreateObjects()
 {
   const long ch = ActChart();
   const int  fs = MathMax(7, InpStatFontSize);
-  const int  step = fs + STAT_LINE_PAD;
+  const int  step = Stats_LineStepPx();
+  const int  y0 = MathMax(10, InpStatBottomMargin);
 
   for (int k = 0; k < 3; k++)
   {
@@ -787,7 +1449,7 @@ void Stats_CreateObjects()
     ObjectCreate(ch, name, OBJ_LABEL, 0, 0, 0);
     ObjectSetInteger(ch, name, OBJPROP_CORNER,      CORNER_LEFT_LOWER);
     ObjectSetInteger(ch, name, OBJPROP_XDISTANCE,   8);
-    ObjectSetInteger(ch, name, OBJPROP_YDISTANCE,   STAT_Y_ANCHOR + k * step);
+    ObjectSetInteger(ch, name, OBJPROP_YDISTANCE,   y0 + k * step);
     ObjectSetInteger(ch, name, OBJPROP_FONTSIZE,    fs);
     ObjectSetString (ch, name, OBJPROP_FONT,      "Consolas");
     ObjectSetInteger(ch, name, OBJPROP_COLOR,       InpStatColor);
@@ -816,18 +1478,14 @@ void Stats_UpdateDisplay()
   }
 
   const int fs   = MathMax(7, InpStatFontSize);
-  const int step = fs + STAT_LINE_PAD;
+  const int step = Stats_LineStepPx();
+  const int y0   = MathMax(10, InpStatBottomMargin);
   for (int k = 0; k < 3; k++)
   {
     const string nm = (k == 0) ? STAT_L1 : ((k == 1) ? STAT_L2 : STAT_L3);
     ObjectSetInteger(ch, nm, OBJPROP_FONTSIZE,  fs);
-    ObjectSetInteger(ch, nm, OBJPROP_YDISTANCE, STAT_Y_ANCHOR + k * step);
+    ObjectSetInteger(ch, nm, OBJPROP_YDISTANCE, y0 + k * step);
   }
-
-  string line1 = StringFormat("Total: %I64d | SL %I64d | TP %I64d",
-                              g_statExitDeals, g_statSL, g_statTP);
-  if (g_statOther > 0)
-    line1 += StringFormat(" | Other %I64d", g_statOther);
 
   double winrate = 0.0;
   if (g_statExitDeals > 0)
@@ -838,16 +1496,19 @@ void Stats_UpdateDisplay()
   if (g_statExitDeals > 0)
     avg = g_statSumProfit / (double)g_statExitDeals;
 
+  string line1 = StringFormat("Average Profit / trade: %s %s", DoubleToString(avg, 2), cur);
   const string line2 = StringFormat("Winrate: %.1f%%", winrate);
-  const string line3 = StringFormat("Average Profit / trade: %s %s",
-                                     DoubleToString(avg, 2), cur);
+  string line3 = StringFormat("Total: %I64d | SL %I64d | TP %I64d",
+                              g_statExitDeals, g_statSL, g_statTP);
+  if (g_statOther > 0)
+    line3 += StringFormat(" | Other %I64d", g_statOther);
 
-  ObjectSetString (ch, STAT_L1, OBJPROP_TEXT, line1);
-  ObjectSetInteger(ch, STAT_L1, OBJPROP_COLOR, InpStatColor);
-  ObjectSetString (ch, STAT_L2, OBJPROP_TEXT, line2);
-  ObjectSetInteger(ch, STAT_L2, OBJPROP_COLOR, InpStatColor);
   ObjectSetString (ch, STAT_L3, OBJPROP_TEXT, line3);
   ObjectSetInteger(ch, STAT_L3, OBJPROP_COLOR, InpStatColor);
+  ObjectSetString (ch, STAT_L2, OBJPROP_TEXT, line2);
+  ObjectSetInteger(ch, STAT_L2, OBJPROP_COLOR, InpStatColor);
+  ObjectSetString (ch, STAT_L1, OBJPROP_TEXT, line1);
+  ObjectSetInteger(ch, STAT_L1, OBJPROP_COLOR, InpStatColor);
   ChartRedraw(ch);
 }
 
