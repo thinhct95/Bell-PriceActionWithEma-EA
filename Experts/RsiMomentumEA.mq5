@@ -4,7 +4,7 @@
 //| RSI×WMA45 + 5phase entry | ATR↑ EMA200 phiên | Limit 50% body |
 //+------------------------------------------------------------------+
 #property copyright "RsiMomentumEA"
-#property version   "4.23"
+#property version   "4.24"
 
 #include <Trade/Trade.mqh>
 #include <RsiMom/TradeJournal.mqh>
@@ -35,7 +35,7 @@ input double InpRSIOversold          = 30.0;  // RSI ≤ ngưỡng → bỏ SELL
 input group "Entry 5 phase (mở rộng → cuộn EMA9 → EMA9 hướng → WMA45 phẳng → cắt gần)"
 input bool   InpPhaseFilterEnabled   = true;
 input int    InpPhaseExpandLookback  = 25;    // P1: quét mở rộng 3 đường
-input double InpPhaseMinExpandSpread = 10.0;  // P1: min max(WMA45-RSI) pt RSI [tối ưu ~6–18, step 1]
+input double InpPhaseMinExpandSpread = 16.0;  // P1: min max(WMA45-RSI) pt RSI [tối ưu ~6–18, step 1]
 input int    InpPhaseCoilLookback    = 12;    // P2: quét cuộn trước nến tín hiệu
 input int    InpPhaseMinRsiEma9Cross = 2;     // P2: RSI cắt EMA9 ≥ N lần (chống xuyên 1 lần)
 input double InpPhaseCoilBand        = 6.0;   // P2: |RSI-EMA9| ≤ band = quanh EMA9
@@ -56,7 +56,7 @@ input int    InpLimitExpireBars     = 40;    // hủy Limit nếu không khớp 
 input group "Debug — đánh dấu RSI×WMA45 (hợp lệ / skip + lý do)"
 input bool   InpDebugMarkSignals  = true;   // mọi cross: OK xanh | SIG vàng | SKIP đỏ + nhãn phase fail
 input int    InpDebugMarkMaxBars  = 400;    // chỉ tạo mới trong N nến gần nhất (dấu cũ vẫn giữ)
-input bool   InpDebugLogExperts   = true;   // in Experts khi cross tại nến tín hiệu (shift=1)
+input bool   InpDebugLogExperts   = true;   // 1 dòng Experts / nến tín hiệu (không lặp mỗi tick)
 input bool   InpDebugHoverHint    = true;   // rê chuột lên dấu X: panel góc dưới-trái + tooltip
 
 input group "Mũi tên giao cắt"
@@ -151,7 +151,10 @@ const string DBG_PREFIX   = OBJ_PREFIX + "DBG_";
 #define PANEL_LINE_COUNT 22
 #define PANEL_IDX_MARKET 16   // dòng 16+ = RSI / signal (sau block trạng thái)
 const string PNL_PREFIX = OBJ_PREFIX + "pnl_";
-const string EA_VERSION_STR = "4.22";
+const string EA_VERSION_STR = "4.24";
+
+datetime g_dbgLogBarTime = 0;  // chống spam Experts: 1 dòng / (nến, BUY|SELL)
+int      g_dbgLogSide    = 0;  // 1=BUY, -1=SELL
 
 const string STAT_PREFIX = "RsiMomEA_ST_";
 const string STAT_L1     = STAT_PREFIX + "line1";
@@ -987,6 +990,17 @@ void Signal_DebugApplyTradeLayer(SignalEvalResult &ev, const int shift)
 }
 
 //+------------------------------------------------------------------+
+bool Signal_DebugShouldLogExperts(const datetime barTime, const bool isBuy)
+{
+   const int side = isBuy ? 1 : -1;
+   if(barTime == g_dbgLogBarTime && side == g_dbgLogSide)
+      return false;
+   g_dbgLogBarTime = barTime;
+   g_dbgLogSide    = side;
+   return true;
+}
+
+//+------------------------------------------------------------------+
 void Signal_DebugMarkCross(const long ch, const int shift, const datetime barTime,
                            const double barHigh, const double barLow, const double markPrice,
                            const bool isBuy, const int rates_total, const int trendN,
@@ -1017,7 +1031,8 @@ void Signal_DebugMarkCross(const long ch, const int shift, const datetime barTim
   Signal_DebugDrawMark(ch, DBG_PREFIX, barTime, barHigh, barLow, markPrice, isBuy, ev);
 
   const int sigShift = MathMax(1, InpSignalBarShift);
-  if(InpDebugLogExperts && shift == sigShift)
+  if(InpDebugLogExperts && shift == sigShift
+     && Signal_DebugShouldLogExperts(barTime, isBuy))
   {
     PrintFormat("[RsiMomEA DBG] %s %s %s fail=[%s] | %s",
                 TimeToString(barTime, TIME_DATE | TIME_MINUTES),
@@ -1325,6 +1340,8 @@ int OnInit()
 {
   g_lastAlertBuyBar  = 0;
   g_lastAlertSellBar = 0;
+  g_dbgLogBarTime    = 0;
+  g_dbgLogSide       = 0;
   g_firstCalc        = true;
   g_prevCalculated   = 0;
   g_tradeBarAnchor        = iTime(_Symbol, _Period, 0);

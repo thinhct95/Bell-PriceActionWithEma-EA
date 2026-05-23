@@ -316,7 +316,7 @@ Chỉ thực hiện một lần mỗi ticket (`g_pmAt1RDone`).
 |-------|--------|
 | `InpDebugMarkSignals` | Vẽ `RsiMomEA_DBG_*` tại **mọi** cross RSI×WMA45 |
 | `InpDebugMarkMaxBars` | Giới hạn N nến gần nhất |
-| `InpDebugLogExperts` | In chi tiết tại `InpSignalBarShift` |
+| `InpDebugLogExperts` | 1 dòng Experts / nến tín hiệu (không lặp mỗi tick) |
 
 **Màu / nhãn:**
 
