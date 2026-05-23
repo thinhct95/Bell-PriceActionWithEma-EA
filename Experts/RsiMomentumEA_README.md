@@ -93,7 +93,7 @@ Không có cross → không xét tiếp.
 | Input | Mặc định (debug) | Điều kiện khi **bật** |
 |-------|------------------|------------------------|
 | `InpTrendFilterEnabled` | `false` | BUY: `InpTrendConfirmBars` nến liên tiếp có `Close > EMA200`. SELL: `Close < EMA200`. |
-| `InpAtrExpFilterEnabled` | `false` | ATR(shift) / ATR(shift+cmp) ≥ `InpAtrExpMinRatio` **và** ATR tăng liên tiếp `InpAtrExpRiseBars` nến. |
+| `InpAtrExpFilterEnabled` | `true` | ATR(shift) / ATR(shift+cmp) ≥ `InpAtrExpMinRatio` **và** ATR tăng liên tiếp `InpAtrExpRiseBars` nến. |
 | `InpSessionFilterEnabled` | `false` | Thời gian **nến tín hiệu** nằm London hoặc NY; không trong cửa sổ giao phiên; trừ `InpSessionAvoidLastMin` phút cuối phiên. |
 
 **Tín hiệu hợp lệ (ghi `buf_Signal`):**
@@ -381,7 +381,7 @@ Include/RsiMom/
 ```
 InpPhaseFilterEnabled   = true
 InpTrendFilterEnabled   = false
-InpAtrExpFilterEnabled  = false
+InpAtrExpFilterEnabled  = true
 InpSessionFilterEnabled = false
 InpDebugMarkSignals     = true
 ```
@@ -442,4 +442,20 @@ EA **không** đọc file indicator. Indicator `Indicators/RsiMomentumIndicator`
 
 ---
 
-*Tài liệu đồng bộ với mã nguồn v4.23.*
+---
+
+## 16. Tối ưu ATR mở rộng
+
+**Mục tiêu:** Bỏ entry khi biến động “ngủ” (ATR không tăng) — thường giảm chop, có thể tăng PF.
+
+| Input | Mặc định | Gợi ý sweep |
+|-------|----------|-------------|
+| `InpAtrExpMinRatio` | 1.005 | 1.003–1.015 (step 0.001) |
+| `InpAtrExpRiseBars` | 2 | 1 (lỏng) hoặc 3 (chặt) |
+| `InpAtrExpCompareBars` | 3 | 2–5 |
+
+Debug: SKIP `ATR co` hoặc tooltip `ATR:FAIL`. Nếu **0 lệnh** sau bật filter → hạ `MinRatio` hoặc `RiseBars=1`.
+
+---
+
+*Tài liệu đồng bộ với mã nguồn v4.25.*

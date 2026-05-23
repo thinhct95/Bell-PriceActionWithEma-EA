@@ -4,7 +4,7 @@
 //| RSI×WMA45 + 5phase entry | ATR↑ EMA200 phiên | Limit 50% body |
 //+------------------------------------------------------------------+
 #property copyright "RsiMomentumEA"
-#property version   "4.24"
+#property version   "4.27"
 
 #include <Trade/Trade.mqh>
 #include <RsiMom/TradeJournal.mqh>
@@ -19,13 +19,13 @@ input int    InpWMA45Period       = 45;
 input int    InpEMATrendPeriod    = 200;
 
 input group "Bộ lọc tín hiệu (RSI + ATR + trend EMA200)"
-input bool   InpTrendFilterEnabled   = true;   // BUY: close > EMA200 | SELL: close < EMA200
+input bool   InpTrendFilterEnabled   = false;   // BUY: close > EMA200 | SELL: close < EMA200
 input int    InpTrendConfirmBars    = 1;     // BUY: N close > EMA200 | SELL: N close < EMA200
-input bool   InpAtrExpFilterEnabled  = false;  // tắt = bỏ lọc ATR mở rộng (debug)
+input bool   InpAtrExpFilterEnabled  = true;   // ATR tăng vs N bar + liên tiếp (lọc sideway)
 input int    InpAtrExpPeriod         = 14;
-input int    InpAtrExpCompareBars    = 3;
-input double InpAtrExpMinRatio       = 1.005;
-input int    InpAtrExpRiseBars       = 2;
+input int    InpAtrExpCompareBars    = 3;      // so ATR[shift] vs ATR[shift+N]
+input double InpAtrExpMinRatio       = 1.005;  // ≥1.005 = +0.5% (tối ưu 1.003–1.02)
+input int    InpAtrExpRiseBars       = 2;      // ATR tăng liên tiếp N nến (1 = lỏng hơn)
 
 input group "Lọc RSI quá mua / quá bán (nến tín hiệu)"
 input bool   InpRsiObOsFilterEnabled = true;   // BUY khi RSI<70 | SELL khi RSI>30
@@ -35,7 +35,7 @@ input double InpRSIOversold          = 30.0;  // RSI ≤ ngưỡng → bỏ SELL
 input group "Entry 5 phase (mở rộng → cuộn EMA9 → EMA9 hướng → WMA45 phẳng → cắt gần)"
 input bool   InpPhaseFilterEnabled   = true;
 input int    InpPhaseExpandLookback  = 25;    // P1: quét mở rộng 3 đường
-input double InpPhaseMinExpandSpread = 16.0;  // P1: min max(WMA45-RSI) pt RSI [tối ưu ~6–18, step 1]
+input double InpPhaseMinExpandSpread = 10.0;  // P1: min max(WMA45-RSI) pt RSI [tối ưu ~6–18, step 1]
 input int    InpPhaseCoilLookback    = 12;    // P2: quét cuộn trước nến tín hiệu
 input int    InpPhaseMinRsiEma9Cross = 2;     // P2: RSI cắt EMA9 ≥ N lần (chống xuyên 1 lần)
 input double InpPhaseCoilBand        = 6.0;   // P2: |RSI-EMA9| ≤ band = quanh EMA9
@@ -108,10 +108,11 @@ input int    InpTransition2EndHour      = 22;
 input bool   InpSpreadFilterEnabled     = true;
 input int    InpMaxSpreadPoints         = 60;     // SYMBOL_SPREAD (points) tối đa
 input bool   InpSpreadSkipInTester      = true;   // Tester: bỏ lọc spread (spread cố định thường quá cao)
+input bool   InpTesterCalcOnNewBarOnly  = true;   // Tester: OnCalculate chỉ khi nến mới (tránh chậm dần)
 
 input group "Quản lý lệnh mở @ 1R"
-input bool   InpManageAt1R          = false; // tắt tạm: chốt 50% @1R + dời SL về entry
-input double InpPartialCloseRatio   = 0.5;   // tỷ lệ volume chốt khi đạt 1R
+input bool   InpManageAt1R          = true;  // @1R: chốt một phần + dời SL về entry
+input double InpPartialCloseRatio   = 0.5;   // tỷ lệ volume chốt khi đạt 1R (0.5 = 50%)
 input int    InpBreakevenOffsetPts  = 0;    // SL tại entry ± point (0 = đúng entry)
 
 input group "SL buffer theo ATR (đẩy SL xa đáy/đỉnh swing)"
@@ -151,7 +152,7 @@ const string DBG_PREFIX   = OBJ_PREFIX + "DBG_";
 #define PANEL_LINE_COUNT 22
 #define PANEL_IDX_MARKET 16   // dòng 16+ = RSI / signal (sau block trạng thái)
 const string PNL_PREFIX = OBJ_PREFIX + "pnl_";
-const string EA_VERSION_STR = "4.24";
+const string EA_VERSION_STR = "4.27";
 
 datetime g_dbgLogBarTime = 0;  // chống spam Experts: 1 dòng / (nến, BUY|SELL)
 int      g_dbgLogSide    = 0;  // 1=BUY, -1=SELL
@@ -183,6 +184,31 @@ bool     g_pmAt1RDone = false;
 CTrade g_trade;
 
 long ActChart() { return ChartID(); }
+
+bool IsStrategyTester()
+{
+   return (bool)MQLInfoInteger(MQL_TESTER);
+}
+
+bool IsTesterVisualMode()
+{
+   return IsStrategyTester() && (bool)MQLInfoInteger(MQL_VISUAL_MODE);
+}
+
+bool DebugMarksEffective()
+{
+   if(!InpDebugMarkSignals)
+      return false;
+   // Tester không visual: không vẽ object (tránh hàng nghìn object làm chậm)
+   if(IsStrategyTester() && !IsTesterVisualMode())
+      return false;
+   return true;
+}
+
+bool ChartRedrawEffective()
+{
+   return !IsStrategyTester() || IsTesterVisualMode();
+}
 
 void   SetTradeFillingFromSymbol();
 double Sl_GetBufferDistance(const int atrShift = 1);
@@ -1009,6 +1035,9 @@ void Signal_DebugMarkCross(const long ch, const int shift, const datetime barTim
                            const bool atrExpOkBar, const bool sessionAtBar,
                            const string sessionFailWhy)
 {
+  if(DebugMarksEffective() && Signal_DebugMarkExists(ch, DBG_PREFIX, barTime, isBuy))
+      return;
+
   SignalEvalResult ev;
   if(isBuy)
     ev = Signal_EvaluateBuyAt(shift, rates_total, trendN,
@@ -1054,8 +1083,12 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
   const double arrowOffset = InpArrowOffsetPts * _Point;
   const int    dbgMax = MathMax(50, InpDebugMarkMaxBars);
 
-  if(InpDebugMarkSignals)
+  const bool dbgMarks = DebugMarksEffective();
+  if(dbgMarks)
+  {
     Signal_DebugConfigureChart(ch);
+    Signal_DebugPruneOlderThan(ch, DBG_PREFIX, MathMax(50, InpDebugMarkMaxBars) + 5);
+  }
 
   buf_Signal[0] = 0.0;
   buf_Trend[0]  = 0.0;
@@ -1103,7 +1136,7 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
     {
       const bool validBuy = coreBuyOk && trendUp && atrExpOkBar && rsiOkBuy && envOkBar;
 
-      if(InpDebugMarkSignals && i <= dbgMax)
+      if(dbgMarks && i <= dbgMax)
       {
         string envDbg = envWhy;
         Signal_DebugMarkCross(ch, i, timeArr[i], highArr[i], lowArr[i],
@@ -1137,7 +1170,7 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
     {
       const bool validSell = coreSellOk && trendDown && atrExpOkBar && rsiOkSell && envOkBar;
 
-      if(InpDebugMarkSignals && i <= dbgMax)
+      if(dbgMarks && i <= dbgMax)
       {
         string envDbg = envWhy;
         Signal_DebugMarkCross(ch, i, timeArr[i], highArr[i], lowArr[i],
@@ -1329,7 +1362,8 @@ int RsiMomentum_OnCalculate(const int rates_total, const int prev_calculated)
   Alerts_CheckAndFire(timeArr, closeArr, ema200Arr, need, rates_total);
   Panel_Update(closeArr, ema200Arr, trendN, rates_total);
 
-  ChartRedraw(ActChart());
+  if(ChartRedrawEffective())
+    ChartRedraw(ActChart());
   Diagnostics_FirstPass(rates_total, copyN, trendN, need, closeArr);
 
   return copyN;
@@ -1428,16 +1462,26 @@ void OnTick()
   Pending_ManageExpiry();
   Position_ManageAt1R();
 
-  const int rates_total = Bars(_Symbol, _Period);
-  const int ret = RsiMomentum_OnCalculate(rates_total, g_prevCalculated);
-  if (ret != 0)
-    g_prevCalculated = ret;
-
   const datetime t0 = iTime(_Symbol, _Period, 0);
-  if (t0 != 0 && t0 != g_tradeBarAnchor)
+  const bool newBar = (t0 != 0 && t0 != g_tradeBarAnchor);
+  const bool runCalc = (g_prevCalculated == 0)
+                       || newBar
+                       || !IsStrategyTester()
+                       || !InpTesterCalcOnNewBarOnly;
+
+  int calcRet = g_prevCalculated;
+  if(runCalc)
+  {
+    const int rates_total = Bars(_Symbol, _Period);
+    calcRet = RsiMomentum_OnCalculate(rates_total, g_prevCalculated);
+    if(calcRet != 0)
+      g_prevCalculated = calcRet;
+  }
+
+  if(newBar)
   {
     g_tradeBarAnchor = t0;
-    TradeTryOnBarOpen(ret);
+    TradeTryOnBarOpen(calcRet);
   }
 
   if(InpShowPanel)
@@ -1447,7 +1491,7 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
-   if(!InpDebugMarkSignals || !InpDebugHoverHint)
+   if(!DebugMarksEffective() || !InpDebugHoverHint)
       return;
 
    const long ch = ActChart();

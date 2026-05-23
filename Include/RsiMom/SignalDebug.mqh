@@ -467,6 +467,40 @@ void Signal_DebugOnMouseMove(const long chartId, const string prefix, const int 
       Signal_DebugHideHoverHint(chartId);
 }
 
+bool Signal_DebugMarkExists(const long chartId, const string prefix,
+                            const datetime barTime, const bool isBuy)
+{
+   const string arrowName = prefix + IntegerToString((int)barTime) + (isBuy ? "_B" : "_S") + "_ar";
+   return (ObjectFind(chartId, arrowName) >= 0);
+}
+
+void Signal_DebugPruneOlderThan(const long chartId, const string prefix, const int keepBars)
+{
+   if(keepBars < 1)
+      return;
+
+   const datetime cutoff = iTime(_Symbol, _Period, keepBars);
+   if(cutoff == 0)
+      return;
+
+   const int total = ObjectsTotal(chartId, 0, -1);
+   for(int i = total - 1; i >= 0; i--)
+   {
+      const string name = ObjectName(chartId, i, 0, -1);
+      if(!Signal_DebugObjectHasPrefix(name, prefix))
+         continue;
+
+      const int pfxLen = StringLen(prefix);
+      const int und = StringFind(name, "_", pfxLen);
+      if(und <= pfxLen)
+         continue;
+
+      const datetime bt = (datetime)StringToInteger(StringSubstr(name, pfxLen, und - pfxLen));
+      if(bt > 0 && bt < cutoff)
+         ObjectDelete(chartId, name);
+   }
+}
+
 void Signal_DebugDrawMark(const long chartId, const string prefix,
                           const datetime barTime, const double barHigh, const double barLow,
                           const double markPrice, const bool isBuy, const SignalEvalResult &ev)
