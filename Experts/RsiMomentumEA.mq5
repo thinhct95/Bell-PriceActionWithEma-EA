@@ -4,7 +4,7 @@
 //| RSI×WMA45 + 5phase entry | ATR↑ EMA200 phiên | Limit 50% body |
 //+------------------------------------------------------------------+
 #property copyright "RsiMomentumEA"
-#property version   "4.22"
+#property version   "4.23"
 
 #include <Trade/Trade.mqh>
 #include <RsiMom/TradeJournal.mqh>
@@ -35,7 +35,7 @@ input double InpRSIOversold          = 30.0;  // RSI ≤ ngưỡng → bỏ SELL
 input group "Entry 5 phase (mở rộng → cuộn EMA9 → EMA9 hướng → WMA45 phẳng → cắt gần)"
 input bool   InpPhaseFilterEnabled   = true;
 input int    InpPhaseExpandLookback  = 25;    // P1: quét mở rộng 3 đường
-input double InpPhaseMinExpandSpread = 8.0;   // P1: min (WMA45-RSI) đơn vị RSI (buy)
+input double InpPhaseMinExpandSpread = 10.0;  // P1: min max(WMA45-RSI) pt RSI [tối ưu ~6–18, step 1]
 input int    InpPhaseCoilLookback    = 12;    // P2: quét cuộn trước nến tín hiệu
 input int    InpPhaseMinRsiEma9Cross = 2;     // P2: RSI cắt EMA9 ≥ N lần (chống xuyên 1 lần)
 input double InpPhaseCoilBand        = 6.0;   // P2: |RSI-EMA9| ≤ band = quanh EMA9
@@ -416,8 +416,10 @@ void Panel_UpdateStatus()
 
   Panel_SetLine(ln++, "────────────────────────────────────", clrDarkGray);
 
-  Panel_SetLine(ln++, StringFormat("5 phase: %s  |  EMA200: %s  (%d bar)",
+  Panel_SetLine(ln++, StringFormat("5 phase: %s  P1>=%.1f  LB%d  |  EMA200: %s  (%d bar)",
                                    Panel_FmtOnOff(InpPhaseFilterEnabled),
+                                   InpPhaseMinExpandSpread,
+                                   InpPhaseExpandLookback,
                                    Panel_FmtOnOff(InpTrendFilterEnabled),
                                    MathMax(1, InpTrendConfirmBars)),
                 InpPhaseFilterEnabled ? clrWhite : clrDimGray);

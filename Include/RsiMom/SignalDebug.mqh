@@ -101,7 +101,9 @@ SignalEvalResult Signal_EvaluateBuyAt(const int shift, const int rates_total, co
       const double gap = wma[shift] - ema9[shift];
       const bool p5 = Phase_Ema9NearWmaBuy(shift, phaseCfg.maxEma9WmaGap, ema9, wma);
 
-      SignalEval_Append(r.detail, p1 ? StringFormat("P1:OK(sp=%.1f)", maxSp) : "P1:FAIL");
+      SignalEval_Append(r.detail, p1
+                        ? StringFormat("P1:OK(sp=%.1f>=%.1f)", maxSp, phaseCfg.minExpandSpread)
+                        : StringFormat("P1:FAIL(sp=%.1f<%.1f)", maxSp, phaseCfg.minExpandSpread));
       SignalEval_Append(r.detail, StringFormat("P2:%s(x=%d)", xc >= phaseCfg.minRsiEma9Crosses ? "OK" : "FAIL", xc));
       SignalEval_Append(r.detail, p3 ? "P3:OK" : "P3:FAIL");
       SignalEval_Append(r.detail, p4 ? "P4:OK" : "P4:FAIL");
@@ -238,7 +240,9 @@ SignalEvalResult Signal_EvaluateSellAt(const int shift, const int rates_total, c
       const double gap = ema9[shift] - wma[shift];
       const bool p5 = Phase_Ema9NearWmaSell(shift, phaseCfg.maxEma9WmaGap, ema9, wma);
 
-      SignalEval_Append(r.detail, p1 ? StringFormat("P1:OK(sp=%.1f)", maxSp) : "P1:FAIL");
+      SignalEval_Append(r.detail, p1
+                        ? StringFormat("P1:OK(sp=%.1f>=%.1f)", maxSp, phaseCfg.minExpandSpread)
+                        : StringFormat("P1:FAIL(sp=%.1f<%.1f)", maxSp, phaseCfg.minExpandSpread));
       SignalEval_Append(r.detail, StringFormat("P2:%s(x=%d)", xc >= phaseCfg.minRsiEma9Crosses ? "OK" : "FAIL", xc));
       SignalEval_Append(r.detail, p3 ? "P3:OK" : "P3:FAIL");
       SignalEval_Append(r.detail, p4 ? "P4:OK" : "P4:FAIL");
@@ -441,17 +445,15 @@ bool Signal_DebugFindTipAtMouse(const long chartId, const string prefix,
       if(s < 0)
          continue;
       const datetime bt = iTime(_Symbol, _Period, s);
-      const string btKey = IntegerToString((int)bt);
-      const string tryN[4];
-      tryN[0] = prefix + btKey + "_B_hit";
-      tryN[1] = prefix + btKey + "_S_hit";
-      tryN[2] = prefix + btKey + "_B_ar";
-      tryN[3] = prefix + btKey + "_S_ar";
-      for(int k = 0; k < 4; k++)
-      {
-         if(Signal_DebugReadTipFromMark(chartId, tryN[k], tip))
-            return true;
-      }
+      const string btKey = prefix + IntegerToString((int)bt);
+      if(Signal_DebugReadTipFromMark(chartId, btKey + "_B_hit", tip))
+         return true;
+      if(Signal_DebugReadTipFromMark(chartId, btKey + "_S_hit", tip))
+         return true;
+      if(Signal_DebugReadTipFromMark(chartId, btKey + "_B_ar", tip))
+         return true;
+      if(Signal_DebugReadTipFromMark(chartId, btKey + "_S_ar", tip))
+         return true;
    }
    return false;
 }
@@ -517,7 +519,7 @@ void Signal_DebugDrawMark(const long chartId, const string prefix,
    const double pad = MathMax(_Point * 8.0, (barHigh - barLow) * 0.08);
    const double rHi = barHigh + pad;
    const double rLo = barLow - pad;
-   const color hitFill = ColorToARGB(clr, (uchar)24);
+   const color hitFill = (color)ColorToARGB(clr, (uchar)24);
 
    if(ObjectCreate(chartId, hitName, OBJ_RECTANGLE, 0, barTime, rHi, tEnd, rLo))
    {

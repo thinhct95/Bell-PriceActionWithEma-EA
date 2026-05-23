@@ -139,7 +139,7 @@ Quét trên các nến **đã đóng** trong lookback: từ `shift+1` trở về
 
 ```
 RSI[j] < EMA9[j] < WMA45[j]
-spread[j] = WMA45[j] - RSI[j]  →  max(spread) >= InpPhaseMinExpandSpread  (mặc định 8 điểm RSI)
+spread[j] = WMA45[j] - RSI[j]  →  max(spread) >= InpPhaseMinExpandSpread  (mặc định 10 điểm RSI)
 ```
 
 **SELL:** `RSI[j] > EMA9[j] > WMA45[j]`, `spread = RSI[j] - WMA45[j]`.
@@ -411,7 +411,7 @@ EA **không** đọc file indicator. Indicator `Indicators/RsiMomentumIndicator`
 | Input | Mặc định | Phase / vai trò |
 |-------|----------|-----------------|
 | `InpPhaseExpandLookback` | 25 | P1 |
-| `InpPhaseMinExpandSpread` | 8.0 | P1 |
+| `InpPhaseMinExpandSpread` | 10.0 | P1 — tối ưu edge (xem §15) |
 | `InpPhaseCoilLookback` | 12 | P2 |
 | `InpPhaseMinRsiEma9Cross` | 2 | P2 |
 | `InpPhaseEma9SlopeBars` | 2 | P3 |
@@ -425,4 +425,21 @@ EA **không** đọc file indicator. Indicator `Indicators/RsiMomentumIndicator`
 
 ---
 
-*Tài liệu đồng bộ với mã nguồn v4.14. P1–P2 giữ nguyên; P3–P5 đã nới lỏng mặc định.*
+## 15. Tối ưu P1 — độ mở rộng (`InpPhaseMinExpandSpread`)
+
+**Mục tiêu:** Lọc setup yếu — chỉ vào khi sóng trước đó đã giãn RSI↔WMA45 đủ lớn.
+
+**Strategy Tester (MT5):**
+
+1. Tab **Inputs** → chọn `InpPhaseMinExpandSpread` → bật **Optimization**.
+2. Gợi ý: **Start** `6`, **Stop** `18`, **Step** `1` (XAU M5/M15; FX có thể thử 5–14).
+3. Tiêu chí: **Profit Factor** hoặc **Custom max** (PF × sqrt(trades) nếu cần đủ mẫu).
+4. So sánh **số lệnh** vs PF — ngưỡng quá cao → ít lệnh, overfit.
+
+**Debug trên chart:** dấu SKIP hover hiển thị `P1:FAIL(sp=7.2<10.0)` = max spread tìm được trong lookback chưa đạt ngưỡng; `P1:OK(sp=12.4>=10.0)` = đạt.
+
+**Panel:** dòng `5 phase` hiển thị `P1>=10.0 LB25`.
+
+---
+
+*Tài liệu đồng bộ với mã nguồn v4.23.*
