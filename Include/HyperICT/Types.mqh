@@ -123,9 +123,11 @@ struct UpdateContext
    SwingPoint          newH0;
    SwingPoint          newL0;
    SwingPoint          newL02;      // CHoCH bull case2 → roll thành L0
-   bool                newH0Locked; // ngừng track high khi swing confirm
-   bool                newLLocked;
-   bool                case1TrackingH0; // CHoCH P3 case1: đang tạo đỉnh mới
+   bool                newH0Locked;
+   bool                newLLocked;        // newL0 hoàn thiện (P2) — không kéo newL0 nữa
+   bool                case1TrackingH0;   // P3 case1: phá lên H0
+   bool                case2Active;       // P3 case2: phá xuống newL0 đã khóa
+   bool                newH0Case2Locked;  // P3 case2: newH0 (hồi) đã confirm
    void Clear()
    {
       event = UPD_NONE;
@@ -134,6 +136,8 @@ struct UpdateContext
       newH0.Clear(); newL0.Clear(); newL02.Clear();
       newH0Locked = newLLocked = false;
       case1TrackingH0 = false;
+      case2Active = false;
+      newH0Case2Locked = false;
    }
 };
 

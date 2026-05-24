@@ -94,6 +94,7 @@ Không có cross → không xét tiếp.
 |-------|------------------|------------------------|
 | `InpTrendFilterEnabled` | `false` | BUY: `InpTrendConfirmBars` nến liên tiếp có `Close > EMA200`. SELL: `Close < EMA200`. |
 | `InpAtrExpFilterEnabled` | `true` | ATR(shift) / ATR(shift+cmp) ≥ `InpAtrExpMinRatio` **và** ATR tăng liên tiếp `InpAtrExpRiseBars` nến. |
+| `InpAdxFilterEnabled` | `true` | ADX ≥ `InpAdxMinLevel`; BUY +DI>−DI, SELL ngược; tùy chọn ADX tăng / max / spread DI. |
 | `InpSessionFilterEnabled` | `false` | Thời gian **nến tín hiệu** nằm London hoặc NY; không trong cửa sổ giao phiên; trừ `InpSessionAvoidLastMin` phút cuối phiên. |
 
 **Tín hiệu hợp lệ (ghi `buf_Signal`):**
@@ -458,4 +459,22 @@ Debug: SKIP `ATR co` hoặc tooltip `ATR:FAIL`. Nếu **0 lệnh** sau bật fil
 
 ---
 
-*Tài liệu đồng bộ với mã nguồn v4.25.*
+---
+
+## 17. Lọc ADX (trend mạnh)
+
+**Mục tiêu:** Chỉ pullback khi thị trường **có trend** (ADX đủ cao) và **đúng hướng** (+DI/−DI).
+
+| Input | Mặc định | Ý nghĩa |
+|-------|----------|---------|
+| `InpAdxMinLevel` | 22 | ADX &lt; 20 thường sideway; 22–35 vùng trend ổn |
+| `InpAdxRequireDiDirection` | true | BUY: +DI &gt; −DI; SELL: −DI &gt; +DI |
+| `InpAdxMinDiSpread` | 0 | Chênh +DI−(−DI) tối thiểu (thử 5–10) |
+| `InpAdxRiseBars` | 0 | ADX tăng vs N nến (1–2 = trend đang mạnh lên) |
+| `InpAdxMaxLevel` | 0 | 0=tắt; ví dụ 45 tránh vào khi trend quá già |
+
+Debug: `ADX:OK(28.5 +DI=32.0 -DI=18.0)` hoặc SKIP `ADX yếu`.
+
+---
+
+*Tài liệu đồng bộ với mã nguồn v4.29.*

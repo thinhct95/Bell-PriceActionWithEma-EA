@@ -1,15 +1,24 @@
 //+------------------------------------------------------------------+
 //| RsiMomentumEA.mq5                                                |
 //| EA tự động — logic độc lập (không đọc RsiMomentumIndicator).     |
-//| RSI×WMA45 + 5phase entry | ATR↑ EMA200 phiên | Limit 50% body |
+//| RSI×WMA45 + 5phase | ATR↑ ADX trend EMA200 phiên | Limit 50% body |
 //+------------------------------------------------------------------+
 #property copyright "RsiMomentumEA"
-#property version   "4.27"
+#property version   "4.31"
 
 #include <Trade/Trade.mqh>
 #include <RsiMom/TradeJournal.mqh>
 #include <RsiMom/PhaseEntry.mqh>
+#include <RsiMom/AdxFilter.mqh>
+#include <RsiMom/SwingStructure.mqh>
 #include <RsiMom/SignalDebug.mqh>
+
+//--- Cơ chế vào lệnh (switch test — logic Limit giữ nguyên trong TradeExecuteLimitOrder)
+enum ENUM_RSI_MOM_ENTRY_MODE
+{
+   RSI_MOM_ENTRY_LIMIT_BODY50 = 0,  // Limit @ 50% thân nến tín hiệu (mặc định)
+   RSI_MOM_ENTRY_MARKET       = 1   // Market ngay khi nến mới sau tín hiệu
+};
 
 //--- Input (khớp Indicators/RsiMomentumIndicator/Lib/Inputs.mqh)
 input group "Chỉ báo"
@@ -19,13 +28,28 @@ input int    InpWMA45Period       = 45;
 input int    InpEMATrendPeriod    = 200;
 
 input group "Bộ lọc tín hiệu (RSI + ATR + trend EMA200)"
-input bool   InpTrendFilterEnabled   = false;   // BUY: close > EMA200 | SELL: close < EMA200
+input bool   InpTrendFilterEnabled   = true;   // BUY: close > EMA200 | SELL: close < EMA200
 input int    InpTrendConfirmBars    = 1;     // BUY: N close > EMA200 | SELL: N close < EMA200
-input bool   InpAtrExpFilterEnabled  = true;   // ATR tăng vs N bar + liên tiếp (lọc sideway)
+input bool   InpAtrExpFilterEnabled  = false;  // tắt tạm — test riêng ADX
 input int    InpAtrExpPeriod         = 14;
 input int    InpAtrExpCompareBars    = 3;      // so ATR[shift] vs ATR[shift+N]
 input double InpAtrExpMinRatio       = 1.005;  // ≥1.005 = +0.5% (tối ưu 1.003–1.02)
 input int    InpAtrExpRiseBars       = 2;      // ATR tăng liên tiếp N nến (1 = lỏng hơn)
+
+input group "ADX — trend mạnh (pullback hiệu quả)"
+input bool   InpAdxFilterEnabled     = true;   // ADX + hướng +DI/-DI tại nến tín hiệu
+input int    InpAdxPeriod            = 14;
+input double InpAdxMinLevel          = 22.0;   // ADX >= ngưỡng (sideway ~<20, trend 22–35+)
+input double InpAdxMaxLevel          = 0.0;    // 0=tắt; ví dụ 45 tránh trend quá già
+input bool   InpAdxRequireDiDirection = true; // BUY +DI>-DI | SELL -DI>+DI
+input double InpAdxMinDiSpread       = 0.0;    // |+DI−(-DI)| tối thiểu (5–10 = chặt hơn)
+input int    InpAdxRiseBars          = 0;     // ADX tăng vs N nến trước (0=tắt, 1–2 bật)
+
+input group "2 swing — đáy tăng / đỉnh giảm (thân nến)"
+input bool   InpSwingStructFilterEnabled = true;
+input int    InpSwingStructRange         = 2;     // pivot: N nến mỗi bên mỗi đáy/đỉnh
+input int    InpSwingStructLookback      = 120;   // quét tối đa N nến trước tín hiệu
+input double InpSwingStructTolPts        = 0.0;   // cho phép 2 đáy/đỉnh bằng nhau (points)
 
 input group "Lọc RSI quá mua / quá bán (nến tín hiệu)"
 input bool   InpRsiObOsFilterEnabled = true;   // BUY khi RSI<70 | SELL khi RSI>30
@@ -47,17 +71,20 @@ input double InpPhaseWmaFlatMaxSlope  = 0.55;  // P4: |slope| WMA45 gần 0 tạ
 input bool   InpPhaseWmaRelaxPrior   = true;  // P4: chỉ cần WMA45 từng đi đúng hướng, không cần dốc mạnh
 input double InpPhaseMaxEma9WmaGap   = 16.0;  // P5: EMA9–WMA45 tối đa khi cắt (lớn hơn = lỏng)
 
-input group "Entry — Limit 50% thân nến tín hiệu"
+input group "Cơ chế vào lệnh (switch test)"
+input ENUM_RSI_MOM_ENTRY_MODE InpEntryMode = RSI_MOM_ENTRY_MARKET;
+
+input group "Entry — Limit 50% thân nến (chỉ InpEntryMode=Limit)"
 input int    InpSignalBarShift      = 1;     // nến tín hiệu (1 = nến vừa đóng)
 
-input group "Quản lý Limit pending"
-input int    InpLimitExpireBars     = 40;    // hủy Limit nếu không khớp sau N nến (trước: 20)
+input group "Quản lý Limit pending (chỉ InpEntryMode=Limit)"
+input int    InpLimitExpireBars     = 40;    // hủy Limit nếu không khớp sau N nến
 
-input group "Debug — đánh dấu RSI×WMA45 (hợp lệ / skip + lý do)"
-input bool   InpDebugMarkSignals  = true;   // mọi cross: OK xanh | SIG vàng | SKIP đỏ + nhãn phase fail
-input int    InpDebugMarkMaxBars  = 400;    // chỉ tạo mới trong N nến gần nhất (dấu cũ vẫn giữ)
-input bool   InpDebugLogExperts   = true;   // 1 dòng Experts / nến tín hiệu (không lặp mỗi tick)
-input bool   InpDebugHoverHint    = true;   // rê chuột lên dấu X: panel góc dưới-trái + tooltip
+input group "Debug — đánh dấu RSI×WMA45 (tắt = backtest nhanh)"
+input bool   InpDebugMarkSignals  = false;  // mọi cross: OK xanh | SIG vàng | SKIP đỏ
+input int    InpDebugMarkMaxBars  = 400;    // chỉ tạo mới trong N nến gần nhất
+input bool   InpDebugLogExperts   = false;  // 1 dòng Experts / nến tín hiệu
+input bool   InpDebugHoverHint    = false;  // rê chuột lên dấu X
 
 input group "Mũi tên giao cắt"
 input color  InpArrowUpColor      = clrLime;
@@ -66,7 +93,7 @@ input int    InpArrowOffsetPts    = 30;
 input int    InpArrowSize         = 1;
 
 input group "Panel trạng thái (góc trên-trái)"
-input bool   InpShowPanel         = true;
+input bool   InpShowPanel         = false;  // tắt = tester nhanh hơn
 input int    InpPanelFontSize     = 8;
 input int    InpPanelLinePad      = 14;     // khoảng cách dọc giữa các dòng
 input int    InpPanelLeftMargin   = 8;
@@ -75,9 +102,9 @@ input color  InpPanelColorEMA9   = clrGold;
 input color  InpPanelColorWMA45  = clrDodgerBlue;
 
 input group "Cảnh báo / Notification (khi có entry mới)"
-input bool   InpAlertPush         = true;
-input bool   InpAlertPopup        = true;
-input bool   InpAlertSound        = true;
+input bool   InpAlertPush         = false;
+input bool   InpAlertPopup        = false;
+input bool   InpAlertSound        = false;
 input string InpSoundBuy          = "alert.wav";
 input string InpSoundSell         = "alert2.wav";
 input bool   InpAlertEmail        = false;
@@ -87,7 +114,7 @@ input group "Giao dịch tự động"
 input bool   InpTradeEnabled      = true;
 input ulong  InpMagic             = 202602;
 input double InpRiskPercent       = 1;   // % balance mất nếu SL khớp (theo lot tính từ SL)
-input double InpRewardRiskRatio   = 1.1;   // R:R — TP = tỷ lệ × khoảng SL (2.0 = 1:2)
+input double InpRewardRiskRatio   = 1.05;   // R:R — TP = tỷ lệ × khoảng SL (2.0 = 1:2)
 input int    InpSwingMaxBars      = 30;   // quét swing pivot / fallback min-max
 input int    InpSlippagePoints    = 30;
 input bool   InpOnePositionFlat   = true;
@@ -111,7 +138,7 @@ input bool   InpSpreadSkipInTester      = true;   // Tester: bỏ lọc spread (
 input bool   InpTesterCalcOnNewBarOnly  = true;   // Tester: OnCalculate chỉ khi nến mới (tránh chậm dần)
 
 input group "Quản lý lệnh mở @ 1R"
-input bool   InpManageAt1R          = true;  // @1R: chốt một phần + dời SL về entry
+input bool   InpManageAt1R          = false;  // @1R: chốt một phần + dời SL về entry
 input double InpPartialCloseRatio   = 0.5;   // tỷ lệ volume chốt khi đạt 1R (0.5 = 50%)
 input int    InpBreakevenOffsetPts  = 0;    // SL tại entry ± point (0 = đúng entry)
 
@@ -122,11 +149,11 @@ input double InpSlAtrMultiplier     = 0.5;   // khoảng cách thêm = ATR(shift
 input bool   InpSlAtrAddSpread      = true;  // cộng thêm buffer spread vào SL
 
 input group "Xuất CSV thống kê (FILE_COMMON)"
-input bool   InpExportTradeJournal = true;   // journal từng lệnh + summary theo tháng khi kết thúc test/EA
+input bool   InpExportTradeJournal = false;  // bật lại khi cần phân tích CSV (chậm hơn một chút)
 input bool   InpJournalResetOnInit = true;   // Tester: xóa CSV cũ mỗi lần chạy backtest mới
 
 input group "Thống kê (góc dưới-trái chart)"
-input bool   InpShowStats          = true;
+input bool   InpShowStats          = true;  // tắt = tester nhanh hơn
 input int    InpStatFontSize       = 9;
 input int    InpStatLinePad        = 26;    // khoảng cách dọc giữa các dòng (pixel)
 input int    InpStatBottomMargin   = 28;    // lề dưới block thống kê
@@ -146,13 +173,14 @@ int h_WMA45  = INVALID_HANDLE;
 int h_EMA200 = INVALID_HANDLE;
 int h_ATR        = INVALID_HANDLE;
 int h_ATR_Regime = INVALID_HANDLE;
+int h_ADX        = INVALID_HANDLE;
 
 const string OBJ_PREFIX   = "RsiMomEA_";
 const string DBG_PREFIX   = OBJ_PREFIX + "DBG_";
-#define PANEL_LINE_COUNT 22
-#define PANEL_IDX_MARKET 16   // dòng 16+ = RSI / signal (sau block trạng thái)
+#define PANEL_LINE_COUNT 25
+#define PANEL_IDX_MARKET 19   // dòng 19+ = RSI / signal (sau block trạng thái)
 const string PNL_PREFIX = OBJ_PREFIX + "pnl_";
-const string EA_VERSION_STR = "4.27";
+const string EA_VERSION_STR = "4.31";
 
 datetime g_dbgLogBarTime = 0;  // chống spam Experts: 1 dòng / (nến, BUY|SELL)
 int      g_dbgLogSide    = 0;  // 1=BUY, -1=SELL
@@ -221,6 +249,11 @@ double NormalizeLots(double v);
 double VolumeForRiskPercent(const bool isBuy, const double entryRef, const double slPrice);
 void   TradeTryOnBarOpen(const int calcRet);
 void   TradeExecuteOrder(const bool isBuy);
+void   TradeExecuteLimitOrder(const bool isBuy);
+void   TradeExecuteMarketOrder(const bool isBuy);
+bool   EntryModeIsLimit();
+bool   EntryModeIsMarket();
+string EntryModeLabel();
 bool   Signal_BodyMidPrice(const int shift, double &midOut);
 bool   LimitPriceValid(const bool isBuy, const double limitPx);
 void   Pending_ManageExpiry();
@@ -233,6 +266,11 @@ bool   AtrExp_GetAt(const int shift, double &atr);
 bool   AtrExp_IsExpandingAt(const int shift);
 bool   AtrExp_AllowsAt(const int shift);
 bool   AtrExp_AllowsNow();
+bool   Adx_AllowsBuyAt(const int shift, string &why);
+bool   Adx_AllowsSellAt(const int shift, string &why);
+void   Adx_GetAtBar(const int shift, double &adx, double &plusDi, double &minusDi);
+bool   SwingStruct_AllowsBuyAt(const int shift, string &why, double &bodyOld, double &bodyNew);
+bool   SwingStruct_AllowsSellAt(const int shift, string &why, double &bodyOld, double &bodyNew);
 int    Env_CurrentSpreadPts();
 bool   Env_SpreadAllows();
 bool   Env_AllowsSessionAt(const datetime t, string &why);
@@ -291,6 +329,12 @@ bool Handles_CreateAll()
     Print("[RsiMomEA] Không tạo được handle ATR (regime)");
     return false;
   }
+  h_ADX = iADX(_Symbol, _Period, MathMax(2, InpAdxPeriod));
+  if (h_ADX == INVALID_HANDLE)
+  {
+    Print("[RsiMomEA] Không tạo được handle ADX");
+    return false;
+  }
   return true;
 }
 
@@ -303,7 +347,8 @@ void Handles_ReleaseAll()
   if (h_EMA200 != INVALID_HANDLE) IndicatorRelease(h_EMA200);
   if (h_ATR        != INVALID_HANDLE) IndicatorRelease(h_ATR);
   if (h_ATR_Regime != INVALID_HANDLE) IndicatorRelease(h_ATR_Regime);
-  h_RSI = h_EMA9 = h_WMA45 = h_EMA200 = h_ATR = h_ATR_Regime = INVALID_HANDLE;
+  if (h_ADX        != INVALID_HANDLE) IndicatorRelease(h_ADX);
+  h_RSI = h_EMA9 = h_WMA45 = h_EMA200 = h_ATR = h_ATR_Regime = h_ADX = INVALID_HANDLE;
 }
 
 //+------------------------------------------------------------------+
@@ -434,8 +479,12 @@ void Panel_UpdateStatus()
                                    MathMax(1, InpSignalBarShift)),
                 Panel_ClrOnOff(InpTradeEnabled));
 
-  Panel_SetLine(ln++, StringFormat("Risk %.2f%%  |  R:R 1:%.2f  |  Limit 50%% body  Exp %d bar",
-                                   InpRiskPercent, InpRewardRiskRatio, InpLimitExpireBars),
+  Panel_SetLine(ln++, StringFormat("Entry: %s", EntryModeLabel()),
+                InpEntryMode == RSI_MOM_ENTRY_MARKET ? clrGold : clrSilver);
+  Panel_SetLine(ln++, StringFormat("Risk %.2f%%  |  R:R 1:%.2f%s",
+                                   InpRiskPercent, InpRewardRiskRatio,
+                                   EntryModeIsLimit()
+                                     ? StringFormat("  |  Limit exp %d bar", InpLimitExpireBars) : ""),
                 clrSilver);
 
   Panel_SetLine(ln++, StringFormat("Manage @1R: %s  (partial %.0f%%)",
@@ -453,8 +502,19 @@ void Panel_UpdateStatus()
                                    MathMax(1, InpTrendConfirmBars)),
                 InpPhaseFilterEnabled ? clrWhite : clrDimGray);
 
-  Panel_SetLine(ln++, StringFormat("ATR expand: %s  |  RSI OB/OS: %s  (%.0f / %.0f)",
+  Panel_SetLine(ln++, StringFormat("ATR expand: %s  |  ADX: %s  >=%.0f  DI: %s",
                                    Panel_FmtOnOff(InpAtrExpFilterEnabled),
+                                   Panel_FmtOnOff(InpAdxFilterEnabled),
+                                   InpAdxMinLevel,
+                                   Panel_FmtOnOff(InpAdxRequireDiDirection)),
+                clrSilver);
+
+  Panel_SetLine(ln++, StringFormat("Swing2 body: %s  range=%d  LB=%d",
+                                   Panel_FmtOnOff(InpSwingStructFilterEnabled),
+                                   InpSwingStructRange, InpSwingStructLookback),
+                clrSilver);
+
+  Panel_SetLine(ln++, StringFormat("RSI OB/OS: %s  (%.0f / %.0f)",
                                    Panel_FmtOnOff(InpRsiObOsFilterEnabled),
                                    InpRSIOverbought, InpRSIOversold),
                 clrSilver);
@@ -570,6 +630,17 @@ void Panel_Update(const double &closeArr[], const double &ema200Arr[],
   Panel_SetLine(ln++, StringFormat("RSI   %6.2f", buf_RSI[1]), clrMediumOrchid);
   Panel_SetLine(ln++, StringFormat("EMA9  %6.2f", buf_EMA9[1]), InpPanelColorEMA9);
   Panel_SetLine(ln++, StringFormat("WMA45 %6.2f", buf_WMA45[1]), InpPanelColorWMA45);
+  if(InpAdxFilterEnabled)
+  {
+    double adx = 0.0, pdi = 0.0, mdi = 0.0;
+    Adx_GetAtBar(1, adx, pdi, mdi);
+    string adxWhy = "";
+    const bool adxOk = panelTrendUp ? Adx_AllowsBuyAt(1, adxWhy)
+                    : (panelTrendDown ? Adx_AllowsSellAt(1, adxWhy) : true);
+    Panel_SetLine(ln++, StringFormat("ADX   %5.1f  +DI=%.1f -DI=%.1f  %s",
+                                     adx, pdi, mdi, adxOk ? "OK" : "FAIL"),
+                  adxOk ? clrSilver : clrOrangeRed);
+  }
   Panel_SetLine(ln++, StringFormat("EMA200 close[1] %s  %.5f",
                                    panelTrendUp ? ">" : (panelTrendDown ? "<" : "~"),
                                    ema200Arr[1]), trendClr);
@@ -705,6 +776,84 @@ bool AtrExp_AllowsAt(const int shift)
 bool AtrExp_AllowsNow()
 {
   return AtrExp_AllowsAt(1);
+}
+
+//+------------------------------------------------------------------+
+AdxFilterConfig GetAdxFilterConfig()
+{
+  AdxFilterConfig c;
+  c.enabled       = InpAdxFilterEnabled;
+  c.period        = MathMax(2, InpAdxPeriod);
+  c.minLevel      = MathMax(0.0, InpAdxMinLevel);
+  c.maxLevel      = MathMax(0.0, InpAdxMaxLevel);
+  c.requireDiDir  = InpAdxRequireDiDirection;
+  c.minDiSpread   = MathMax(0.0, InpAdxMinDiSpread);
+  c.riseBars      = MathMax(0, InpAdxRiseBars);
+  return c;
+}
+
+void Adx_GetAtBar(const int shift, double &adx, double &plusDi, double &minusDi)
+{
+  adx = plusDi = minusDi = 0.0;
+  if(!InpAdxFilterEnabled || h_ADX == INVALID_HANDLE)
+    return;
+  AdxFilter_GetAt(h_ADX, shift, adx, plusDi, minusDi);
+}
+
+bool Adx_AllowsBuyAt(const int shift, string &why)
+{
+  why = "";
+  if(!InpAdxFilterEnabled)
+    return true;
+  return AdxFilter_PassesBuy(h_ADX, shift, GetAdxFilterConfig(), why);
+}
+
+bool Adx_AllowsSellAt(const int shift, string &why)
+{
+  why = "";
+  if(!InpAdxFilterEnabled)
+    return true;
+  return AdxFilter_PassesSell(h_ADX, shift, GetAdxFilterConfig(), why);
+}
+
+SwingStructConfig SwingStruct_BuildConfig()
+{
+  SwingStructConfig c;
+  c.enabled    = InpSwingStructFilterEnabled;
+  c.pivotRange = MathMax(1, InpSwingStructRange);
+  c.lookback   = MathMax(20, InpSwingStructLookback);
+  c.tolPts     = MathMax(0.0, InpSwingStructTolPts);
+  return c;
+}
+
+bool SwingStruct_AllowsBuyAt(const int shift, string &why, double &bodyOld, double &bodyNew)
+{
+  why = "";
+  bodyOld = bodyNew = 0.0;
+  if(!InpSwingStructFilterEnabled)
+    return true;
+
+  SwingStructPoint older, newer;
+  const SwingStructConfig cfg = SwingStruct_BuildConfig();
+  const bool ok = SwingStruct_PassesBuyAt(_Symbol, _Period, shift, cfg, why, older, newer);
+  bodyOld = older.bodyPrice;
+  bodyNew = newer.bodyPrice;
+  return ok;
+}
+
+bool SwingStruct_AllowsSellAt(const int shift, string &why, double &bodyOld, double &bodyNew)
+{
+  why = "";
+  bodyOld = bodyNew = 0.0;
+  if(!InpSwingStructFilterEnabled)
+    return true;
+
+  SwingStructPoint older, newer;
+  const SwingStructConfig cfg = SwingStruct_BuildConfig();
+  const bool ok = SwingStruct_PassesSellAt(_Symbol, _Period, shift, cfg, why, older, newer);
+  bodyOld = older.bodyPrice;
+  bodyNew = newer.bodyPrice;
+  return ok;
 }
 
 //+------------------------------------------------------------------+
@@ -919,16 +1068,21 @@ bool Signal_RsiOkSellAt(const int shift)
 
 //+------------------------------------------------------------------+
 string Signal_ReasonBuy(const bool trendUp, const bool ema9CoreOk, const bool phaseOk, const string phaseFail,
-                        const bool atrExpOk, const bool rsiObOsOk, const bool envOk, const bool valid)
+                        const bool atrExpOk, const bool adxOk, const bool swingOk,
+                        const bool rsiObOsOk, const bool envOk, const bool valid)
 {
   if(valid)
   {
     string s = InpPhaseFilterEnabled
              ? "RSI↑WMA45 | 5phase OK | EMA200 UP"
              : "RSI↑WMA45 EMA9<WMA45 | EMA200 UP";
-    s += StringFormat(" (%d bar) | Limit 50%% body", MathMax(1, InpTrendConfirmBars));
+    s += StringFormat(" (%d bar) | %s", MathMax(1, InpTrendConfirmBars), EntryModeLabel());
     if(InpAtrExpFilterEnabled)
       s += StringFormat(" | ATR↑ x%.0f%% %d bar", (InpAtrExpMinRatio - 1.0) * 100.0, InpAtrExpRiseBars);
+    if(InpAdxFilterEnabled)
+      s += StringFormat(" | ADX>=%.0f", InpAdxMinLevel);
+    if(InpSwingStructFilterEnabled)
+      s += " | 2đáy↑";
     return s;
   }
 
@@ -941,6 +1095,10 @@ string Signal_ReasonBuy(const bool trendUp, const bool ema9CoreOk, const bool ph
     f += "ngược EMA200 ";
   if(InpAtrExpFilterEnabled && !atrExpOk)
     f += "ATR co ";
+  if(InpAdxFilterEnabled && !adxOk)
+    f += "ADX yếu ";
+  if(InpSwingStructFilterEnabled && !swingOk)
+    f += "2 đáy ";
   if(InpRsiObOsFilterEnabled && !rsiObOsOk)
     f += "RSI quá mua ";
   if(!envOk)
@@ -951,16 +1109,21 @@ string Signal_ReasonBuy(const bool trendUp, const bool ema9CoreOk, const bool ph
 }
 
 string Signal_ReasonSell(const bool trendDown, const bool ema9CoreOk, const bool phaseOk, const string phaseFail,
-                         const bool atrExpOk, const bool rsiObOsOk, const bool envOk, const bool valid)
+                         const bool atrExpOk, const bool adxOk, const bool swingOk,
+                         const bool rsiObOsOk, const bool envOk, const bool valid)
 {
   if(valid)
   {
     string s = InpPhaseFilterEnabled
              ? "RSI↓WMA45 | 5phase OK | EMA200 DOWN"
              : "RSI↓WMA45 EMA9>WMA45 | EMA200 DOWN";
-    s += StringFormat(" (%d bar) | Limit 50%% body", MathMax(1, InpTrendConfirmBars));
+    s += StringFormat(" (%d bar) | %s", MathMax(1, InpTrendConfirmBars), EntryModeLabel());
     if(InpAtrExpFilterEnabled)
       s += StringFormat(" | ATR↑ x%.0f%% %d bar", (InpAtrExpMinRatio - 1.0) * 100.0, InpAtrExpRiseBars);
+    if(InpAdxFilterEnabled)
+      s += StringFormat(" | ADX>=%.0f", InpAdxMinLevel);
+    if(InpSwingStructFilterEnabled)
+      s += " | 2đỉnh↓";
     return s;
   }
 
@@ -973,6 +1136,10 @@ string Signal_ReasonSell(const bool trendDown, const bool ema9CoreOk, const bool
     f += "ngược EMA200 ";
   if(InpAtrExpFilterEnabled && !atrExpOk)
     f += "ATR co ";
+  if(InpAdxFilterEnabled && !adxOk)
+    f += "ADX yếu ";
+  if(InpSwingStructFilterEnabled && !swingOk)
+    f += "2 đỉnh ";
   if(InpRsiObOsFilterEnabled && !rsiObOsOk)
     f += "RSI quá bán ";
   if(!envOk)
@@ -1038,12 +1205,27 @@ void Signal_DebugMarkCross(const long ch, const int shift, const datetime barTim
   if(DebugMarksEffective() && Signal_DebugMarkExists(ch, DBG_PREFIX, barTime, isBuy))
       return;
 
+  double adxVal = 0.0, plusDi = 0.0, minusDi = 0.0;
+  string adxWhy = "";
+  Adx_GetAtBar(shift, adxVal, plusDi, minusDi);
+  const bool adxOkBar = isBuy ? Adx_AllowsBuyAt(shift, adxWhy) : Adx_AllowsSellAt(shift, adxWhy);
+
+  string swingWhy = "";
+  double swingOld = 0.0, swingNew = 0.0;
+  const bool swingOkBar = isBuy
+                        ? SwingStruct_AllowsBuyAt(shift, swingWhy, swingOld, swingNew)
+                        : SwingStruct_AllowsSellAt(shift, swingWhy, swingOld, swingNew);
+
   SignalEvalResult ev;
   if(isBuy)
     ev = Signal_EvaluateBuyAt(shift, rates_total, trendN,
                               buf_RSI, buf_EMA9, buf_WMA45, closeArr, ema200Arr,
                               phaseCfg, InpPhaseFilterEnabled, InpTrendFilterEnabled,
-                              InpAtrExpFilterEnabled, InpRsiObOsFilterEnabled,
+                              InpAtrExpFilterEnabled, InpAdxFilterEnabled, adxOkBar,
+                              adxVal, plusDi, minusDi, adxWhy,
+                              InpSwingStructFilterEnabled, swingOkBar,
+                              swingOld, swingNew, swingWhy,
+                              InpRsiObOsFilterEnabled,
                               InpRSIOverbought, InpRSIOversold,
                               InpSessionFilterEnabled,
                               atrExpOkBar, sessionAtBar, sessionFailWhy);
@@ -1051,7 +1233,11 @@ void Signal_DebugMarkCross(const long ch, const int shift, const datetime barTim
     ev = Signal_EvaluateSellAt(shift, rates_total, trendN,
                                buf_RSI, buf_EMA9, buf_WMA45, closeArr, ema200Arr,
                                phaseCfg, InpPhaseFilterEnabled, InpTrendFilterEnabled,
-                               InpAtrExpFilterEnabled, InpRsiObOsFilterEnabled,
+                               InpAtrExpFilterEnabled, InpAdxFilterEnabled, adxOkBar,
+                               adxVal, plusDi, minusDi, adxWhy,
+                               InpSwingStructFilterEnabled, swingOkBar,
+                               swingOld, swingNew, swingWhy,
+                               InpRsiObOsFilterEnabled,
                                InpRSIOverbought, InpRSIOversold,
                                InpSessionFilterEnabled,
                                atrExpOkBar, sessionAtBar, sessionFailWhy);
@@ -1127,6 +1313,13 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
     const bool coreBuyOk   = InpPhaseFilterEnabled ? phaseBuyOk  : ema9BuyOk;
     const bool coreSellOk  = InpPhaseFilterEnabled ? phaseSellOk : ema9SellOk;
     const bool atrExpOkBar = AtrExp_AllowsAt(i);
+    string adxWhyB = "", adxWhyS = "";
+    const bool adxOkBuy  = Adx_AllowsBuyAt(i, adxWhyB);
+    const bool adxOkSell = Adx_AllowsSellAt(i, adxWhyS);
+    string swingWhyB = "", swingWhyS = "";
+    double swOld = 0.0, swNew = 0.0;
+    const bool swingOkBuy  = SwingStruct_AllowsBuyAt(i, swingWhyB, swOld, swNew);
+    const bool swingOkSell = SwingStruct_AllowsSellAt(i, swingWhyS, swOld, swNew);
     const bool rsiOkBuy    = Signal_RsiOkBuyAt(i);
     const bool rsiOkSell   = Signal_RsiOkSellAt(i);
     string envWhy = "";
@@ -1134,7 +1327,8 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
 
     if(crossUpWma45)
     {
-      const bool validBuy = coreBuyOk && trendUp && atrExpOkBar && rsiOkBuy && envOkBar;
+      const bool validBuy = coreBuyOk && trendUp && atrExpOkBar && adxOkBuy
+                            && swingOkBuy && rsiOkBuy && envOkBar;
 
       if(dbgMarks && i <= dbgMax)
       {
@@ -1148,7 +1342,8 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
       if(validBuy)
       {
         const string reason = Signal_ReasonBuy(trendUp, ema9BuyOk, phaseBuyOk, phaseFailBuy,
-                                               atrExpOkBar, rsiOkBuy, envOkBar, true);
+                                               atrExpOkBar, adxOkBuy, swingOkBuy,
+                                               rsiOkBuy, envOkBar, true);
         const double arrowPrice = lowArr[i] - arrowOffset;
         const string arrowName = OBJ_PREFIX + "CR_" + IntegerToString((int)timeArr[i]);
         if(ObjectFind(ch, arrowName) < 0)
@@ -1168,7 +1363,8 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
 
     if(crossDownWma45)
     {
-      const bool validSell = coreSellOk && trendDown && atrExpOkBar && rsiOkSell && envOkBar;
+      const bool validSell = coreSellOk && trendDown && atrExpOkBar && adxOkSell
+                             && swingOkSell && rsiOkSell && envOkBar;
 
       if(dbgMarks && i <= dbgMax)
       {
@@ -1182,7 +1378,8 @@ void SignalScan_Run(const int barsToScan, const int rates_total, const int need,
       if(validSell)
       {
         const string reason = Signal_ReasonSell(trendDown, ema9SellOk, phaseSellOk, phaseFailSell,
-                                                atrExpOkBar, rsiOkSell, envOkBar, true);
+                                                atrExpOkBar, adxOkSell, swingOkSell,
+                                                rsiOkSell, envOkBar, true);
         const double arrowPrice = highArr[i] + arrowOffset;
         const string arrowName = OBJ_PREFIX + "CR_" + IntegerToString((int)timeArr[i]);
         if(ObjectFind(ch, arrowName) < 0)
@@ -1227,11 +1424,14 @@ void Diagnostics_FirstPass(const int rates_total, const int copyN, const int tre
 
   {
     int crossUp = 0, crossDn = 0, passTrendUp = 0, passTrendDn = 0, passAtrUp = 0, passAtrDn = 0;
+    int passAdxUp = 0, passAdxDn = 0;
+    int passSwingUp = 0, passSwingDn = 0;
     int passEnvUp = 0, passEnvDn = 0;
     int passEma9Up = 0, passEma9Dn = 0;
     int passPhaseUp = 0, passPhaseDn = 0;
     int validBuy = 0, validSell = 0;
-    const int needSh = MathMax(1, InpAtrExpCompareBars) + MathMax(1, InpAtrExpRiseBars);
+    const int needSh = MathMax(1, InpAtrExpCompareBars) + MathMax(1, InpAtrExpRiseBars)
+                     + (InpAdxFilterEnabled ? MathMax(0, InpAdxRiseBars) : 0);
     const int phaseLb = InpPhaseFilterEnabled
                       ? MathMax(InpPhaseExpandLookback, InpPhaseCoilLookback) + InpPhaseWmaFlatBars * 2 + 3
                       : 0;
@@ -1253,6 +1453,12 @@ void Diagnostics_FirstPass(const int rates_total, const int copyN, const int tre
         passTrendDn++;
       if(up && AtrExp_AllowsAt(i))  passAtrUp++;
       if(dn && AtrExp_AllowsAt(i))  passAtrDn++;
+      string adxW = "";
+      if(up && Adx_AllowsBuyAt(i, adxW))   passAdxUp++;
+      if(dn && Adx_AllowsSellAt(i, adxW))  passAdxDn++;
+      double swO = 0.0, swN = 0.0;
+      if(up && SwingStruct_AllowsBuyAt(i, adxW, swO, swN))   passSwingUp++;
+      if(dn && SwingStruct_AllowsSellAt(i, adxW, swO, swN))  passSwingDn++;
       if(up && Signal_Ema9CoreBuyOkAt(i))  passEma9Up++;
       if(dn && Signal_Ema9CoreSellOkAt(i)) passEma9Dn++;
       string pfB = "", pfS = "";
@@ -1265,16 +1471,20 @@ void Diagnostics_FirstPass(const int rates_total, const int copyN, const int tre
       if(buf_Signal[i] > 0.5)  validBuy++;
       if(buf_Signal[i] < -0.5) validSell++;
     }
-    PrintFormat("[RsiMomEA]   last %d bars: cross UP=%d DN=%d | EMA9 UP=%d DN=%d | 5phase UP=%d DN=%d | EMA200 UP=%d DOWN=%d | ATR↑ UP=%d DN=%d | phiên UP=%d DN=%d | signal BUY=%d SELL=%d",
+    PrintFormat("[RsiMomEA]   last %d bars: cross UP=%d DN=%d | EMA9 UP=%d DN=%d | 5phase UP=%d DN=%d | EMA200 UP=%d DOWN=%d | ATR↑ UP=%d DN=%d | ADX UP=%d DN=%d | Swing2 UP=%d DN=%d | phiên UP=%d DN=%d | signal BUY=%d SELL=%d",
                 n, crossUp, crossDn, passEma9Up, passEma9Dn, passPhaseUp, passPhaseDn,
-                passTrendUp, passTrendDn, passAtrUp, passAtrDn,
-                passEnvUp, passEnvDn, validBuy, validSell);
+                passTrendUp, passTrendDn, passAtrUp, passAtrDn, passAdxUp, passAdxDn,
+                passSwingUp, passSwingDn, passEnvUp, passEnvDn, validBuy, validSell);
     if(crossUp > 0 && passPhaseUp == 0 && InpPhaseFilterEnabled)
       Print("[RsiMomEA]   Gợi ý: cross UP bị 5phase — xem P1-P5 hoặc hạ InpPhaseMinExpandSpread / InpPhaseMinRsiEma9Cross");
     else if(crossUp > 0 && passEma9Up == 0)
       Print("[RsiMomEA]   Gợi ý: cross UP nhưng EMA9>=WMA45 — không đủ điều kiện lõi BUY");
     if(InpAtrExpFilterEnabled && crossUp > 0 && passAtrUp == 0)
       Print("[RsiMomEA]   Gợi ý: cross bị chặn ATR — hạ InpAtrExpMinRatio / InpAtrExpRiseBars hoặc tắt InpAtrExpFilterEnabled");
+    if(InpAdxFilterEnabled && crossUp > 0 && passAdxUp == 0)
+      Print("[RsiMomEA]   Gợi ý: cross bị chặn ADX — hạ InpAdxMinLevel hoặc tắt InpAdxRequireDiDirection");
+    if(InpSwingStructFilterEnabled && crossUp > 0 && passSwingUp == 0)
+      Print("[RsiMomEA]   Gợi ý: cross bị chặn 2 đáy — tăng lookback hoặc tắt InpSwingStructFilterEnabled");
     if(InpSessionFilterEnabled && crossUp > 0 && passEnvUp == 0)
       Print("[RsiMomEA]   Gợi ý: cross bị chặn PHIÊN — chỉnh giờ London/NY (server) hoặc tắt InpSessionFilterEnabled");
   }
@@ -1302,11 +1512,14 @@ void EnsureBuffers(const int rates_total)
 int RsiMomentum_OnCalculate(const int rates_total, const int prev_calculated)
 {
   const int atrNeed = MathMax(1, InpAtrExpCompareBars) + MathMax(1, InpAtrExpRiseBars) + 5;
+  const int adxNeed = InpAdxFilterEnabled
+                    ? MathMax(InpAdxPeriod, 5) + MathMax(0, InpAdxRiseBars) + 3
+                    : 0;
   const int phaseNeed = InpPhaseFilterEnabled
                       ? MathMax(InpPhaseExpandLookback, InpPhaseCoilLookback) + InpPhaseWmaFlatBars * 2 + 10
                       : 0;
   const int minBars = MathMax(InpWMA45Period + InpRSIPeriod + 5 + phaseNeed,
-                              MathMax(InpAtrExpPeriod, InpSlAtrPeriod) + atrNeed);
+                              MathMax(MathMax(InpAtrExpPeriod, InpSlAtrPeriod) + atrNeed, adxNeed));
   if (rates_total < minBars) return 0;
 
   EnsureBuffers(rates_total);
@@ -1316,19 +1529,23 @@ int RsiMomentum_OnCalculate(const int rates_total, const int prev_calculated)
   const int wmaBars    = BarsCalculated(h_WMA45);
   const int ema200Bars = BarsCalculated(h_EMA200);
   const int atrRegBars = BarsCalculated(h_ATR_Regime);
-  if (rsiBars <= 0 || ema9Bars <= 0 || wmaBars <= 0 || ema200Bars <= 0 || atrRegBars <= 0)
+  const int adxBars    = InpAdxFilterEnabled ? BarsCalculated(h_ADX) : 1;
+  if (rsiBars <= 0 || ema9Bars <= 0 || wmaBars <= 0 || ema200Bars <= 0 || atrRegBars <= 0
+      || adxBars <= 0)
   {
     static datetime lastWarn = 0;
     if (TimeCurrent() - lastWarn > 30)
     {
-      PrintFormat("[RsiMomEA] Source not ready: RSI=%d EMA9=%d WMA45=%d EMA200=%d ATRreg=%d (rates=%d)",
-                  rsiBars, ema9Bars, wmaBars, ema200Bars, atrRegBars, rates_total);
+      PrintFormat("[RsiMomEA] Source not ready: RSI=%d EMA9=%d WMA45=%d EMA200=%d ATRreg=%d ADX=%d (rates=%d)",
+                  rsiBars, ema9Bars, wmaBars, ema200Bars, atrRegBars, adxBars, rates_total);
       lastWarn = TimeCurrent();
     }
     return 0;
   }
 
-  const int srcMin = MathMin(MathMin(MathMin(MathMin(rsiBars, ema9Bars), wmaBars), ema200Bars), atrRegBars);
+  int srcMin = MathMin(MathMin(MathMin(MathMin(rsiBars, ema9Bars), wmaBars), ema200Bars), atrRegBars);
+  if(InpAdxFilterEnabled)
+    srcMin = MathMin(srcMin, adxBars);
   const int copyN  = MathMin(srcMin, rates_total);
   if (copyN < minBars) return 0;
 
@@ -1405,11 +1622,17 @@ int OnInit()
 
   const long chInit = ActChart();
   ObjectsDeleteAll(chInit, OBJ_PREFIX + "RSN_");
-  Signal_DebugConfigureChart(chInit);
+  ObjectsDeleteAll(chInit, DBG_PREFIX);
+  if(DebugMarksEffective())
+    Signal_DebugConfigureChart(chInit);
 
-  Panel_CreateAll();
-  Stats_CreateObjects();
-  Stats_UpdateDisplay();
+  if(InpShowPanel)
+    Panel_CreateAll();
+  if(InpShowStats)
+  {
+    Stats_CreateObjects();
+    Stats_UpdateDisplay();
+  }
   const int spr = Env_CurrentSpreadPts();
   string envWhy = "";
   const bool envNow = Env_AllowsTradeAtBar(MathMax(1, InpSignalBarShift), envWhy);
@@ -1417,13 +1640,17 @@ int OnInit()
     Print("[RsiMomEA] Journal CSV: ", RsiMomJournal_TradesPath(_Symbol, _Period),
           " | summary: ", RsiMomJournal_SummaryPath(_Symbol, _Period), " (FILE_COMMON)");
 
-  Print("[RsiMomEA] Init OK v4.14 — RSI×WMA45 + ", InpPhaseFilterEnabled ? "5phase" : "core",
+  Print("[RsiMomEA] Init OK v", EA_VERSION_STR, " — entry=", EntryModeLabel(),
+        " | RSI×WMA45 + ", InpPhaseFilterEnabled ? "5phase" : "core",
         " | EMA200=", InpTrendFilterEnabled ? "on" : "OFF",
         " | session=", InpSessionFilterEnabled ? "on" : "OFF",
         " | debugMarks=", InpDebugMarkSignals ? "on" : "off",
         " | ATR+EMA200+phiên | trade=", InpTradeEnabled ? "on" : "off", " risk%=", InpRiskPercent,
         " ATRexp=", InpAtrExpFilterEnabled
           ? StringFormat("ratio>=%.2f rise%d cmp%d", InpAtrExpMinRatio, InpAtrExpRiseBars, InpAtrExpCompareBars) : "OFF",
+        " ADX=", InpAdxFilterEnabled
+          ? StringFormat(">=%.0f DI=%s rise%d", InpAdxMinLevel,
+                         InpAdxRequireDiDirection ? "on" : "off", InpAdxRiseBars) : "OFF",
         " session=", InpSessionFilterEnabled
           ? StringFormat("L%d-%d NY%d-%d avoid%d%s", InpLondonStartHour, InpLondonEndHour,
                          InpNYStartHour, InpNYEndHour, InpSessionAvoidLastMin,
@@ -1458,8 +1685,11 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-  Pending_EnvCancelIfBad();
-  Pending_ManageExpiry();
+  if(EntryModeIsLimit())
+  {
+    Pending_EnvCancelIfBad();
+    Pending_ManageExpiry();
+  }
   Position_ManageAt1R();
 
   const datetime t0 = iTime(_Symbol, _Period, 0);
@@ -1651,7 +1881,32 @@ bool LimitPriceValid(const bool isBuy, const double limitPx)
 }
 
 //+------------------------------------------------------------------+
+bool EntryModeIsLimit()
+{
+  return (InpEntryMode == RSI_MOM_ENTRY_LIMIT_BODY50);
+}
+
+bool EntryModeIsMarket()
+{
+  return (InpEntryMode == RSI_MOM_ENTRY_MARKET);
+}
+
+string EntryModeLabel()
+{
+  return EntryModeIsMarket() ? "Market" : "Limit 50% body";
+}
+
+//+------------------------------------------------------------------+
 void TradeExecuteOrder(const bool isBuy)
+{
+  if(EntryModeIsMarket())
+    TradeExecuteMarketOrder(isBuy);
+  else
+    TradeExecuteLimitOrder(isBuy);
+}
+
+//+------------------------------------------------------------------+
+void TradeExecuteLimitOrder(const bool isBuy)
 {
   if (InpOnePositionFlat && HasMyMagicPositionOrPending())
     return;
@@ -1718,6 +1973,61 @@ void TradeExecuteOrder(const bool isBuy)
           " vol=", vol, " SL=", DoubleToString(sl, dig), " TP=", DoubleToString(tp, dig),
           " expireBars=", InpLimitExpireBars);
   }
+}
+
+//+------------------------------------------------------------------+
+void TradeExecuteMarketOrder(const bool isBuy)
+{
+  if(InpOnePositionFlat && CountMyMagicPositions() > 0)
+    return;
+
+  string envWhy = "";
+  if(!Env_AllowsTradeNow(envWhy))
+  {
+    Print("[RsiMomEA] Trade skip ", isBuy ? "BUY" : "SELL", ": ", envWhy,
+          "(spread=", Env_CurrentSpreadPts(), " pts)");
+    return;
+  }
+
+  MqlTick tk;
+  if(!SymbolInfoTick(_Symbol, tk))
+  {
+    Print("[RsiMomEA] Trade skip: không lấy được tick");
+    return;
+  }
+
+  const int dig = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+  const double entryPx = NormalizeDouble(isBuy ? tk.ask : tk.bid, dig);
+
+  double sl = 0.0, tp = 0.0;
+  if(!NearestSwingSlTp(isBuy, entryPx, dig, sl, tp))
+  {
+    Print("[RsiMomEA] Trade skip: SL/TP swing không hợp lệ");
+    return;
+  }
+  if(!StopsValid(isBuy, entryPx, sl, tp))
+  {
+    Print("[RsiMomEA] Trade skip: STOPS_LEVEL / FREEZE");
+    return;
+  }
+
+  double vol = VolumeForRiskPercent(isBuy, entryPx, sl);
+  vol = NormalizeLots(vol);
+  if(vol <= 0.0)
+  {
+    Print("[RsiMomEA] Trade skip: volume=0");
+    return;
+  }
+
+  const bool ok = isBuy
+                ? g_trade.Buy(vol, _Symbol, 0.0, sl, tp, "RsiMom BUY mkt")
+                : g_trade.Sell(vol, _Symbol, 0.0, sl, tp, "RsiMom SELL mkt");
+  if(!ok)
+    Print("[RsiMomEA] Market fail ", g_trade.ResultRetcode(), " ", g_trade.ResultComment());
+  else
+    Print("[RsiMomEA] Market OK #", g_trade.ResultDeal(), " ", isBuy ? "BUY" : "SELL",
+          " @~", DoubleToString(entryPx, dig),
+          " vol=", vol, " SL=", DoubleToString(sl, dig), " TP=", DoubleToString(tp, dig));
 }
 
 //+------------------------------------------------------------------+
@@ -2063,7 +2373,8 @@ void Stats_UpdateDisplay()
     ObjectSetString(ch, STAT_L1, OBJPROP_TEXT, "");
     ObjectSetString(ch, STAT_L2, OBJPROP_TEXT, "");
     ObjectSetString(ch, STAT_L3, OBJPROP_TEXT, "");
-    ChartRedraw(ch);
+    if(ChartRedrawEffective())
+      ChartRedraw(ch);
     return;
   }
 

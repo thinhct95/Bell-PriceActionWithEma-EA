@@ -61,6 +61,17 @@ SignalEvalResult Signal_EvaluateBuyAt(const int shift, const int rates_total, co
                                       const bool phaseFilterEnabled,
                                       const bool trendFilterEnabled,
                                       const bool atrFilterEnabled,
+                                      const bool adxFilterEnabled,
+                                      const bool adxOkAtBar,
+                                      const double adxVal,
+                                      const double plusDi,
+                                      const double minusDi,
+                                      const string adxFailWhy,
+                                      const bool swingFilterEnabled,
+                                      const bool swingOkAtBar,
+                                      const double swingBodyOld,
+                                      const double swingBodyNew,
+                                      const string swingFailWhy,
                                       const bool rsiObOsFilterEnabled,
                                       const double rsiOverbought,
                                       const double rsiOversold,
@@ -149,6 +160,30 @@ SignalEvalResult Signal_EvaluateBuyAt(const int shift, const int rates_total, co
    if(atrFilterEnabled && !atrExpAtBar)
       SignalEval_SetFail(r.failTag, "ATR co");
 
+   if(!adxFilterEnabled)
+      SignalEval_Append(r.detail, "ADX:OFF");
+   else if(adxOkAtBar)
+      SignalEval_Append(r.detail, StringFormat("ADX:OK(%.1f +DI=%.1f -DI=%.1f)", adxVal, plusDi, minusDi));
+   else
+   {
+      SignalEval_Append(r.detail, StringLen(adxFailWhy) > 0
+                        ? StringFormat("ADX:FAIL(%.1f %s)", adxVal, adxFailWhy)
+                        : StringFormat("ADX:FAIL(%.1f)", adxVal));
+      SignalEval_SetFail(r.failTag, "ADX yếu");
+   }
+
+   if(!swingFilterEnabled)
+      SignalEval_Append(r.detail, "Swing2:OFF");
+   else if(swingOkAtBar)
+      SignalEval_Append(r.detail, StringFormat("Swing2:OK(đáy %.5f→%.5f)", swingBodyOld, swingBodyNew));
+   else
+   {
+      SignalEval_Append(r.detail, StringLen(swingFailWhy) > 0
+                        ? "Swing2:FAIL " + swingFailWhy
+                        : "Swing2:FAIL");
+      SignalEval_SetFail(r.failTag, "2 đáy");
+   }
+
    bool rsiOk = true;
    if(!rsiObOsFilterEnabled)
       SignalEval_Append(r.detail, "RSI OB/OS:OFF");
@@ -178,7 +213,10 @@ SignalEvalResult Signal_EvaluateBuyAt(const int shift, const int rates_total, co
    }
 
    r.signalOk = cross && coreOk && trendUp
-                && (!atrFilterEnabled || atrExpAtBar) && rsiOk && envBar;
+                && (!atrFilterEnabled || atrExpAtBar)
+                && (!adxFilterEnabled || adxOkAtBar)
+                && (!swingFilterEnabled || swingOkAtBar)
+                && rsiOk && envBar;
    r.tradeOk  = r.signalOk;
 
    if(r.signalOk && r.tradeOk)
@@ -200,6 +238,17 @@ SignalEvalResult Signal_EvaluateSellAt(const int shift, const int rates_total, c
                                        const bool phaseFilterEnabled,
                                        const bool trendFilterEnabled,
                                        const bool atrFilterEnabled,
+                                       const bool adxFilterEnabled,
+                                       const bool adxOkAtBar,
+                                       const double adxVal,
+                                       const double plusDi,
+                                       const double minusDi,
+                                       const string adxFailWhy,
+                                       const bool swingFilterEnabled,
+                                       const bool swingOkAtBar,
+                                       const double swingBodyOld,
+                                       const double swingBodyNew,
+                                       const string swingFailWhy,
                                        const bool rsiObOsFilterEnabled,
                                        const double rsiOverbought,
                                        const double rsiOversold,
@@ -287,6 +336,30 @@ SignalEvalResult Signal_EvaluateSellAt(const int shift, const int rates_total, c
    if(atrFilterEnabled && !atrExpAtBar)
       SignalEval_SetFail(r.failTag, "ATR co");
 
+   if(!adxFilterEnabled)
+      SignalEval_Append(r.detail, "ADX:OFF");
+   else if(adxOkAtBar)
+      SignalEval_Append(r.detail, StringFormat("ADX:OK(%.1f +DI=%.1f -DI=%.1f)", adxVal, plusDi, minusDi));
+   else
+   {
+      SignalEval_Append(r.detail, StringLen(adxFailWhy) > 0
+                        ? StringFormat("ADX:FAIL(%.1f %s)", adxVal, adxFailWhy)
+                        : StringFormat("ADX:FAIL(%.1f)", adxVal));
+      SignalEval_SetFail(r.failTag, "ADX yếu");
+   }
+
+   if(!swingFilterEnabled)
+      SignalEval_Append(r.detail, "Swing2:OFF");
+   else if(swingOkAtBar)
+      SignalEval_Append(r.detail, StringFormat("Swing2:OK(đỉnh %.5f→%.5f)", swingBodyOld, swingBodyNew));
+   else
+   {
+      SignalEval_Append(r.detail, StringLen(swingFailWhy) > 0
+                        ? "Swing2:FAIL " + swingFailWhy
+                        : "Swing2:FAIL");
+      SignalEval_SetFail(r.failTag, "2 đỉnh");
+   }
+
    bool rsiOk = true;
    if(!rsiObOsFilterEnabled)
       SignalEval_Append(r.detail, "RSI OB/OS:OFF");
@@ -315,7 +388,11 @@ SignalEvalResult Signal_EvaluateSellAt(const int shift, const int rates_total, c
       SignalEval_SetFail(r.failTag, "Phiên");
    }
 
-   r.signalOk = cross && coreOk && trendDown && (!atrFilterEnabled || atrExpAtBar) && rsiOk && envBar;
+   r.signalOk = cross && coreOk && trendDown
+                && (!atrFilterEnabled || atrExpAtBar)
+                && (!adxFilterEnabled || adxOkAtBar)
+                && (!swingFilterEnabled || swingOkAtBar)
+                && rsiOk && envBar;
    r.tradeOk  = r.signalOk;
 
    if(r.signalOk && r.tradeOk)

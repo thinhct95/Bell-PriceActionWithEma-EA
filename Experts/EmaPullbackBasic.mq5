@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
 //| EmaPullbackBasic.mq5 — EMA50 pullback EA (phased build)           |
 //| Phase 4: breakout khỏi nến touch (cửa sổ N nến)                   |
-//| Phase 5: risk 1% R, TP 1.5R                                       |
+//| Phase 5: risk & TP theo R                                           |
+//| Phase 6: spread/session/DD + chốt 50% @ 2R rồi BE (không cap lệnh/ngày)|
 //+------------------------------------------------------------------+
 #property copyright "EMA Pullback Basic"
-#property version   "0.52"
-#property description "EMA pullback + reject entry, 1% risk, TP 1.5R"
+#property version   "0.58"
+#property description "Phase 6: filters + partial 2R + breakeven"
 
 #include <Trade\Trade.mqh>
 
@@ -54,9 +55,23 @@ input bool            InpRequireBreakoutCandleColor = true; // Buy: bullish, Sel
 input group           "=== Risk (Phase 5) ==="
 input bool            InpTradeEnabled       = true;
 input double          InpRiskPercent        = 1.0;    // R = % balance
-input double          InpTpRR               = 1.5;    // TP = InpTpRR × SL distance
+input double          InpTpRR               = 3;    // TP = InpTpRR × SL distance
 input double          InpSlBufferAtr        = 0.10;   // SL dưới đáy/ trên đỉnh + buffer × ATR
 input int             InpMaxBarsInTrade     = 0;      // 0 = không đóng theo thời gian
+
+input group           "=== Phase 6 — An toàn & quản lý lệnh ==="
+input bool            InpUseSpreadFilter    = true;
+input int             InpMaxSpreadPoints    = 50;     // Không vào lệnh nếu spread > (points)
+input bool            InpUseSessionFilter   = true;
+input int             InpSessionStartHour   = 8;      // Giờ server (bắt đầu)
+input int             InpSessionEndHour     = 22;     // Giờ server (kết thúc, có thể qua đêm)
+input bool            InpUseDdRiskScale     = true;
+input double          InpDdHalveRiskPct     = 5.0;    // DD từ đỉnh equity → risk × 0.5
+input bool            InpUsePartialAt2R     = true;   // Đạt 2R: chốt 50% + SL → BE
+input double          InpPartialCloseRR     = 2.0;    // Ngưỡng R để chốt một phần
+input double          InpPartialCloseFrac   = 0.50;   // Phần volume đóng (0.5 = một nửa)
+input int             InpBeOffsetPoints     = 2;      // BE = entry ± offset (points)
+// Ghi chú: không giới hạn số lệnh / ngày
 
 input group           "=== EA ==="
 input ulong           InpMagic              = 20260522;
@@ -86,6 +101,14 @@ string   g_lastStateLog = "";
 int      g_statTotal = 0;
 int      g_statTP     = 0;
 int      g_statSL     = 0;
+
+double   g_equityPeak    = 0.0;
+double   g_riskScale     = 1.0;
+ulong    g_trackTicket   = 0;
+double   g_trackEntry    = 0.0;
+double   g_trackRiskDist = 0.0;
+bool     g_trackIsBuy    = false;
+bool     g_trackPartialDone = false;
 
 const string OBJ_PREFIX = "EPB_";
 
@@ -496,9 +519,125 @@ bool HasOurPosition() {
    return false;
 }
 
+ulong FindOurPositionTicket() {
+   for(int i = PositionsTotal() - 1; i >= 0; i--) {
+      const ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+      return t;
+   }
+   return 0;
+}
+
+void ResetPositionTrack() {
+   g_trackTicket = 0;
+   g_trackEntry = 0.0;
+   g_trackRiskDist = 0.0;
+   g_trackIsBuy = false;
+   g_trackPartialDone = false;
+}
+
+void SyncPositionTrack() {
+   const ulong t = FindOurPositionTicket();
+   if(t == 0) {
+      ResetPositionTrack();
+      return;
+   }
+   if(t == g_trackTicket && g_trackRiskDist > 0.0)
+      return;
+
+   if(!PositionSelectByTicket(t))
+      return;
+
+   g_trackTicket = t;
+   g_trackEntry = PositionGetDouble(POSITION_PRICE_OPEN);
+   const double sl = PositionGetDouble(POSITION_SL);
+   g_trackRiskDist = MathAbs(g_trackEntry - sl);
+   if(g_trackRiskDist < _Point)
+      g_trackRiskDist = _Point;
+   g_trackIsBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+   g_trackPartialDone = false;
+}
+
+void StartPositionTrack(const ulong ticket, const bool isBuy,
+                        const double entry, const double sl) {
+   g_trackTicket = ticket;
+   g_trackEntry = entry;
+   g_trackRiskDist = MathAbs(entry - sl);
+   if(g_trackRiskDist < _Point)
+      g_trackRiskDist = _Point;
+   g_trackIsBuy = isBuy;
+   g_trackPartialDone = false;
+}
+
+int CurrentSpreadPoints() {
+   const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(ask <= 0.0 || bid <= 0.0 || _Point <= 0.0)
+      return 0;
+   return (int)MathRound((ask - bid) / _Point);
+}
+
+bool IsSpreadAllowed() {
+   if(!InpUseSpreadFilter)
+      return true;
+   return CurrentSpreadPoints() <= InpMaxSpreadPoints;
+}
+
+bool IsSessionAllowed() {
+   if(!InpUseSessionFilter)
+      return true;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   const int h = dt.hour;
+
+   if(InpSessionStartHour == InpSessionEndHour)
+      return true;
+   if(InpSessionStartHour < InpSessionEndHour)
+      return (h >= InpSessionStartHour && h < InpSessionEndHour);
+   return (h >= InpSessionStartHour || h < InpSessionEndHour);
+}
+
+void UpdateRiskScale() {
+   if(!InpUseDdRiskScale) {
+      g_riskScale = 1.0;
+      return;
+   }
+
+   const double eq = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(g_equityPeak <= 0.0)
+      g_equityPeak = eq;
+   if(eq > g_equityPeak)
+      g_equityPeak = eq;
+
+   g_riskScale = 1.0;
+   if(g_equityPeak > 0.0) {
+      const double ddPct = (g_equityPeak - eq) / g_equityPeak * 100.0;
+      if(ddPct >= InpDdHalveRiskPct)
+         g_riskScale = 0.5;
+   }
+}
+
+bool IsAllowedNewEntry(string &why) {
+   why = "";
+   if(!IsSpreadAllowed()) {
+      why = StringFormat("spread %d > %d pts", CurrentSpreadPoints(), InpMaxSpreadPoints);
+      return false;
+   }
+   if(!IsSessionAllowed()) {
+      why = StringFormat("ngoài session %02d–%02d server", InpSessionStartHour, InpSessionEndHour);
+      return false;
+   }
+   return true;
+}
+
 double VolumeForRisk(const bool isBuy, const double entry, const double sl) {
    if(MathAbs(entry - sl) < _Point) return 0.0;
-   const double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * (InpRiskPercent / 100.0);
+   const double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE)
+                            * (InpRiskPercent / 100.0)
+                            * g_riskScale;
    double profit = 0.0;
    if(!OrderCalcProfit(isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL, _Symbol, 1.0, entry, sl, profit))
       return 0.0;
@@ -596,26 +735,111 @@ bool OpenMarketFromReject(const bool isBuy,
    const datetime t = iTime(_Symbol, _Period, rejectShift);
    const double px = isBuy ? iHigh(_Symbol, _Period, rejectShift) : iLow(_Symbol, _Period, rejectShift);
    DrawSetupMarker("SIG", t, px, isBuy ? clrLime : clrOrangeRed, isBuy ? "Entry Buy" : "Entry Sell");
+
+   const ulong posTicket = FindOurPositionTicket();
+   if(posTicket > 0)
+      StartPositionTrack(posTicket, isBuy, entry, sl);
+
+   return true;
+}
+
+bool TryPartialCloseAndBreakeven(const ulong ticket) {
+   if(!InpUsePartialAt2R || g_trackPartialDone || g_trackRiskDist <= 0.0)
+      return false;
+   if(ticket == 0 || !PositionSelectByTicket(ticket))
+      return false;
+
+   const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   const double px = g_trackIsBuy ? bid : ask;
+   double profitR = 0.0;
+
+   if(g_trackIsBuy)
+      profitR = (px - g_trackEntry) / g_trackRiskDist;
+   else
+      profitR = (g_trackEntry - px) / g_trackRiskDist;
+
+   if(profitR < InpPartialCloseRR - 1e-8)
+      return false;
+
+   const double vol = PositionGetDouble(POSITION_VOLUME);
+   const double vmin = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   const double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   if(vol <= vmin + 1e-12)
+      return false;
+
+   double closeVol = vol * InpPartialCloseFrac;
+   if(step > 0.0)
+      closeVol = MathFloor(closeVol / step) * step;
+   closeVol = NormalizeLots(closeVol);
+
+   if(closeVol < vmin) {
+      if(vol <= vmin * 2.0 + 1e-12)
+         return false;
+      closeVol = vmin;
+   }
+   if(vol - closeVol < vmin - 1e-12)
+      closeVol = NormalizeLots(vol - vmin);
+   if(closeVol < vmin - 1e-12)
+      return false;
+
+   if(!g_trade.PositionClosePartial(ticket, closeVol)) {
+      PrintFormat("[EPB] Partial close fail ticket=%I64u vol=%.2f ret=%d",
+                  ticket, closeVol, g_trade.ResultRetcode());
+      return false;
+   }
+
+   const double beOff = InpBeOffsetPoints * _Point;
+   const double tp = PositionGetDouble(POSITION_TP);
+   double newSl = g_trackIsBuy
+                    ? NormalizePrice(g_trackEntry + beOff)
+                    : NormalizePrice(g_trackEntry - beOff);
+
+   const double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
+   if(g_trackIsBuy) {
+      if(bid - newSl < MathMax(_Point, minDist))
+         newSl = NormalizePrice(bid - MathMax(_Point, minDist));
+   } else {
+      if(newSl - ask < MathMax(_Point, minDist))
+         newSl = NormalizePrice(ask + MathMax(_Point, minDist));
+   }
+
+   if(!g_trade.PositionModify(ticket, newSl, tp)) {
+      PrintFormat("[EPB] BE modify fail ticket=%I64u SL=%.*f ret=%d",
+                  ticket, _Digits, newSl, g_trade.ResultRetcode());
+   }
+
+   g_trackPartialDone = true;
+   PrintFormat("[EPB] 2R manage: chốt %.2f lot (%.0f%%) @ %.2fR | SL→BE %.*f",
+               closeVol, InpPartialCloseFrac * 100.0, profitR, _Digits, newSl);
    return true;
 }
 
 void ManageOpenPosition() {
-   if(InpMaxBarsInTrade <= 0 || !HasOurPosition())
+   if(!HasOurPosition()) {
+      ResetPositionTrack();
+      return;
+   }
+
+   SyncPositionTrack();
+   const ulong ticket = FindOurPositionTicket();
+   if(ticket == 0)
       return;
 
-   for(int i = PositionsTotal() - 1; i >= 0; i--) {
-      const ulong t = PositionGetTicket(i);
-      if(t == 0 || !PositionSelectByTicket(t)) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
+   TryPartialCloseAndBreakeven(ticket);
 
-      const datetime openT = (datetime)PositionGetInteger(POSITION_TIME);
-      const int barsIn = iBarShift(_Symbol, _Period, openT, false);
-      if(barsIn >= 0 && barsIn >= InpMaxBarsInTrade) {
-         g_trade.PositionClose(t);
-         Print("[EPB] Đóng lệnh — quá ", InpMaxBarsInTrade, " bar");
-      }
-      break;
+   if(InpMaxBarsInTrade <= 0)
+      return;
+
+   if(!PositionSelectByTicket(ticket))
+      return;
+
+   const datetime openT = (datetime)PositionGetInteger(POSITION_TIME);
+   const int barsIn = iBarShift(_Symbol, _Period, openT, false);
+   if(barsIn >= 0 && barsIn >= InpMaxBarsInTrade) {
+      g_trade.PositionClose(ticket);
+      Print("[EPB] Đóng lệnh — quá ", InpMaxBarsInTrade, " bar");
+      ResetPositionTrack();
    }
 }
 
@@ -701,6 +925,12 @@ bool TryEntryOnBreakout(const int signalShift, const double atr) {
    }
    if(HasOurPosition()) {
       g_setupDetail = "đã có position";
+      return false;
+   }
+
+   string allowWhy = "";
+   if(!IsAllowedNewEntry(allowWhy)) {
+      g_setupDetail = allowWhy;
       return false;
    }
 
@@ -923,7 +1153,10 @@ void UpdateChartComment(const int shift,
       "  shift=", touchShift, "\n",
       "Trade: ", (InpTradeEnabled ? "ON" : "OFF"),
       "  Pos: ", (HasOurPosition() ? "YES" : "NO"),
-      "  Risk: ", DoubleToString(InpRiskPercent, 1), "%  TP=", DoubleToString(InpTpRR, 1), "R\n",
+      "  Risk: ", DoubleToString(InpRiskPercent * g_riskScale, 2), "% (×", DoubleToString(g_riskScale, 1),
+      ")  TP=", DoubleToString(InpTpRR, 1), "R\n",
+      "Spread: ", CurrentSpreadPoints(), " pts",
+      InpUsePartialAt2R ? StringFormat(" | 2R: chốt %.0f%%+BE", InpPartialCloseFrac * 100.0) : "", "\n",
       "Close/EMA/ADX: ", DoubleToString(iClose(_Symbol, _Period, shift), _Digits),
       " / ", DoubleToString(ema, _Digits),
       " / ", DoubleToString(adx, 1)
@@ -931,8 +1164,6 @@ void UpdateChartComment(const int shift,
 }
 
 void OnNewClosedBar() {
-   ManageOpenPosition();
-
    const int shift = 1;
 
    double ema = 0.0, adx = 0.0, atr = 0.0;
@@ -985,6 +1216,9 @@ int OnInit() {
    }
 
    ResetSetupState("init");
+   ResetPositionTrack();
+   g_equityPeak = AccountInfoDouble(ACCOUNT_EQUITY);
+   g_riskScale = 1.0;
 
    double probe = 0.0;
    string err = "";
@@ -1002,12 +1236,14 @@ int OnInit() {
    }
 
    PrintFormat(
-      "[EPB] Init — trade=%s risk=%.1f%% TP=%.1fR | breakout %d bar, %s High/Low touch",
+      "[EPB] Init Phase 6 — trade=%s risk=%.1f%%×DD TP=%.1fR | spread<=%d | session %02d-%02dh | 2R: %.0f%%+BE | no daily cap",
       InpTradeEnabled ? "ON" : "OFF",
       InpRiskPercent,
       InpTpRR,
-      InpMaxBarsWaitBreakout,
-      InpBreakoutUseTouchHighLow ? "Close>" : "Close>Close"
+      InpMaxSpreadPoints,
+      InpSessionStartHour,
+      InpSessionEndHour,
+      InpPartialCloseFrac * 100.0
    );
    return INIT_SUCCEEDED;
 }
@@ -1033,6 +1269,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 }
 
 void OnTick() {
+   UpdateRiskScale();
+   ManageOpenPosition();
+
    const datetime barOpen = iTime(_Symbol, _Period, 0);
    if(barOpen == g_lastBarTime)
       return;

@@ -112,9 +112,9 @@ Gán pivot: từ L0/H0 gần nhất, lùi từng bước tới pivot cũ **kề*
 #### Bull CHoCH (phá L0)
 
 1. **P1:** Track `newL0` (low thấp hơn).
-2. **P2:** `IsConfirmedSwingLow(newL0)` → vào phase 3.
+2. **P2:** `IsConfirmedSwingLow(newL0)` **hoặc** hồi lên đủ `InpSwingRange` (swing high sau đáy) → khóa `newL0`, vào phase 3 (không kéo `newL0` nữa).
 3. **P3 case 1:** Phá lên H0 → `newH0` confirm → roll bull (`L1` giữ).
-4. **P3 case 2:** Phá xuống `newL0` → `newH0` + `newL02` confirm → roll bear.
+4. **P3 case 2:** Body phá xuống `newL0` đã khóa → track `newH0` (confirm) → track `newL02` (confirm tuần tự) → roll bear.
 
 Bear Continue / CHoCH: **đối xứng** với bull.
 
