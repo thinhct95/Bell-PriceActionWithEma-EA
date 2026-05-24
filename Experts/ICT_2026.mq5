@@ -3,8 +3,8 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.112"
-#property description "Daily Bias + Intraday H1 + iTF FVG + IsAllowTrade"
+#property version   "1.126"
+#property description "ICT2026 MSS limit entry + SL swing CHoCH + TP intraday"
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/DailyBias.mqh>
@@ -47,6 +47,7 @@ void OnDeinit(const int reason)
    IctPanel_Clear();
    IctDraw_Clear();
    IctFvgDraw_DeleteAll();
+   IctMssDraw_DeleteAll();
    ChartRedraw();
 }
 
@@ -80,6 +81,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
       IctPanel_Render(_Symbol);
       IctDraw_Render(_Symbol);
       IctFvgDraw_Render(_Symbol);
+      IctMssDraw_Render(_Symbol);
    }
 }
 
@@ -91,5 +93,9 @@ ENUM_ICT_TREND ICT2026_GetIntradayTrend() { return g_ictIntraday.trend; }
 bool ICT2026_IsAllowTrade() { return g_ictIntraday.isAllowTrade; }
 
 int ICT2026_GetFvgAvailableCount() { return g_ictLowTf.availableCount; }
+
+ENUM_ICT_MSS_PHASE ICT2026_GetMssPhase() { return g_ictLowTf.mss.phase; }
+
+string ICT2026_GetMssReason() { return g_ictLowTf.mss.displayReason; }
 
 //+------------------------------------------------------------------+

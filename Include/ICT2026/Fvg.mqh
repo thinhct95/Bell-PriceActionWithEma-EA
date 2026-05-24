@@ -185,6 +185,42 @@ ENUM_ICT_PD_ZONE IctFvg_ClassifyPd(const ENUM_ICT_FVG_SIDE side,
    return ICT_PD_NONE;
 }
 
+bool IctFvg_OverlapsPremium(const IctFvgZone &zone)
+{
+   if(zone.pdEq <= 0.0 || zone.pdHigh <= zone.pdLow + _Point)
+      return false;
+   return (zone.upper > zone.pdEq + _Point && zone.lower < zone.pdHigh + _Point);
+}
+
+bool IctFvg_OverlapsDiscount(const IctFvgZone &zone)
+{
+   if(zone.pdEq <= 0.0 || zone.pdHigh <= zone.pdLow + _Point)
+      return false;
+   return (zone.lower < zone.pdEq - _Point && zone.upper > zone.pdLow - _Point);
+}
+
+ENUM_ICT_PD_ZONE IctFvg_ComputeRepPd(const IctFvgZone &zone)
+{
+   if(zone.pdEq <= 0.0)
+      return ICT_PD_NONE;
+
+   const bool inPrem = IctFvg_OverlapsPremium(zone);
+   const bool inDisc = IctFvg_OverlapsDiscount(zone);
+
+   if(inPrem && !inDisc)
+      return ICT_PD_PREMIUM;
+   if(inDisc && !inPrem)
+      return ICT_PD_DISCOUNT;
+   if(inPrem && inDisc)
+   {
+      if(zone.side == ICT_FVG_BEAR)
+         return ICT_PD_PREMIUM;
+      if(zone.side == ICT_FVG_BULL)
+         return ICT_PD_DISCOUNT;
+   }
+   return ICT_PD_NONE;
+}
+
 double IctFvg_BarExtremeSince(const string sym, const ENUM_TIMEFRAMES tf,
                               const datetime fromTime, const bool wantLow)
 {
@@ -220,104 +256,52 @@ bool IctFvg_IsConfirmedPivot(const string sym, const ENUM_TIMEFRAMES tf,
    return IctIsSwingLow(sym, tf, pt.shift, str);
 }
 
-// Đỉnh PD bear = swing high gần nhất (theo thời gian) trên FVG tại lúc tạo FVG — không dùng iH0/iH1 live
+// Đỉnh PD bear = pivot swing high gần FVG nhất (theo bar shift), trên upper — không dùng wick nến
 bool IctFvg_ResolvePdHighBear(const string sym, const IctFvgZone &zone, double &outHigh)
 {
-   outHigh     = 0.0;
-   datetime    bestTime = 0;
-   bool        found    = false;
+   outHigh = 0.0;
 
    const ENUM_TIMEFRAMES pdTf = InpIntradayTf;
-   const int             pdSec = (int)PeriodSeconds(pdTf);
-   const datetime        tCutoff = zone.createdTime + (datetime)pdSec;
-   const datetime        tMin    = zone.createdTime - (datetime)(InpIntradayRecentBars * pdSec);
+   int fvgShift = iBarShift(sym, pdTf, zone.createdTime, true);
+   if(fvgShift < 0)
+      fvgShift = iBarShift(sym, pdTf, zone.createdTime, false);
+   if(fvgShift < 0)
+      return false;
 
    IctSwingPoint highs[], lows[];
    IctCollectSwings(sym, pdTf, InpIntradaySwingRange, InpIntradaySwingLookback, highs, lows);
    const int nH = ArraySize(highs);
 
-   for(int i = 0; i < nH; i++)
-   {
-      if(highs[i].price <= zone.upper + _Point)
-         continue;
-      if(highs[i].time > tCutoff || highs[i].time < tMin)
-         continue;
-      if(!found || highs[i].time > bestTime)
-      {
-         bestTime = highs[i].time;
-         outHigh  = highs[i].price;
-         found    = true;
-      }
-   }
+   IctSwingPoint pt = IctFindNearestSwingHighBefore(highs, nH, fvgShift, zone.upper);
+   if(!pt.Valid())
+      return false;
 
-   const int maxBars = MathMax(InpIntradayRecentBars, 30);
-   for(int sh = 0; sh < maxBars && sh < Bars(sym, pdTf); sh++)
-   {
-      const datetime t = iTime(sym, pdTf, sh);
-      if(t > tCutoff || t < tMin)
-         continue;
-      const double h = iHigh(sym, pdTf, sh);
-      if(h <= zone.upper + _Point)
-         continue;
-      if(!found || t > bestTime)
-      {
-         bestTime = t;
-         outHigh  = h;
-         found    = true;
-      }
-   }
-
-   return found;
+   outHigh = pt.price;
+   return true;
 }
 
-// Đáy PD bull = swing low gần nhất (theo thời gian) dưới FVG tại lúc tạo FVG
+// Đáy PD bull = pivot swing low gần FVG nhất (theo bar shift), dưới lower
 bool IctFvg_ResolvePdLowBull(const string sym, const IctFvgZone &zone, double &outLow)
 {
-   outLow      = 0.0;
-   datetime    bestTime = 0;
-   bool        found    = false;
+   outLow = 0.0;
 
    const ENUM_TIMEFRAMES pdTf = InpIntradayTf;
-   const int             pdSec = (int)PeriodSeconds(pdTf);
-   const datetime        tCutoff = zone.createdTime + (datetime)pdSec;
-   const datetime        tMin    = zone.createdTime - (datetime)(InpIntradayRecentBars * pdSec);
+   int fvgShift = iBarShift(sym, pdTf, zone.createdTime, true);
+   if(fvgShift < 0)
+      fvgShift = iBarShift(sym, pdTf, zone.createdTime, false);
+   if(fvgShift < 0)
+      return false;
 
    IctSwingPoint highs[], lows[];
    IctCollectSwings(sym, pdTf, InpIntradaySwingRange, InpIntradaySwingLookback, highs, lows);
    const int nL = ArraySize(lows);
 
-   for(int i = 0; i < nL; i++)
-   {
-      if(lows[i].price >= zone.lower - _Point)
-         continue;
-      if(lows[i].time > tCutoff || lows[i].time < tMin)
-         continue;
-      if(!found || lows[i].time > bestTime)
-      {
-         bestTime = lows[i].time;
-         outLow   = lows[i].price;
-         found    = true;
-      }
-   }
+   IctSwingPoint pt = IctFindNearestSwingLowBefore(lows, nL, fvgShift, zone.lower);
+   if(!pt.Valid())
+      return false;
 
-   const int maxBars = MathMax(InpIntradayRecentBars, 30);
-   for(int sh = 0; sh < maxBars && sh < Bars(sym, pdTf); sh++)
-   {
-      const datetime t = iTime(sym, pdTf, sh);
-      if(t > tCutoff || t < tMin)
-         continue;
-      const double l = iLow(sym, pdTf, sh);
-      if(l >= zone.lower - _Point)
-         continue;
-      if(!found || t > bestTime)
-      {
-         bestTime = t;
-         outLow   = l;
-         found    = true;
-      }
-   }
-
-   return found;
+   outLow = pt.price;
+   return true;
 }
 
 bool IctFvg_NearestLowBelow(const string sym, const double refLower,
@@ -427,6 +411,45 @@ void IctFvg_FinalizePdMetrics(IctFvgZone &zone)
    zone.pdEq = (zone.pdHigh + zone.pdLow) * 0.5;
    const double mid = (zone.upper + zone.lower) * 0.5;
    zone.pdZone = IctFvg_ClassifyPd(zone.side, mid, zone.pdEq, zone.pdHigh, zone.pdLow);
+   zone.repPd  = IctFvg_ComputeRepPd(zone);
+}
+
+ENUM_ICT_PD_ZONE IctFvg_GetRepPd(const IctFvgZone &zone)
+{
+   if(zone.repPd != ICT_PD_NONE)
+      return zone.repPd;
+   return zone.pdZone;
+}
+
+bool IctFvg_IsEntryRepPd(const IctFvgZone &zone)
+{
+   if(zone.pdEq <= 0.0)
+      return false;
+   if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
+      return IctFvg_OverlapsPremium(zone);
+   if(g_ictDailyBias.bias == ICT_BIAS_BULL)
+      return IctFvg_OverlapsDiscount(zone);
+   return false;
+}
+
+bool IctFvg_HasFillAtLeast(const IctFvgZone &zone, const double pct)
+{
+   if(pct <= 0.0)
+      return true;
+   return (zone.maxFillRatio >= pct / 100.0 - 1e-9);
+}
+
+double IctFvg_PriceAtFillPct(const IctFvgZone &zone, const double pct)
+{
+   const double h = zone.upper - zone.lower;
+   if(h <= _Point)
+      return 0.0;
+   const double r = MathMax(0.0, MathMin(100.0, pct)) / 100.0;
+   if(zone.side == ICT_FVG_BULL)
+      return zone.upper - h * r;
+   if(zone.side == ICT_FVG_BEAR)
+      return zone.lower + h * r;
+   return 0.0;
 }
 
 void IctFvg_UpdatePdForZone(const string sym, IctFvgZone &zone)
@@ -445,6 +468,10 @@ void IctFvg_UpdatePdForZone(const string sym, IctFvgZone &zone)
    const int nL = ArraySize(lows);
    const int nH = ArraySize(highs);
 
+   int fvgShift = iBarShift(sym, pdTf, zone.createdTime, true);
+   if(fvgShift < 0)
+      fvgShift = iBarShift(sym, pdTf, zone.createdTime, false);
+
    if(zone.side == ICT_FVG_BEAR)
    {
       if(!zone.pdSwing1Set)
@@ -455,7 +482,12 @@ void IctFvg_UpdatePdForZone(const string sym, IctFvgZone &zone)
       }
 
       IctSwingPoint swingLow;
-      if(IctFvg_FindFirstSwingLowAfter(lows, nL, zone.createdTime, swingLow) &&
+      if(fvgShift >= 0)
+         swingLow = IctFindFirstSwingLowAfterShift(lows, nL, fvgShift);
+      else
+         IctFvg_FindFirstSwingLowAfter(lows, nL, zone.createdTime, swingLow);
+
+      if(swingLow.Valid() &&
          IctFvg_IsConfirmedPivot(sym, pdTf, swingLow, false))
       {
          zone.pdLow        = swingLow.price;
@@ -481,7 +513,12 @@ void IctFvg_UpdatePdForZone(const string sym, IctFvgZone &zone)
       }
 
       IctSwingPoint swingHigh;
-      if(IctFvg_FindFirstSwingHighAfter(highs, nH, zone.createdTime, swingHigh) &&
+      if(fvgShift >= 0)
+         swingHigh = IctFindFirstSwingHighAfterShift(highs, nH, fvgShift);
+      else
+         IctFvg_FindFirstSwingHighAfter(highs, nH, zone.createdTime, swingHigh);
+
+      if(swingHigh.Valid() &&
          IctFvg_IsConfirmedPivot(sym, pdTf, swingHigh, true))
       {
          zone.pdHigh       = swingHigh.price;

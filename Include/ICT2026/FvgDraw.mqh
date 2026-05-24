@@ -6,8 +6,11 @@
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/Fvg.mqh>
+#include <ICT2026/ConfirmFvg.mqh>
+#include <ICT2026/LowTfApi.mqh>
 
-const string ICT26_FVG_PFX = "ICT26_FVG_";
+const string ICT26_FVG_PFX  = "ICT26_FVG_";
+const string ICT26_CFVG_PFX = "ICT26_CFVG_";
 
 void IctFvgDraw_DeleteAll()
 {
@@ -15,7 +18,7 @@ void IctFvgDraw_DeleteAll()
    for(int i = ObjectsTotal(ch, 0, -1) - 1; i >= 0; i--)
    {
       const string name = ObjectName(ch, i, 0, -1);
-      if(StringFind(name, ICT26_FVG_PFX) == 0)
+      if(StringFind(name, ICT26_FVG_PFX) == 0 || StringFind(name, ICT26_CFVG_PFX) == 0)
          ObjectDelete(ch, name);
    }
 }
@@ -52,22 +55,6 @@ void IctFvgDraw_HLine(const string name, const datetime t1, const datetime t2,
    ObjectSetInteger(ch, name, OBJPROP_SELECTABLE, false);
    ObjectMove(ch, name, 0, t1, price);
    ObjectMove(ch, name, 1, t2, price);
-}
-
-void IctFvgDraw_Label(const string name, const datetime t, const double price,
-                      const string text, const color clr)
-{
-   const long ch = ChartID();
-   if(ObjectFind(ch, name) < 0)
-      ObjectCreate(ch, name, OBJ_TEXT, 0, t, price);
-
-   ObjectMove(ch, name, 0, t, price);
-   ObjectSetString(ch, name, OBJPROP_TEXT, text);
-   ObjectSetInteger(ch, name, OBJPROP_COLOR, clr);
-   ObjectSetInteger(ch, name, OBJPROP_FONTSIZE, InpChartLabelFontSize);
-   ObjectSetString(ch, name, OBJPROP_FONT, "Arial Bold");
-   ObjectSetInteger(ch, name, OBJPROP_ANCHOR, ANCHOR_LEFT_LOWER);
-   ObjectSetInteger(ch, name, OBJPROP_SELECTABLE, false);
 }
 
 void IctFvgDraw_Render(const string sym)
@@ -111,13 +98,29 @@ void IctFvgDraw_Render(const string sym)
          IctFvgDraw_HLine(pfx + "PD_EQ", pdStart, pdEnd,
                           g_ictFvgZones[i].pdEq, clrWhite, STYLE_DOT);
       }
+   }
 
-      string tag = StringFormat("iFVG %s %s", IctFvgSideText(g_ictFvgZones[i].side),
-                                IctFvgStateText(g_ictFvgZones[i].state));
-      if(g_ictFvgZones[i].pdZone != ICT_PD_NONE)
-         tag += " " + IctPdZoneText(g_ictFvgZones[i].pdZone);
+   if(InpDrawConfirmFvg)
+   {
+      for(int j = 0; j < g_ictConfirmFvgCount; j++)
+      {
+         const string cid = IntegerToString((long)g_ictConfirmFvgZones[j].id);
+         const string cpfx = ICT26_CFVG_PFX + cid + "_";
+         const datetime cStart = g_ictConfirmFvgZones[j].createdTime;
+         const datetime cEnd   = IctFvg_GetFvgDrawTimeEnd(sym, InpConfirmTf, g_ictConfirmFvgZones[j]);
 
-      IctFvgDraw_Label(pfx + "LBL", fvgEnd, g_ictFvgZones[i].upper, tag, fvgClr);
+         color cClr = (g_ictConfirmFvgZones[j].side == ICT_FVG_BULL) ?
+                      clrDarkGreen : clrFireBrick;
+         if(g_ictConfirmFvgZones[j].state == ICT_FVG_USED)
+            cClr = InpFvgUsedColor;
+
+         if(IctLowTf_MssM5FvgId() == g_ictConfirmFvgZones[j].id &&
+            IctLowTf_MssPhase() >= ICT_MSS_M5_FVG)
+            cClr = (g_ictConfirmFvgZones[j].side == ICT_FVG_BULL) ? clrAqua : clrOrange;
+
+         IctFvgDraw_Rect(cpfx + "BOX", cStart, g_ictConfirmFvgZones[j].upper,
+                         cEnd, g_ictConfirmFvgZones[j].lower, cClr, true);
+      }
    }
 
    ChartRedraw();

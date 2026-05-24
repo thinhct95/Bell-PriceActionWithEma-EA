@@ -6,22 +6,29 @@
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/Fvg.mqh>
+#include <ICT2026/LowTfApi.mqh>
+#include <ICT2026/MssSetup.mqh>
+#include <ICT2026/MssEntry.mqh>
 #include <ICT2026/FvgDraw.mqh>
-
-IctLowTfState g_ictLowTf;
+#include <ICT2026/MssDraw.mqh>
 
 void IctLowTfTrend_Reset()
 {
-   g_ictLowTf.lastBarTime    = 0;
-   g_ictLowTf.activeCount    = 0;
-   g_ictLowTf.availableCount = 0;
-   g_ictLowTf.displayReason  = "";
+   g_ictLowTf.lastBarTime         = 0;
+   g_ictLowTf.lastConfirmBarTime  = 0;
+   g_ictLowTf.activeCount         = 0;
+   g_ictLowTf.availableCount      = 0;
+   g_ictLowTf.confirmFvgCount     = 0;
+   g_ictLowTf.displayReason       = "";
+   g_ictLowTf.mss.Clear();
    IctFvg_Reset();
+   IctConfirmFvg_Reset();
 }
 
 bool IctLowTfTrend_Init(const string sym)
 {
    IctLowTfTrend_Reset();
+   IctMssEntry_Init();
    if(Bars(sym, InpFvgTf) < 10)
       return false;
    IctLowTfTrend_Update(sym, true);
@@ -62,6 +69,17 @@ bool IctLowTfTrend_Update(const string sym, const bool force = false)
    g_ictLowTf.activeCount    = g_ictFvgCount;
    g_ictLowTf.availableCount = IctFvg_CountAvailable();
 
+   const datetime cBar0 = iTime(sym, InpConfirmTf, 0);
+   const bool confirmNewBar = (force || cBar0 != g_ictLowTf.lastConfirmBarTime);
+   if(confirmNewBar)
+   {
+      g_ictLowTf.lastConfirmBarTime = cBar0;
+      IctConfirmFvg_UpdateAll(sym, InpConfirmTf);
+      IctMss_Update(sym);
+      IctMssEntry_Update(sym);
+      g_ictLowTf.confirmFvgCount = g_ictConfirmFvgCount;
+   }
+
    if(InpDebug && (force || g_ictIntraday.isAllowTrade))
       PrintFormat("[ICT2026/LowTF] %s | Allow=%s | FVG avail=%d total=%d | %s",
                   sym,
@@ -70,6 +88,7 @@ bool IctLowTfTrend_Update(const string sym, const bool force = false)
                   g_ictLowTf.displayReason);
 
    IctFvgDraw_Render(sym);
+   IctMssDraw_Render(sym);
    return true;
 }
 
@@ -103,8 +122,27 @@ void IctLowTfTrend_TickRefresh(const string sym)
          MathAbs(g_ictFvgZones[i].pdLow - oldPdLo[i]) > _Point)
          dirty = true;
    }
+   if(g_ictIntraday.isAllowTrade)
+   {
+      const ENUM_ICT_MSS_PHASE prevMss = g_ictLowTf.mss.phase;
+      IctMss_Update(sym);
+      IctMssEntry_Update(sym);
+      if(prevMss != g_ictLowTf.mss.phase)
+         dirty = true;
+   }
+   else if(g_ictLowTf.mss.pendingTicket > 0)
+   {
+      IctMssEntry_CancelTicket(g_ictLowTf.mss.pendingTicket);
+      g_ictLowTf.mss.pendingTicket = 0;
+   }
+
    if(dirty)
       IctFvgDraw_Render(sym);
+
+   if(g_ictLowTf.mss.phase >= ICT_MSS_CHOCH)
+      IctMssDraw_Render(sym);
+   else if(!InpDrawMssChoch)
+      IctMssDraw_DeleteAll();
 }
 
 void IctLowTfTrend_Get(IctLowTfState &out) { out = g_ictLowTf; }

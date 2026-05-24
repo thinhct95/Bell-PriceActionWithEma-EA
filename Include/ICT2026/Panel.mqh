@@ -12,7 +12,7 @@
 
 const string ICT26_PANEL_PFX     = "ICT26_PNL_";
 const string ICT26_PANEL_LEGACY  = "ICT26_BIAS_PANEL";
-const int    ICT26_PANEL_MAXLINE = 12;
+const int    ICT26_PANEL_MAXLINE = 14;
 
 const color ICT_PANEL_CLR_UP      = clrLime;
 const color ICT_PANEL_CLR_DOWN    = clrOrangeRed;
@@ -161,6 +161,12 @@ void IctPanel_Render(const string sym)
    ArrayResize(colors, n + 1);
    lines[n] = StringFormat("iTF FVG: %s", g_ictLowTf.displayReason);
    colors[n++] = (g_ictLowTf.availableCount > 0) ? ICT_PANEL_CLR_ALLOW : ICT_PANEL_CLR_MUTED;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = StringFormat("MSS: %s", g_ictLowTf.mss.displayReason);
+   colors[n++] = (g_ictLowTf.mss.phase >= ICT_MSS_READY) ? ICT_PANEL_CLR_ALLOW :
+                 (g_ictLowTf.mss.phase > ICT_MSS_IDLE) ? clrGold : ICT_PANEL_CLR_MUTED;
 
    for(int i = 0; i < n; i++)
       IctPanel_SetLine(ch, i, i * lh, lines[i], colors[i]);

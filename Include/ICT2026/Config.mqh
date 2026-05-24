@@ -52,11 +52,34 @@ input double          InpFvgUsedFillPct       = 38.2;        // % lấp FVG → 
 input int             InpFvgExpireDays        = 3;           // Xóa Available sau N ngày
 input int             InpFvgMaxZones          = 24;          // Số FVG tối đa trên chart
 input bool            InpDrawFvgZones         = true;        // Vẽ FVG + Premium/Discount
-input color           InpFvgBullColor         = clrDodgerBlue;
-input color           InpFvgBearColor         = clrOrangeRed;
-input color           InpFvgUsedColor         = clrDimGray;
+input color           InpFvgBullColor         = clrLimeGreen;   // Bull FVG
+input color           InpFvgBearColor         = clrRed;         // Bear FVG
+input color           InpFvgUsedColor         = clrDimGray;     // Used FVG
 input color           InpPdPremiumColor       = clrMaroon;
 input color           InpPdDiscountColor      = clrDarkGreen;
+
+input group "══ MSS / Entry (Confirm TF) ══"
+input double          InpMssH1MinFillPct      = 38.2;        // Retest FVG H1 (POI): % lấp tối thiểu trên H1
+input double          InpMssEntryFillPct      = 38.2;        // M5 FVG: % lấp để sẵn sàng entry
+input int             InpMssConfirmLookback   = 80;          // Lookback pivot CHoCH trên Confirm TF
+input int             InpMssConfirmFvgBars    = 40;          // Quét M5 FVG sau CHoCH
+input double          InpMssMaxDistGapPct    = 75.0;       // MSS: buffer quanh H1 FVG (% chiều cao gap)
+input double          InpMssMaxDistAtrMult    = 1.25;        // MSS: thêm buffer (× ATR H1)
+input double          InpMssExtraBelowGapPct  = 100.0;      // Bear: thêm % gap dưới lower (MSS dưới FVG)
+input double          InpMssExtraAboveGapPct  = 100.0;      // Bull: thêm % gap trên upper
+input int             InpMssMaxM5BarsAfterTouch = 0;        // MSS: max M5 bar sau chạm H1 (0=không giới hạn)
+input bool            InpDrawConfirmFvg       = true;        // Vẽ FVG Confirm TF (màu nhạt)
+input bool            InpDrawMssChoch         = true;        // Vẽ MSS sau H1 chạm FVG (CHoCH/H0)
+input bool            InpMssLogJournal          = true;        // Log lý do chặn vào Experts journal
+
+input group "══ MSS Trade ══"
+input bool            InpMssTradeEnabled      = true;        // Đặt lệnh limit MSS
+input ulong           InpMssMagic             = 202604;      // Magic number
+input double          InpMssRiskPct           = 1.0;         // R % balance mỗi lệnh
+input double          InpMssSlAtrMult           = 0.5;         // SL: buffer ngoài H0/L0 M5 (× ATR M5)
+input double          InpMssMinRR              = 2.0;         // TP tối thiểu (× risk entry→SL)
+input int             InpMssPendingExpireHours  = 24;         // Hết hạn pending (giờ, 0=không)
+input bool            InpMssOnePosition         = true;        // Một position/pending MSS
 
 input group "══ Debug ══"
 input bool            InpDebug            = true;

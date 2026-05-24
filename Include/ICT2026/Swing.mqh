@@ -102,6 +102,104 @@ IctSwingPoint IctFindMostRecentOlder(IctSwingPoint &pts[], const int count,
    return pts[best];
 }
 
+// Pivot mới hơn anchor (shift nhỏ hơn = gần hiện tại hơn)
+IctSwingPoint IctFindMostRecentNewer(IctSwingPoint &pts[], const int count,
+                                     const int anchorShift)
+{
+   IctSwingPoint empty;
+   empty.Clear();
+   int best = -1;
+   for(int i = 0; i < count; i++)
+   {
+      if(pts[i].shift >= anchorShift)
+         continue;
+      if(best < 0 || pts[i].shift < pts[best].shift)
+         best = i;
+   }
+   if(best < 0)
+      return empty;
+   return pts[best];
+}
+
+// Pivot swing gần anchor nhất (shift nhỏ nhất trong các bar cũ hơn anchor)
+IctSwingPoint IctFindNearestSwingHighBefore(IctSwingPoint &pts[], const int count,
+                                            const int anchorShift, const double refUpper)
+{
+   IctSwingPoint empty;
+   empty.Clear();
+   int best = -1;
+   const double minP = refUpper + _Point;
+   for(int i = 0; i < count; i++)
+   {
+      if(pts[i].shift <= anchorShift)
+         continue;
+      if(pts[i].price <= minP)
+         continue;
+      if(best < 0 || pts[i].shift < pts[best].shift)
+         best = i;
+   }
+   if(best < 0)
+      return empty;
+   return pts[best];
+}
+
+IctSwingPoint IctFindNearestSwingLowBefore(IctSwingPoint &pts[], const int count,
+                                           const int anchorShift, const double refLower)
+{
+   IctSwingPoint empty;
+   empty.Clear();
+   int best = -1;
+   const double maxP = refLower - _Point;
+   for(int i = 0; i < count; i++)
+   {
+      if(pts[i].shift <= anchorShift)
+         continue;
+      if(pts[i].price >= maxP)
+         continue;
+      if(best < 0 || pts[i].shift < pts[best].shift)
+         best = i;
+   }
+   if(best < 0)
+      return empty;
+   return pts[best];
+}
+
+IctSwingPoint IctFindFirstSwingLowAfterShift(IctSwingPoint &pts[], const int count,
+                                             const int anchorShift)
+{
+   IctSwingPoint empty;
+   empty.Clear();
+   int best = -1;
+   for(int i = 0; i < count; i++)
+   {
+      if(pts[i].shift >= anchorShift)
+         continue;
+      if(best < 0 || pts[i].shift > pts[best].shift)
+         best = i;
+   }
+   if(best < 0)
+      return empty;
+   return pts[best];
+}
+
+IctSwingPoint IctFindFirstSwingHighAfterShift(IctSwingPoint &pts[], const int count,
+                                              const int anchorShift)
+{
+   IctSwingPoint empty;
+   empty.Clear();
+   int best = -1;
+   for(int i = 0; i < count; i++)
+   {
+      if(pts[i].shift >= anchorShift)
+         continue;
+      if(best < 0 || pts[i].shift > pts[best].shift)
+         best = i;
+   }
+   if(best < 0)
+      return empty;
+   return pts[best];
+}
+
 IctSwingSet IctPickStructuralBear(IctSwingPoint &highs[], const int nH,
                                   IctSwingPoint &lows[], const int nL)
 {
@@ -306,6 +404,19 @@ bool IctBuildSwingSetRecentPivots(const string sym, const ENUM_TIMEFRAMES tf,
       biasOut = ICT_STRUCT_NONE;
 
    return out.IsComplete();
+}
+
+// M5 confirm: cùng pivot/H0–L1 như label chart (InpConfirmTf)
+bool IctBuildConfirmSwingSet(const string sym, IctSwingSet &sw,
+                             ENUM_ICT_STRUCT &structuralOut)
+{
+   sw.Clear();
+   structuralOut = ICT_STRUCT_NONE;
+   return IctBuildSwingSetRecentPivots(sym, InpConfirmTf,
+                                       InpConfirmSwingRange,
+                                       InpConfirmSwingLookback,
+                                       InpConfirmRecentBars,
+                                       sw, structuralOut);
 }
 
 void IctGetKeyLevels(const ENUM_ICT_STRUCT bias, IctSwingSet &sw,

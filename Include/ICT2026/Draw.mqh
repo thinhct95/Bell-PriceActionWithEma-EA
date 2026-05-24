@@ -90,13 +90,8 @@ void IctDraw_SwingSet(const string objPfx, const string tagPfx,
 
 bool IctDraw_BuildConfirmSwings(const string sym, IctSwingSet &sw)
 {
-   sw.Clear();
    ENUM_ICT_STRUCT structural = ICT_STRUCT_NONE;
-   return IctBuildSwingSetRecentPivots(sym, InpConfirmTf,
-                                      InpConfirmSwingRange,
-                                      InpConfirmSwingLookback,
-                                      InpConfirmRecentBars,
-                                      sw, structural);
+   return IctBuildConfirmSwingSet(sym, sw, structural);
 }
 
 void IctDraw_Render(const string sym)

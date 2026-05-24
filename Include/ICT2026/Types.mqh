@@ -148,12 +148,23 @@ enum ENUM_ICT_PD_ZONE
    ICT_PD_EQUILIBRIUM = 2
 };
 
+enum ENUM_ICT_MSS_PHASE
+{
+   ICT_MSS_IDLE        = 0,
+   ICT_MSS_H1_TOUCH    = 1,   // Đã retest FVG H1 (POI): chạm + lấp ≥ InpMssH1MinFillPct trên H1
+   ICT_MSS_CHOCH       = 2,
+   ICT_MSS_M5_FVG      = 3,
+   ICT_MSS_ENTRY_FILL  = 4,
+   ICT_MSS_READY       = 5
+};
+
 struct IctFvgZone
 {
    ulong               id;
    ENUM_ICT_FVG_SIDE   side;
    ENUM_ICT_FVG_STATE  state;
    ENUM_ICT_PD_ZONE    pdZone;
+   ENUM_ICT_PD_ZONE    repPd;
    double              upper;
    double              lower;
    double              pdHigh;
@@ -171,6 +182,7 @@ struct IctFvgZone
    datetime            pdRangeEnd;
    bool                pdComplete;
    bool                pdSwing1Set;
+   bool                mssH1Touch382;
 
    void Clear()
    {
@@ -178,6 +190,7 @@ struct IctFvgZone
       side         = ICT_FVG_NONE;
       state        = ICT_FVG_AVAILABLE;
       pdZone       = ICT_PD_NONE;
+      repPd        = ICT_PD_NONE;
       upper        = 0.0;
       lower        = 0.0;
       pdHigh       = 0.0;
@@ -195,15 +208,55 @@ struct IctFvgZone
       pdRangeEnd      = 0;
       pdComplete      = false;
       pdSwing1Set     = false;
+      mssH1Touch382   = false;
+   }
+};
+
+struct IctMssState
+{
+   ENUM_ICT_MSS_PHASE phase;
+   ulong                h1FvgId;
+   datetime             h1TouchTime;
+   ulong                m5FvgId;
+   double               chochKeyLevel;
+   datetime             chochKeyTime;
+   datetime             chochTime;
+   datetime             m5FvgTime;
+   double               slSwingPrice;
+   ulong                pendingTicket;
+   double               pendingEntry;
+   double               pendingSl;
+   double               pendingTp;
+   string               displayReason;
+
+   void Clear()
+   {
+      phase         = ICT_MSS_IDLE;
+      h1FvgId       = 0;
+      h1TouchTime   = 0;
+      m5FvgId       = 0;
+      chochKeyLevel = 0.0;
+      chochKeyTime  = 0;
+      chochTime     = 0;
+      m5FvgTime     = 0;
+      slSwingPrice  = 0.0;
+      pendingTicket = 0;
+      pendingEntry  = 0.0;
+      pendingSl     = 0.0;
+      pendingTp     = 0.0;
+      displayReason = "";
    }
 };
 
 struct IctLowTfState
 {
    datetime lastBarTime;
+   datetime lastConfirmBarTime;
    int      activeCount;
    int      availableCount;
+   int      confirmFvgCount;
    string   displayReason;
+   IctMssState mss;
 };
 
 #endif

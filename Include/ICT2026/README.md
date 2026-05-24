@@ -193,7 +193,7 @@ Chỉ **quét / giữ** FVG thuận Daily Bias. **Vẽ FVG** (ngang):
 
 | Bear FVG | Bull FVG |
 |----------|----------|
-| Swing 1: đỉnh **gần nhất theo thời gian** trên FVG (snapshot lúc tạo FVG) → `pdHigh` | Swing 1: đáy gần nhất dưới FVG → `pdLow` |
+| Swing 1: pivot **gần FVG nhất** (bar shift trước nến C), giá > `upper` → `pdHigh` | Swing 1: pivot gần FVG, giá < `lower` → `pdLow` |
 | Swing 2: **đáy đầu tiên** sau FVG khi pivot xác nhận (`pdLow`) | Swing 2: **đỉnh đầu tiên** sau FVG (`pdHigh`) |
 
 **Vẽ P/D (ngang):**
@@ -207,6 +207,44 @@ Chỉ **quét / giữ** FVG thuận Daily Bias. **Vẽ FVG** (ngang):
 Swing 1 (`pdSwing1Set`) gán **một lần** khi FVG mới; swing 2 xác nhận → `pdComplete` → không cập nhật nữa khi intraday swing đổi.
 
 FVG Used **không** kéo dài P/D thêm; P/D độc lập với Used (theo swing 2).
+
+**`repPd`**: overlap Premium/Discount (không chỉ midpoint FVG). Bear thỏa MSS nếu **một phần FVG** nằm trên `pdEq` (Premium); fill 38.2% luôn tính từ **`lower`→`upper`** của FVG.
+
+### Retest FVG H1 (POI) — không nhầm với retest swing H1
+
+**Retest FVG H1** = giá **hồi vào gap Fair Value Gap trên H1** (vùng POI đã chọn), đo trên **`InpFvgTf` (H1)**:
+
+| | |
+|--|--|
+| **Chạm** | `firstTouchTime` — nến H1 đầu tiên chạm vùng `[lower … upper]` |
+| **Lấp %** | Từ cạnh FVG (`lower`→`upper` bear) — ≥ `InpMssH1MinFillPct` (mặc định 38.2%) |
+| **Không phải** | Retest swing/pivot H1; retest trên M5; retest đường Premium/Discount riêng |
+
+Sau retest FVG H1 OK → mới arm MSS trên **M5** (phá swing confirm).
+
+### MSS entry (Confirm TF, v1.115)
+
+Khi `IsAllowTrade`, state machine `g_ictLowTf.mss`:
+
+| Phase | Điều kiện |
+|-------|-----------|
+| `H1_TOUCH` | **Retest FVG H1** OK: bias + `repPd` + lấp ≥ `InpMssH1MinFillPct` trên H1 |
+| `CHOCH` | Sau retest FVG H1: **body phá swing M5** (H0/L0/L1/H1 — cùng build như label chart) |
+| `M5_FVG` | FVG `InpConfirmTf` cùng hướng bias, sau thời điểm CHoCH |
+| `ENTRY_FILL` / `READY` | Giá hồi lấp ≥ `InpMssEntryFillPct` vào M5 FVG đó |
+
+Sweep liquidity: **chưa** (phase sau). Module: `MssSetup.mqh`, pool `ConfirmFvg.mqh`.
+
+**Lệnh limit (v1.116)** — khi có M5 FVG (`MssEntry.mqh`):
+
+| | Bull | Bear |
+|--|------|------|
+| Limit | Buy @ `upper` M5 FVG | Sell @ `lower` M5 FVG |
+| SL | Dưới `L0` M5 − buffer | Trên `H0` M5 + buffer |
+| TP | Entry + `InpMssMinRR`×R | Entry − `InpMssMinRR`×R |
+| Size | `InpMssRiskPct` % balance | |
+
+`InpMssTradeEnabled`, `InpMssMagic`, `InpMssOnePosition`.
 
 ### IsAllowTrade
 
@@ -488,6 +526,79 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 <a id="changelog"></a>
 
 ## Changelog
+
+### v1.126 — Thuật ngữ: Retest FVG H1 (POI), không ghi chung “H1 retest”
+
+- Panel/journal: “Retest FVG H1”, “Chờ retest FVG H1 … (lấp trên H1)”
+- `IctMss_HasH1FvgRetest`, `IctMss_DetectChochAfterH1FvgRetest`
+
+### v1.125 — MSS = phá swing M5 (confirm), build structure như chart
+
+- `IctBuildConfirmSwingSet`: H0/H1/L0/L1 M5 dùng chung cho vẽ + MSS
+- MSS/CHoCH: chỉ xét body phá L0/L1/H0/H1 sau H1 touch (bỏ pivot trong FVG)
+- Bear: phá L0 sau H0, hoặc CHoCH phá L1 (bull→bear), hoặc BOS phá L1 (bear)
+
+### v1.124 — Sửa detect CHoCH↓ sau H1 retest (L0 M5)
+
+- CHoCH: ưu tiên `H0/L0` M5 (`BuildSwingSetRecentPivots`) + body phá trong lookback (không chỉ bar 1)
+- Key level: swing **sau** đỉnh phản ứng (`IctFindMostRecentNewer`), fallback swing cũ hơn
+- Bỏ `keyLo.time < tTouch` (gây miss khi L0 hình thành trước touch H1 trên timeline)
+
+### v1.123 — Vẽ MSS sau H1 touch + journal chặn lệnh
+
+- `MssDraw`: từ `H1_TOUCH` — vạch touch, mức 38.2% H1, CHoCH/H0 (kể cả khi pipeline chưa advance)
+- `Journal.mqh` + `InpMssLogJournal`: `[ICT2026/MSS]` pipeline, `[ICT2026/Entry] Chặn lệnh:` khi không đặt được limit
+
+### v1.122 — MSS gần H1 FVG (không siết chặt)
+
+- Vùng gần: buffer % gap + ATR; bear thêm `InpMssExtraBelowGapPct` dưới `lower` (CHoCH/M5 FVG ngay dưới FVG vẫn hợp lệ)
+- CHoCH OK nếu **key level** hoặc **H0** nằm trong vùng gần (không bắt buộc trong FVG)
+- `InpMssMaxM5BarsAfterTouch=0` mặc định = không giới hạn thời gian
+
+### v1.121 — FVG qualify: overlap Premium/Discount; fill từ cạnh FVG
+
+- `IctFvg_OverlapsPremium` / `OverlapsDiscount`: bear MSS khi FVG chạm vùng Premium (kể cả nửa dưới trong Discount)
+- `maxFillRatio`: % lấp theo chiều cao FVG (`lower`→`upper` bear), không theo pdEq
+
+### v1.120 — MSS đúng thứ tự: retest H1 Premium/Discount → CHoCH thuận bias
+
+- Target H1: Premium **cao nhất** (bear) / Discount **thấp nhất** (bull) — không nhảy CHoCH khi chưa retest
+- CHoCH: đỉnh phản ứng **trong** H1 FVG sau retest → phá key **down** (bear) / **up** (bull)
+- Vẽ: vàng **CHoCH↓** = đáy key; nét đứt **H0** = đỉnh MSS (SL)
+
+### v1.119 — Vẽ CHoCH + H0/L0 MSS trên chart (`MssDraw.mqh`)
+
+- Vàng: đường **CHoCH** (key level) | Vàng nét đứt: **H0/L0** swing MSS
+- Aqua/đỏ/xanh: entry / SL / TP khi có pending
+- `InpDrawMssChoch`
+
+### v1.118 — MSS phải gần / trong H1 FVG
+
+- CHoCH/M5 FVG **gần** H1 FVG: ± buffer + mở rộng phía dưới (bear) / trên (bull); key CHoCH hoặc H0 đều được tính
+- Thời gian: ≤ `InpMssMaxM5BarsAfterTouch` M5 bar sau lần chạm H1 FVG
+- M5 FVG phải overlap vùng H1 FVG mở rộng
+
+### v1.117 — MSS entry: SL = H0/L0 M5, TP min 2R
+
+- Sell limit @ **lower** M5 FVG | Buy limit @ **upper**
+- SL: trên **H0** M5 (bear) / dưới **L0** M5 (bull) + `InpMssSlAtrMult`×ATR
+- TP: tối thiểu `InpMssMinRR` (mặc định 2R), không phụ thuộc swing H1
+
+### v1.116 — MSS limit entry: FVG edge, SL swing CHoCH, TP trước iH0/iL0
+
+### v1.115 — MSS Confirm TF (H1 touch → CHoCH → M5 FVG → fill 38.2%)
+
+- `repPd` / MSS H1: overlap Premium (bear) hoặc Discount (bull); fill % theo biên FVG
+- `MssSetup.mqh` + pool `ConfirmFvg` (M5); sweep tạm bỏ
+- Panel dòng MSS; vẽ CFVG trên chart
+
+### v1.114 — FVG: bỏ label text, màu bull xanh / bear đỏ / used xám
+
+### v1.113 — PD swing 1: pivot gần FVG (shift), bỏ wick nến
+
+- `IctFindNearestSwingHighBefore` / `LowBefore`: cùng logic `IctFindMostRecentOlder` neo theo `iBarShift(createdTime)`
+- Không fallback `iHigh`/`iLow` từng nến (gây đỉnh PD cao hơn swing vàng trên chart)
+- Swing 2: `IctFindFirstSwing*AfterShift` — đáy/đỉnh đầu tiên sau nến FVG
 
 ### v1.112 — PD lock: không cập nhật đỉnh sau pdComplete
 
