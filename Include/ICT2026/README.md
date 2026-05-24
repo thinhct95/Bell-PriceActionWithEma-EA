@@ -229,7 +229,7 @@ Khi `IsAllowTrade`, state machine `g_ictLowTf.mss`:
 | Phase | Điều kiện |
 |-------|-----------|
 | `H1_TOUCH` | **Retest FVG H1** OK: bias + `repPd` + lấp ≥ `InpMssH1MinFillPct` trên H1 |
-| `CHOCH` | Sau retest FVG H1: **body phá swing M5** (H0/L0/L1/H1 — cùng build như label chart) |
+| `CHOCH` | Sau retest FVG H1: **khóa** lần phá swing M5 đầu tiên (`chochLocked`) — không đổi khi H0/L0 update |
 | `M5_FVG` | FVG `InpConfirmTf` cùng hướng bias, sau thời điểm CHoCH |
 | `ENTRY_FILL` / `READY` | Giá hồi lấp ≥ `InpMssEntryFillPct` vào M5 FVG đó |
 
@@ -527,10 +527,16 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 
 ## Changelog
 
+### v1.127 — CHoCH khóa thời điểm (không nhảy theo swing M5)
+
+- `IctMss_FindFirstChochAfterFvgRetest`: nến M5 **đầu tiên** sau retest FVG H1 body phá swing
+- `chochLocked`: key / H0–L0 / `chochTime` không đổi khi pivot M5 update
+- Vẽ + SL dùng giá trị đã khóa, không live-detect lại
+
 ### v1.126 — Thuật ngữ: Retest FVG H1 (POI), không ghi chung “H1 retest”
 
 - Panel/journal: “Retest FVG H1”, “Chờ retest FVG H1 … (lấp trên H1)”
-- `IctMss_HasH1FvgRetest`, `IctMss_DetectChochAfterH1FvgRetest`
+- `IctMss_HasH1FvgRetest`, `IctMss_TryLockChoch`, `chochLocked`
 
 ### v1.125 — MSS = phá swing M5 (confirm), build structure như chart
 

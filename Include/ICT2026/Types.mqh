@@ -223,6 +223,7 @@ struct IctMssState
    datetime             chochTime;
    datetime             m5FvgTime;
    double               slSwingPrice;
+   bool                 chochLocked;
    ulong                pendingTicket;
    double               pendingEntry;
    double               pendingSl;
@@ -240,6 +241,7 @@ struct IctMssState
       chochTime     = 0;
       m5FvgTime     = 0;
       slSwingPrice  = 0.0;
+      chochLocked   = false;
       pendingTicket = 0;
       pendingEntry  = 0.0;
       pendingSl     = 0.0;

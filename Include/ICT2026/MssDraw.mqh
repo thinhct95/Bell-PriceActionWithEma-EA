@@ -79,30 +79,13 @@ datetime IctMssDraw_TimeEnd(const string sym)
    return iTime(sym, cTf, 0) + (datetime)PeriodSeconds(cTf);
 }
 
-void IctMssDraw_ResolveChoch(const string sym, const IctFvgZone &h1,
-                             const IctMssState &mss,
+void IctMssDraw_ResolveChoch(const IctMssState &mss,
                              double &keyLv, datetime &keyT, double &slSwing, datetime &chochT)
 {
-   keyLv    = mss.chochKeyLevel;
-   keyT     = mss.chochKeyTime;
-   slSwing  = mss.slSwingPrice;
-   chochT   = mss.chochTime;
-
-   if(keyLv <= 0.0 && mss.phase >= ICT_MSS_H1_TOUCH)
-   {
-      datetime kt = 0;
-      double ss = 0.0;
-      if(IctMss_DetectChochAfterH1FvgRetest(sym, InpConfirmTf, h1, g_ictDailyBias.bias,
-                                         keyLv, kt, ss))
-      {
-         keyT    = kt;
-         slSwing = ss;
-         chochT  = iTime(sym, InpConfirmTf, 1);
-         if(chochT == 0)
-            chochT = kt;
-      }
-   }
-
+   keyLv   = mss.chochKeyLevel;
+   keyT    = mss.chochKeyTime;
+   slSwing = mss.slSwingPrice;
+   chochT  = mss.chochTime;
    if(chochT <= 0)
       chochT = keyT;
 }
@@ -158,7 +141,7 @@ void IctMssDraw_Render(const string sym)
 
    double keyLv = 0.0, slSwing = 0.0;
    datetime keyT = 0, chochT = 0;
-   IctMssDraw_ResolveChoch(sym, h1, mss, keyLv, keyT, slSwing, chochT);
+   IctMssDraw_ResolveChoch(mss, keyLv, keyT, slSwing, chochT);
 
    if(keyLv > 0.0)
    {
@@ -170,35 +153,19 @@ void IctMssDraw_Render(const string sym)
       const color clrChoch = clrGold;
       const string chochLbl = isBear ? " CHoCH↓ " : " CHoCH↑ ";
       const bool chochAbove = !isBear;
-      const bool chochPending = (mss.phase == ICT_MSS_H1_TOUCH);
+      const datetime tChoch = (chochT > 0) ? chochT : keyT;
+      const bool chochPending = (mss.phase == ICT_MSS_H1_TOUCH && !mss.chochLocked);
 
-      IctMssDraw_HLine("CHOCH", keyT, tEnd, keyLv, clrChoch,
+      IctMssDraw_HLine("CHOCH", tChoch, tEnd, keyLv, clrChoch,
                        chochPending ? STYLE_DASH : STYLE_SOLID, 2);
       IctMssDraw_Label("CHOCH_LBL", chochLbl, tEnd, keyLv, chochAbove, clrChoch);
-   }
-
-   if(slSwing <= 0.0)
-   {
-      double mssSwing = 0.0;
-      if(IctMss_GetConfirmMssSwing(sym, g_ictDailyBias.bias, mssSwing))
-         slSwing = mssSwing;
    }
 
    if(slSwing > 0.0)
    {
       const string swTag = isBear ? " H0 " : " L0 ";
       const color clrSw  = clrYellow;
-      datetime tSw = (keyT > 0) ? keyT : tTouch;
-
-      IctSwingSet sw;
-      ENUM_ICT_STRUCT structural = ICT_STRUCT_NONE;
-      if(IctBuildConfirmSwingSet(sym, sw, structural))
-      {
-         if(isBear && sw.hasH0)
-            tSw = sw.h0.time;
-         else if(!isBear && sw.hasL0)
-            tSw = sw.l0.time;
-      }
+      datetime tSw = (chochT > 0) ? chochT : ((keyT > 0) ? keyT : tTouch);
 
       IctMssDraw_HLine("MSS_SW", tSw, tEnd, slSwing, clrSw, STYLE_DASH, 1);
       IctMssDraw_Label("MSS_SW_LBL", swTag, tEnd, slSwing, true, clrSw);

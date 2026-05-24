@@ -93,7 +93,9 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
    const ENUM_ICT_BIAS bias = isBuy ? ICT_BIAS_BULL : ICT_BIAS_BEAR;
 
    double swingSl = 0.0;
-   if(!IctMss_GetConfirmMssSwing(sym, bias, swingSl))
+   if(g_ictLowTf.mss.chochLocked && g_ictLowTf.mss.slSwingPrice > 0.0)
+      swingSl = g_ictLowTf.mss.slSwingPrice;
+   else if(!IctMss_GetConfirmMssSwing(sym, bias, swingSl))
    {
       if(g_ictLowTf.mss.slSwingPrice > 0.0)
          swingSl = g_ictLowTf.mss.slSwingPrice;
