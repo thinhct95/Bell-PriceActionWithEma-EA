@@ -151,24 +151,25 @@ void IctMssDraw_Render(const string sym)
          chochT = keyT;
 
       const color clrChoch = clrGold;
-      const string chochLbl = isBear ? " CHoCH↓ " : " CHoCH↑ ";
+      const string chochLbl = isBear ? " MSS↓ L0 " : " MSS↑ H0 ";
       const bool chochAbove = !isBear;
-      const datetime tChoch = (chochT > 0) ? chochT : keyT;
+      const datetime tLineStart = (keyT > 0) ? keyT : tTouch;
+      const datetime tChoch     = (chochT > 0) ? chochT : tLineStart;
       const bool chochPending = (mss.phase == ICT_MSS_H1_TOUCH && !mss.chochLocked);
 
-      IctMssDraw_HLine("CHOCH", tChoch, tEnd, keyLv, clrChoch,
+      IctMssDraw_HLine("CHOCH", tLineStart, tEnd, keyLv, clrChoch,
                        chochPending ? STYLE_DASH : STYLE_SOLID, 2);
-      IctMssDraw_Label("CHOCH_LBL", chochLbl, tEnd, keyLv, chochAbove, clrChoch);
+      IctMssDraw_Label("CHOCH_LBL", chochLbl, tChoch, keyLv, chochAbove, clrChoch);
    }
 
    if(slSwing > 0.0)
    {
       const string swTag = isBear ? " H0 " : " L0 ";
       const color clrSw  = clrYellow;
-      datetime tSw = (chochT > 0) ? chochT : ((keyT > 0) ? keyT : tTouch);
+      datetime tSw = (keyT > 0) ? keyT : tTouch;
 
       IctMssDraw_HLine("MSS_SW", tSw, tEnd, slSwing, clrSw, STYLE_DASH, 1);
-      IctMssDraw_Label("MSS_SW_LBL", swTag, tEnd, slSwing, true, clrSw);
+      IctMssDraw_Label("MSS_SW_LBL", swTag, tSw, slSwing, true, clrSw);
    }
 
    if(mss.pendingEntry > 0.0 && mss.phase >= ICT_MSS_M5_FVG)

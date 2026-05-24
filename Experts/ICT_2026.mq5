@@ -3,7 +3,7 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.127"
+#property version   "1.130"
 #property description "ICT2026 MSS limit entry + SL swing CHoCH + TP intraday"
 
 #include <ICT2026/Config.mqh>

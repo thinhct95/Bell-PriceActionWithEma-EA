@@ -47,9 +47,17 @@ string IctPdZoneText(const ENUM_ICT_PD_ZONE zone)
    }
 }
 
+bool IctFvg_UseGapSizeFilter(const ENUM_TIMEFRAMES tf)
+{
+   return (tf == InpFvgTf);
+}
+
 double IctFvg_MinRequiredGapHeight(const string sym, const ENUM_TIMEFRAMES tf, const int shiftC)
 {
    double minH = 0.0;
+
+   if(!IctFvg_UseGapSizeFilter(tf))
+      return 0.0;
 
    if(InpFvgMinGapPoints > 0.0)
       minH = MathMax(minH, InpFvgMinGapPoints);
@@ -76,6 +84,9 @@ bool IctFvg_IsValidGapSize(const string sym, const ENUM_TIMEFRAMES tf, const int
    const double height = upper - lower;
    if(height <= _Point)
       return false;
+
+   if(!IctFvg_UseGapSizeFilter(tf))
+      return true;
 
    const double minH = IctFvg_MinRequiredGapHeight(sym, tf, shiftC);
    if(minH > 0.0 && height + _Point * 0.5 < minH)

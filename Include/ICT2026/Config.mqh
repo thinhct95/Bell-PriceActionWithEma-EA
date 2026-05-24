@@ -35,7 +35,7 @@ input int             InpChartLabelFontSize   = 9;
 
 input group "══ Confirm swing (M5) ══"
 input ENUM_TIMEFRAMES InpConfirmTf            = PERIOD_M5;  // TF confirmation (tương lai)
-input int             InpConfirmSwingRange    = 2;
+input int             InpConfirmSwingRange    = 1;
 input int             InpConfirmSwingLookback = 80;
 input int             InpConfirmRecentBars    = 40;
 
@@ -45,9 +45,9 @@ input ENUM_TIMEFRAMES InpFvgTf                = PERIOD_H1;   // Quét FVG (mặc
 input int             InpFvgLookbackBars      = 60;          // Bar quét FVG (full / khi Allow bật)
 input int             InpFvgScanBarsPerUpdate = 40;          // Mỗi nến mới: quét lại N bar gần nhất
 input int             InpFvgAtrPeriod         = 14;          // ATR cho lọc kích thước gap
-input double          InpFvgMinGapATRPct      = 12.0;        // Gap tối thiểu (% ATR, 0=tắt)
-input double          InpFvgMinGapPoints      = 0.0;         // Gap tối thiểu (giá, 0=chỉ ATR)
-input double          InpFvgMinGapVsBarPct    = 25.0;        // Gap >= % range nến giữa B (0=tắt)
+input double          InpFvgMinGapATRPct      = 12.0;        // H1 only: gap tối thiểu (% ATR, 0=tắt)
+input double          InpFvgMinGapPoints      = 0.0;         // H1 only: gap tối thiểu (giá)
+input double          InpFvgMinGapVsBarPct    = 25.0;        // H1 only: gap >= % range nến B (0=tắt)
 input double          InpFvgUsedFillPct       = 38.2;        // % lấp FVG → Used
 input int             InpFvgExpireDays        = 3;           // Xóa Available sau N ngày
 input int             InpFvgMaxZones          = 24;          // Số FVG tối đa trên chart
@@ -59,7 +59,8 @@ input color           InpPdPremiumColor       = clrMaroon;
 input color           InpPdDiscountColor      = clrDarkGreen;
 
 input group "══ MSS / Entry (Confirm TF) ══"
-input double          InpMssH1MinFillPct      = 38.2;        // Retest FVG H1 (POI): % lấp tối thiểu trên H1
+input bool            InpMssH1RetestWickOnly   = true;        // Retest FVG H1: chỉ cần râu chạm (không bắt thân nến lấp %)
+input double          InpMssH1MinFillPct      = 38.2;        // Nếu tắt wick-only: % lấp tối thiểu trên H1
 input double          InpMssEntryFillPct      = 38.2;        // M5 FVG: % lấp để sẵn sàng entry
 input int             InpMssConfirmLookback   = 80;          // Lookback pivot CHoCH trên Confirm TF
 input int             InpMssConfirmFvgBars    = 40;          // Quét M5 FVG sau CHoCH

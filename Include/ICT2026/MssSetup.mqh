@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//| MssSetup.mqh — MSS: retest FVG H1 (POI) → CHoCH M5 → M5 FVG → entry |
+//| MssSetup.mqh — MSS: retest FVG H1 → M5 MSS (phá L0/H0) → M5 FVG → entry |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_MSSSETUP_MQH
 #define ICT2026_MSSSETUP_MQH
@@ -13,7 +13,7 @@ string IctMssPhaseText(const ENUM_ICT_MSS_PHASE ph)
    switch(ph)
    {
       case ICT_MSS_H1_TOUCH:    return "Retest FVG H1 OK";
-      case ICT_MSS_CHOCH:       return "CHoCH OK";
+      case ICT_MSS_CHOCH:       return "MSS OK";
       case ICT_MSS_M5_FVG:      return "M5 FVG";
       case ICT_MSS_ENTRY_FILL:  return "M5 fill 38.2%";
       case ICT_MSS_READY:       return "READY entry";
@@ -57,12 +57,19 @@ int IctMss_SelectTargetH1Fvg()
    return bestIdx;
 }
 
-// Retest FVG H1 (POI): giá chạm gap H1 + lấp ≥ InpMssH1MinFillPct (đo trên InpFvgTf, không phải M5)
+// Retest FVG H1 (POI): râu H1 chạm gap (InpMssH1RetestWickOnly) hoặc thêm % lấp thân/râu
 bool IctMss_HasH1FvgRetest(const string sym, IctFvgZone &h1)
 {
    IctFvg_UpdateZoneState(sym, InpFvgTf, h1);
    if(h1.firstTouchTime <= 0)
       return false;
+
+   if(InpMssH1RetestWickOnly)
+   {
+      h1.mssH1Touch382 = true;
+      return true;
+   }
+
    if(!IctFvg_HasFillAtLeast(h1, InpMssH1MinFillPct))
       return false;
    h1.mssH1Touch382 = true;
@@ -171,17 +178,28 @@ bool IctMss_BodyBrokeLevelSince(const string sym, const ENUM_TIMEFRAMES tf,
    return false;
 }
 
-IctSwingPoint IctMss_NewestSwingLowBefore(const IctSwingPoint &lows[], const int nL,
-                                          const int barShift, const datetime afterTime)
+bool IctMss_BarOverlapsFvg(const IctFvgZone &h1, const double barHi, const double barLo)
+{
+   return (barHi >= h1.lower - _Point && barLo <= h1.upper + _Point);
+}
+
+IctSwingPoint IctMss_ProtectedLowBeforeHigh(const IctSwingPoint &lows[], const int nL,
+                                          const IctSwingPoint &h0,
+                                          const datetime tTouch)
 {
    IctSwingPoint empty;
    empty.Clear();
+   if(!h0.Valid())
+      return empty;
+
    int best = -1;
    for(int i = 0; i < nL; i++)
    {
-      if(lows[i].shift <= barShift)
+      if(lows[i].time < tTouch)
          continue;
-      if(lows[i].time < afterTime)
+      if(lows[i].shift <= h0.shift)
+         continue;
+      if(lows[i].price >= h0.price - _Point)
          continue;
       if(best < 0 || lows[i].shift < lows[best].shift)
          best = i;
@@ -191,17 +209,23 @@ IctSwingPoint IctMss_NewestSwingLowBefore(const IctSwingPoint &lows[], const int
    return lows[best];
 }
 
-IctSwingPoint IctMss_NewestSwingHighBefore(const IctSwingPoint &highs[], const int nH,
-                                           const int barShift, const datetime afterTime)
+IctSwingPoint IctMss_ProtectedHighAfterLow(const IctSwingPoint &highs[], const int nH,
+                                           const IctSwingPoint &l0,
+                                           const datetime tTouch)
 {
    IctSwingPoint empty;
    empty.Clear();
+   if(!l0.Valid())
+      return empty;
+
    int best = -1;
    for(int i = 0; i < nH; i++)
    {
-      if(highs[i].shift <= barShift)
+      if(highs[i].time < tTouch || highs[i].time < l0.time)
          continue;
-      if(highs[i].time < afterTime)
+      if(highs[i].shift >= l0.shift)
+         continue;
+      if(highs[i].price <= l0.price + _Point)
          continue;
       if(best < 0 || highs[i].shift < highs[best].shift)
          best = i;
@@ -211,50 +235,95 @@ IctSwingPoint IctMss_NewestSwingHighBefore(const IctSwingPoint &highs[], const i
    return highs[best];
 }
 
-double IctMss_MaxHighSince(const string sym, const ENUM_TIMEFRAMES tf,
-                           const int fromShift, const int toShift,
-                           const datetime afterTime)
+bool IctMss_ReactionHighAfterTouch(const string sym, const ENUM_TIMEFRAMES tf,
+                                   const IctFvgZone &h1, const datetime tTouch,
+                                   IctSwingPoint &outHi)
 {
-   double hi = -DBL_MAX;
-   for(int sh = fromShift; sh >= toShift; sh--)
+   outHi.Clear();
+   IctSwingSet sw;
+   ENUM_ICT_STRUCT st = ICT_STRUCT_NONE;
+   if(IctBuildConfirmSwingSet(sym, sw, st) && sw.hasH0 && sw.h0.time >= tTouch)
    {
-      if(iTime(sym, tf, sh) < afterTime)
-         continue;
-      hi = MathMax(hi, iHigh(sym, tf, sh));
+      outHi = sw.h0;
+      return true;
    }
-   return (hi > -DBL_MAX * 0.5) ? hi : 0.0;
-}
-
-double IctMss_MinLowSince(const string sym, const ENUM_TIMEFRAMES tf,
-                          const int fromShift, const int toShift,
-                          const datetime afterTime)
-{
-   double lo = DBL_MAX;
-   for(int sh = fromShift; sh >= toShift; sh--)
-   {
-      if(iTime(sym, tf, sh) < afterTime)
-         continue;
-      lo = MathMin(lo, iLow(sym, tf, sh));
-   }
-   return (lo < DBL_MAX * 0.5) ? lo : 0.0;
-}
-
-// CHoCH/MSS thời điểm: nến M5 đầu tiên (sau retest FVG H1) body phá swing — khóa, không đổi khi pivot update
-bool IctMss_FindFirstChochAfterFvgRetest(const string sym, const ENUM_TIMEFRAMES tf,
-                                         const datetime tTouch, const ENUM_ICT_BIAS bias,
-                                         double &keyLevelOut, datetime &keyTimeOut,
-                                         datetime &chochBarTimeOut, double &slSwingOut)
-{
-   keyLevelOut = 0.0;
-   keyTimeOut  = 0;
-   chochBarTimeOut = 0;
-   slSwingOut  = 0.0;
 
    int touchSh = iBarShift(sym, tf, tTouch, true);
    if(touchSh < 0)
       touchSh = iBarShift(sym, tf, tTouch, false);
    if(touchSh < 1)
       return false;
+
+   double bestP = -DBL_MAX;
+   for(int sh = touchSh; sh >= 1; sh--)
+   {
+      if(iTime(sym, tf, sh) < tTouch)
+         continue;
+      const double hi = iHigh(sym, tf, sh);
+      const double lo = iLow(sym, tf, sh);
+      if(!IctMss_BarOverlapsFvg(h1, hi, lo))
+         continue;
+      if(hi > bestP)
+      {
+         bestP        = hi;
+         outHi.price  = hi;
+         outHi.time   = iTime(sym, tf, sh);
+         outHi.shift  = sh;
+      }
+   }
+   return outHi.Valid();
+}
+
+bool IctMss_ReactionLowAfterTouch(const string sym, const ENUM_TIMEFRAMES tf,
+                                  const IctFvgZone &h1, const datetime tTouch,
+                                  IctSwingPoint &outLo)
+{
+   outLo.Clear();
+   IctSwingSet sw;
+   ENUM_ICT_STRUCT st = ICT_STRUCT_NONE;
+   if(IctBuildConfirmSwingSet(sym, sw, st) && sw.hasL0 && sw.l0.time >= tTouch)
+   {
+      outLo = sw.l0;
+      return true;
+   }
+
+   int touchSh = iBarShift(sym, tf, tTouch, true);
+   if(touchSh < 0)
+      touchSh = iBarShift(sym, tf, tTouch, false);
+   if(touchSh < 1)
+      return false;
+
+   double bestP = DBL_MAX;
+   for(int sh = touchSh; sh >= 1; sh--)
+   {
+      if(iTime(sym, tf, sh) < tTouch)
+         continue;
+      const double hi = iHigh(sym, tf, sh);
+      const double lo = iLow(sym, tf, sh);
+      if(!IctMss_BarOverlapsFvg(h1, hi, lo))
+         continue;
+      if(lo < bestP)
+      {
+         bestP       = lo;
+         outLo.price = lo;
+         outLo.time  = iTime(sym, tf, sh);
+         outLo.shift = sh;
+      }
+   }
+   return outLo.Valid();
+}
+
+// MSS M5 sau retest FVG H1: pullback ngược cục bộ → phá L0 (bear HTF) hoặc H0 (bull HTF)
+bool IctMss_FindMssAfterFvgRetest(const string sym, const ENUM_TIMEFRAMES tf,
+                                  const IctFvgZone &h1, const datetime tTouch,
+                                  const ENUM_ICT_BIAS bias,
+                                  double &keyLevelOut, datetime &keyTimeOut,
+                                  datetime &mssBarTimeOut, double &slSwingOut)
+{
+   keyLevelOut = 0.0;
+   keyTimeOut  = 0;
+   mssBarTimeOut = 0;
+   slSwingOut  = 0.0;
 
    IctSwingPoint highs[], lows[];
    IctCollectSwings(sym, tf, InpConfirmSwingRange, InpConfirmSwingLookback, highs, lows);
@@ -263,52 +332,52 @@ bool IctMss_FindFirstChochAfterFvgRetest(const string sym, const ENUM_TIMEFRAMES
 
    if(bias == ICT_BIAS_BEAR)
    {
-      for(int sh = touchSh; sh >= 1; sh--)
-      {
-         const datetime tBar = iTime(sym, tf, sh);
-         if(tBar < tTouch)
-            continue;
+      IctSwingPoint h0;
+      if(!IctMss_ReactionHighAfterTouch(sym, tf, h1, tTouch, h0))
+         return false;
 
-         const IctSwingPoint keyLo = IctMss_NewestSwingLowBefore(lows, nL, sh, tTouch);
-         if(!keyLo.Valid())
+      IctSwingPoint keyLo = IctMss_ProtectedLowBeforeHigh(lows, nL, h0, tTouch);
+      if(!keyLo.Valid())
+         return false;
+
+      const int startSh = MathMax(1, h0.shift - 1);
+      for(int sh = startSh; sh >= 1; sh--)
+      {
+         if(iTime(sym, tf, sh) < h0.time)
             continue;
          if(!IctBodyBreakBelow(sym, tf, sh, keyLo.price))
             continue;
 
-         const double reactHi = IctMss_MaxHighSince(sym, tf, touchSh, sh, tTouch);
-         if(reactHi <= 0.0)
-            continue;
-
-         keyLevelOut     = keyLo.price;
-         keyTimeOut      = keyLo.time;
-         chochBarTimeOut = tBar;
-         slSwingOut      = reactHi;
+         keyLevelOut   = keyLo.price;
+         keyTimeOut    = keyLo.time;
+         mssBarTimeOut = iTime(sym, tf, sh);
+         slSwingOut    = h0.price;
          return true;
       }
    }
 
    if(bias == ICT_BIAS_BULL)
    {
-      for(int sh = touchSh; sh >= 1; sh--)
-      {
-         const datetime tBar = iTime(sym, tf, sh);
-         if(tBar < tTouch)
-            continue;
+      IctSwingPoint l0;
+      if(!IctMss_ReactionLowAfterTouch(sym, tf, h1, tTouch, l0))
+         return false;
 
-         const IctSwingPoint keyHi = IctMss_NewestSwingHighBefore(highs, nH, sh, tTouch);
-         if(!keyHi.Valid())
+      IctSwingPoint keyHi = IctMss_ProtectedHighAfterLow(highs, nH, l0, tTouch);
+      if(!keyHi.Valid())
+         return false;
+
+      const int startSh = MathMax(1, l0.shift - 1);
+      for(int sh = startSh; sh >= 1; sh--)
+      {
+         if(iTime(sym, tf, sh) < l0.time)
             continue;
          if(!IctBodyBreakAbove(sym, tf, sh, keyHi.price))
             continue;
 
-         const double reactLo = IctMss_MinLowSince(sym, tf, touchSh, sh, tTouch);
-         if(reactLo <= 0.0)
-            continue;
-
-         keyLevelOut     = keyHi.price;
-         keyTimeOut      = keyHi.time;
-         chochBarTimeOut = tBar;
-         slSwingOut      = reactLo;
+         keyLevelOut   = keyHi.price;
+         keyTimeOut    = keyHi.time;
+         mssBarTimeOut = iTime(sym, tf, sh);
+         slSwingOut    = l0.price;
          return true;
       }
    }
@@ -316,8 +385,8 @@ bool IctMss_FindFirstChochAfterFvgRetest(const string sym, const ENUM_TIMEFRAMES
    return false;
 }
 
-bool IctMss_TryLockChoch(const string sym, const ENUM_TIMEFRAMES tf,
-                         const IctFvgZone &h1, const ENUM_ICT_BIAS bias)
+bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
+                       const IctFvgZone &h1, const ENUM_ICT_BIAS bias)
 {
    if(g_ictLowTf.mss.chochLocked && g_ictLowTf.mss.chochKeyLevel > 0.0)
       return true;
@@ -327,15 +396,15 @@ bool IctMss_TryLockChoch(const string sym, const ENUM_TIMEFRAMES tf,
       return false;
 
    double keyLv = 0.0, slSwing = 0.0;
-   datetime keyT = 0, chochBarT = 0;
-   if(!IctMss_FindFirstChochAfterFvgRetest(sym, tf, tTouch, bias,
-                                          keyLv, keyT, chochBarT, slSwing))
+   datetime keyT = 0, mssBarT = 0;
+   if(!IctMss_FindMssAfterFvgRetest(sym, tf, h1, tTouch, bias,
+                                   keyLv, keyT, mssBarT, slSwing))
       return false;
 
    g_ictLowTf.mss.chochKeyLevel = keyLv;
    g_ictLowTf.mss.chochKeyTime  = keyT;
    g_ictLowTf.mss.slSwingPrice  = slSwing;
-   g_ictLowTf.mss.chochTime     = chochBarT;
+   g_ictLowTf.mss.chochTime     = mssBarT;
    g_ictLowTf.mss.chochLocked   = true;
    return true;
 }
@@ -544,18 +613,23 @@ void IctMss_Update(const string sym)
 
       if(!IctMss_HasH1FvgRetest(sym, g_ictFvgZones[hIdx]))
       {
-         g_ictLowTf.mss.displayReason = StringFormat(
-            "Chờ retest FVG H1 %s [%.0f–%.0f] (%.0f%% lấp trên H1)",
-            IctPdZoneText(IctFvg_GetRepPd(g_ictFvgZones[hIdx])),
-            g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
-            InpMssH1MinFillPct);
+         g_ictLowTf.mss.displayReason = InpMssH1RetestWickOnly ?
+            StringFormat("Chờ râu H1 chạm FVG %s [%.0f–%.0f]",
+                         IctPdZoneText(IctFvg_GetRepPd(g_ictFvgZones[hIdx])),
+                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper) :
+            StringFormat("Chờ retest FVG H1 %s [%.0f–%.0f] (%.0f%% lấp)",
+                         IctPdZoneText(IctFvg_GetRepPd(g_ictFvgZones[hIdx])),
+                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
+                         InpMssH1MinFillPct);
          return;
       }
 
       g_ictLowTf.mss.phase       = ICT_MSS_H1_TOUCH;
       g_ictLowTf.mss.h1TouchTime = g_ictFvgZones[hIdx].firstTouchTime;
-      g_ictLowTf.mss.displayReason = StringFormat("Retest FVG H1 OK | lấp %.0f%% (H1)",
-                                      g_ictFvgZones[hIdx].maxFillRatio * 100.0);
+      g_ictLowTf.mss.displayReason = InpMssH1RetestWickOnly ?
+         "Retest FVG H1 OK | râu chạm POI" :
+         StringFormat("Retest FVG H1 OK | lấp %.0f%% (H1)",
+                      g_ictFvgZones[hIdx].maxFillRatio * 100.0);
    }
 
    const int h1Idx = IctMss_FindH1FvgById(g_ictLowTf.mss.h1FvgId);
@@ -579,29 +653,31 @@ void IctMss_Update(const string sym)
 
    if(g_ictLowTf.mss.phase == ICT_MSS_H1_TOUCH)
    {
-      if(!IctMss_TryLockChoch(sym, cTf, g_ictFvgZones[h1Idx], g_ictDailyBias.bias))
+      if(!IctMss_TryLockMss(sym, cTf, g_ictFvgZones[h1Idx], g_ictDailyBias.bias))
       {
          g_ictLowTf.mss.displayReason = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ?
-                                        "Retest FVG H1 OK — chờ MSS↓ phá swing M5" :
-                                        "Retest FVG H1 OK — chờ MSS↑ phá swing M5";
+                                        "Retest FVG H1 OK — chờ MSS↓ phá L0 M5" :
+                                        "Retest FVG H1 OK — chờ MSS↑ phá H0 M5";
          return;
       }
 
-      const double keyLv    = g_ictLowTf.mss.chochKeyLevel;
-      const double slSwing  = g_ictLowTf.mss.slSwingPrice;
-      const datetime chochT = g_ictLowTf.mss.chochTime;
+      const double keyLv   = g_ictLowTf.mss.chochKeyLevel;
+      const double slSwing = g_ictLowTf.mss.slSwingPrice;
+      const datetime mssT  = g_ictLowTf.mss.chochTime;
 
       if(!IctMss_IsChochNearH1Fvg(sym, g_ictFvgZones[h1Idx], g_ictDailyBias.bias,
-                                  keyLv, slSwing, chochT))
+                                  keyLv, slSwing, mssT))
       {
          g_ictLowTf.mss.displayReason = StringFormat(
-            "CHoCH khóa @ %.2f — xa H1 FVG, chờ gần hơn", keyLv);
+            "MSS khóa @ %.2f — xa H1 FVG, chờ gần hơn", keyLv);
          return;
       }
 
       g_ictLowTf.mss.phase = ICT_MSS_CHOCH;
       IctConfirmFvg_ScanNew(sym, cTf, wantSide, g_ictLowTf.mss.chochTime, true);
-      g_ictLowTf.mss.displayReason = StringFormat("CHoCH khóa @ %.2f — quét M5 FVG", keyLv);
+      g_ictLowTf.mss.displayReason = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ?
+         StringFormat("MSS↓ khóa L0=%.2f | H0=%.2f — quét M5 FVG", keyLv, slSwing) :
+         StringFormat("MSS↑ khóa H0=%.2f | L0=%.2f — quét M5 FVG", keyLv, slSwing);
    }
 
    if(g_ictLowTf.mss.phase == ICT_MSS_CHOCH)
@@ -611,7 +687,7 @@ void IctMss_Update(const string sym)
       const int mIdx = IctConfirmFvg_FindLatestAfter(g_ictLowTf.mss.chochTime, wantSide);
       if(mIdx < 0)
       {
-         g_ictLowTf.mss.displayReason = "CHoCH OK — chờ M5 FVG";
+         g_ictLowTf.mss.displayReason = "MSS OK — chờ M5 FVG";
          return;
       }
 

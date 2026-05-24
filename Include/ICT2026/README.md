@@ -212,15 +212,27 @@ FVG Used **không** kéo dài P/D thêm; P/D độc lập với Used (theo swing
 
 ### Retest FVG H1 (POI) — không nhầm với retest swing H1
 
-**Retest FVG H1** = giá **hồi vào gap Fair Value Gap trên H1** (vùng POI đã chọn), đo trên **`InpFvgTf` (H1)**:
+**Retest FVG H1** = giá **hồi vào gap Fair Value Gap trên H1** (vùng POI), đo trên **`InpFvgTf` (H1)**:
 
 | | |
 |--|--|
-| **Chạm** | `firstTouchTime` — nến H1 đầu tiên chạm vùng `[lower … upper]` |
-| **Lấp %** | Từ cạnh FVG (`lower`→`upper` bear) — ≥ `InpMssH1MinFillPct` (mặc định 38.2%) |
-| **Không phải** | Retest swing/pivot H1; retest trên M5; retest đường Premium/Discount riêng |
+| **Mặc định (`InpMssH1RetestWickOnly`)** | **Râu H1** chạm `[lower … upper]` là đủ — không cần thân nến xuyên FVG |
+| **Tùy chọn** | `InpMssH1RetestWickOnly=false` → thêm lấp ≥ `InpMssH1MinFillPct` |
+| **MSS M5** | Sau râu chạm POI → M5 pullback ngược cục bộ → **phá L0** (bear HTF) hoặc **phá H0** (bull HTF) |
 
-Sau retest FVG H1 OK → mới arm MSS trên **M5** (phá swing confirm).
+**Định nghĩa MSS vs CHoCH (cùng rule Key H0/L0):**
+
+| HTF bias | M5 cục bộ trước MSS | MSS = | SL swing |
+|----------|---------------------|-------|----------|
+| Bear (H1↓) | Pullback tăng (bull M5) | Body phá **L0** (đáy tạo H0) | **H0** |
+| Bull (H1↑) | Pullback giảm (bear M5) | Body phá **H0** (đỉnh tạo L0) | **L0** |
+
+CHoCH trên D/H1 = phá key level **ngược** xu hướng HTF (bull→bear phá L0; bear→bull phá H0). MSS trên M5 = cùng rule nhưng trên **pullback cục bộ** sau retest FVG H1.
+| **Không phải** | Retest swing H1; bắt buộc body H1 lấp sâu vào gap (khi wick-only bật) |
+
+**FVG size filter:** `InpFvgMinGap*` chỉ áp dụng **`InpFvgTf` (H1)**. **M5** (`InpConfirmTf`) — không lọc ATR → phát hiện FVG M5 nhỏ.
+
+Sau retest FVG H1 OK → arm MSS trên M5.
 
 ### MSS entry (Confirm TF, v1.115)
 
@@ -229,7 +241,7 @@ Khi `IsAllowTrade`, state machine `g_ictLowTf.mss`:
 | Phase | Điều kiện |
 |-------|-----------|
 | `H1_TOUCH` | **Retest FVG H1** OK: bias + `repPd` + lấp ≥ `InpMssH1MinFillPct` trên H1 |
-| `CHOCH` | Sau retest FVG H1: **khóa** lần phá swing M5 đầu tiên (`chochLocked`) — không đổi khi H0/L0 update |
+| `CHOCH` (MSS) | Sau retest FVG H1: M5 pullback → **phá L0** (bear HTF) hoặc **phá H0** (bull HTF); khóa `chochLocked` |
 | `M5_FVG` | FVG `InpConfirmTf` cùng hướng bias, sau thời điểm CHoCH |
 | `ENTRY_FILL` / `READY` | Giá hồi lấp ≥ `InpMssEntryFillPct` vào M5 FVG đó |
 
@@ -527,6 +539,22 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 
 ## Changelog
 
+### v1.130 — MSS = phá L0/H0 M5 (định nghĩa CHoCH đúng)
+
+- Bear HTF: hồi Bearish H1 FVG → M5 pullback (bull cục bộ) → **MSS↓ = body phá L0** (đáy tạo H0)
+- Bull HTF: hồi Bullish H1 FVG → M5 pullback (bear cục bộ) → **MSS↑ = body phá H0**
+- SL: H0 (sell) / L0 (buy); đường MSS = mức L0/H0 bị phá
+
+### v1.129 — CHoCH POI: H0/L0 cục bộ trong FVG (giống ví dụ ICT)
+
+- Bear: đỉnh phản ứng **trong H1 FVG** → L0 cục bộ → CHoCH↓ phá L0 (không dùng L1 xa POI)
+- Vẽ: đường CHoCH = mức **bị phá**; `H0 POI` = đỉnh phản ứng tại gap
+
+### v1.128 — FVG M5 nhỏ; retest H1 = râu chạm POI
+
+- Lọc gap ATR/points/bar%: **chỉ H1**; M5 confirm FVG không lọc kích thước
+- `InpMssH1RetestWickOnly` (mặc định true): arm MSS khi râu H1 chạm FVG, không cần thân lấp %
+
 ### v1.127 — CHoCH khóa thời điểm (không nhảy theo swing M5)
 
 - `IctMss_FindFirstChochAfterFvgRetest`: nến M5 **đầu tiên** sau retest FVG H1 body phá swing
@@ -536,7 +564,8 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 ### v1.126 — Thuật ngữ: Retest FVG H1 (POI), không ghi chung “H1 retest”
 
 - Panel/journal: “Retest FVG H1”, “Chờ retest FVG H1 … (lấp trên H1)”
-- `IctMss_HasH1FvgRetest`, `IctMss_TryLockChoch`, `chochLocked`
+- `IctMss_HasH1FvgRetest`, `IctMss_TryLockMss`, `chochLocked`
+            |
 
 ### v1.125 — MSS = phá swing M5 (confirm), build structure như chart
 
