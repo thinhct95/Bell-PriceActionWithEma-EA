@@ -1,0 +1,112 @@
+//+------------------------------------------------------------------+
+//| LowTfTrend.mqh — Low TF layer: iTF FVG khi IsAllowTrade            |
+//+------------------------------------------------------------------+
+#ifndef ICT2026_LOWTFTREND_MQH
+#define ICT2026_LOWTFTREND_MQH
+
+#include <ICT2026/Config.mqh>
+#include <ICT2026/Fvg.mqh>
+#include <ICT2026/FvgDraw.mqh>
+
+IctLowTfState g_ictLowTf;
+
+void IctLowTfTrend_Reset()
+{
+   g_ictLowTf.lastBarTime    = 0;
+   g_ictLowTf.activeCount    = 0;
+   g_ictLowTf.availableCount = 0;
+   g_ictLowTf.displayReason  = "";
+   IctFvg_Reset();
+}
+
+bool IctLowTfTrend_Init(const string sym)
+{
+   IctLowTfTrend_Reset();
+   if(Bars(sym, InpFvgTf) < 10)
+      return false;
+   IctLowTfTrend_Update(sym, true);
+   return true;
+}
+
+bool IctLowTfTrend_Update(const string sym, const bool force = false)
+{
+   const ENUM_TIMEFRAMES tf = InpFvgTf;
+   const datetime bar0 = iTime(sym, tf, 0);
+   const bool newBar = (force || bar0 != g_ictLowTf.lastBarTime);
+   if(!newBar)
+      return false;
+
+   g_ictLowTf.lastBarTime = bar0;
+
+   IctIntraday_UpdateAllowTrade();
+   IctFvg_UpdateAll(sym, tf);
+
+   static bool s_prevAllowTrade = false;
+   const bool allowNow = g_ictIntraday.isAllowTrade;
+   const bool allowJustOn = (allowNow && !s_prevAllowTrade);
+   s_prevAllowTrade = allowNow;
+
+   if(allowNow)
+   {
+      const ENUM_ICT_FVG_SIDE side = IctFvgSideFromBias(g_ictDailyBias.bias);
+      IctFvg_ScanNew(sym, tf, side, force || allowJustOn);
+      g_ictLowTf.displayReason = StringFormat("Scan iTF FVG %s | %d avail / %d total",
+                                              IctFvgSideText(side),
+                                              IctFvg_CountAvailable(), g_ictFvgCount);
+   }
+   else
+   {
+      g_ictLowTf.displayReason = "IsAllowTrade=false — giữ FVG đã khóa";
+   }
+
+   g_ictLowTf.activeCount    = g_ictFvgCount;
+   g_ictLowTf.availableCount = IctFvg_CountAvailable();
+
+   if(InpDebug && (force || g_ictIntraday.isAllowTrade))
+      PrintFormat("[ICT2026/LowTF] %s | Allow=%s | FVG avail=%d total=%d | %s",
+                  sym,
+                  g_ictIntraday.isAllowTrade ? "YES" : "NO",
+                  g_ictLowTf.availableCount, g_ictLowTf.activeCount,
+                  g_ictLowTf.displayReason);
+
+   IctFvgDraw_Render(sym);
+   return true;
+}
+
+void IctLowTfTrend_TickRefresh(const string sym)
+{
+   if(!InpDrawFvgZones || g_ictFvgCount == 0)
+      return;
+
+   bool dirty = false;
+   double oldPdHi[], oldPdLo[];
+   ArrayResize(oldPdHi, g_ictFvgCount);
+   ArrayResize(oldPdLo, g_ictFvgCount);
+
+   for(int i = 0; i < g_ictFvgCount; i++)
+   {
+      oldPdHi[i] = g_ictFvgZones[i].pdHigh;
+      oldPdLo[i] = g_ictFvgZones[i].pdLow;
+
+      const datetime oldTouch = g_ictFvgZones[i].firstTouchTime;
+      const datetime oldEnd   = g_ictFvgZones[i].timeEnd;
+      IctFvg_UpdateZoneState(sym, InpFvgTf, g_ictFvgZones[i]);
+      if(g_ictFvgZones[i].firstTouchTime != oldTouch || g_ictFvgZones[i].timeEnd != oldEnd)
+         dirty = true;
+   }
+
+   IctFvg_UpdateAllPd(sym);
+
+   for(int i = 0; i < g_ictFvgCount; i++)
+   {
+      if(MathAbs(g_ictFvgZones[i].pdHigh - oldPdHi[i]) > _Point ||
+         MathAbs(g_ictFvgZones[i].pdLow - oldPdLo[i]) > _Point)
+         dirty = true;
+   }
+   if(dirty)
+      IctFvgDraw_Render(sym);
+}
+
+void IctLowTfTrend_Get(IctLowTfState &out) { out = g_ictLowTf; }
+
+#endif

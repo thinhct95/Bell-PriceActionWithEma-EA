@@ -1,0 +1,17 @@
+---
+description: ICT2026 — luôn cập nhật README khi đổi logic
+globs: Include/ICT2026/**,Experts/ICT_2026.mq5
+alwaysApply: false
+---
+
+# ICT2026 — cập nhật README bắt buộc
+
+Khi sửa bất kỳ logic nào trong `Include/ICT2026/` hoặc `Experts/ICT_2026.mq5`:
+
+1. **Cập nhật `Include/ICT2026/README.md` trong cùng lần sửa code**
+2. Sửa mục logic tương ứng (pipeline, BOS/CHoCH, veto, input, API)
+3. Thêm dòng vào mục **Changelog** (version + mô tả ngắn)
+
+README là **single source of truth** cho business logic ICT2026 — không chỉ comment trong code.
+
+Không merge/t commit logic mới mà thiếu cập nhật README.
