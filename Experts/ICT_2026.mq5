@@ -3,7 +3,7 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.130"
+#property version   "1.138"
 #property description "ICT2026 MSS limit entry + SL swing CHoCH + TP intraday"
 
 #include <ICT2026/Config.mqh>
@@ -29,7 +29,9 @@ int OnInit()
 
    if(biasOk || intraOk)
    {
-      PrintFormat("[ICT2026] Init — Bias=%s | Intraday=%s | Allow=%s | FVG=%d",
+      IctEaState_Refresh(_Symbol);
+      PrintFormat("[ICT2026] Init — EA=%s | Bias=%s | H1=%s | Allow=%s | FVG=%d",
+                  IctEaState_Code(IctEaState_Current()),
                   IctBiasDisplayShort(g_ictDailyBias.bias),
                   IctTrendDisplayShort(g_ictIntraday.trend),
                   g_ictIntraday.isAllowTrade ? "true" : "false",
@@ -97,5 +99,11 @@ int ICT2026_GetFvgAvailableCount() { return g_ictLowTf.availableCount; }
 ENUM_ICT_MSS_PHASE ICT2026_GetMssPhase() { return g_ictLowTf.mss.phase; }
 
 string ICT2026_GetMssReason() { return g_ictLowTf.mss.displayReason; }
+
+ENUM_ICT_EA_STATE ICT2026_GetEaState() { return IctEaState_Current(); }
+
+string ICT2026_GetEaStateCode() { return IctEaState_Code(IctEaState_Current()); }
+
+string ICT2026_GetEaStateDetail() { return g_ictEaState.detail; }
 
 //+------------------------------------------------------------------+

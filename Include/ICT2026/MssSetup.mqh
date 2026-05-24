@@ -7,6 +7,8 @@
 #include <ICT2026/ConfirmFvg.mqh>
 #include <ICT2026/Journal.mqh>
 #include <ICT2026/LowTfApi.mqh>
+#include <ICT2026/StructureCore.mqh>
+#include <ICT2026/Swing.mqh>
 
 string IctMssPhaseText(const ENUM_ICT_MSS_PHASE ph)
 {
@@ -15,7 +17,7 @@ string IctMssPhaseText(const ENUM_ICT_MSS_PHASE ph)
       case ICT_MSS_H1_TOUCH:    return "Retest FVG H1 OK";
       case ICT_MSS_CHOCH:       return "MSS OK";
       case ICT_MSS_M5_FVG:      return "M5 FVG";
-      case ICT_MSS_ENTRY_FILL:  return "M5 fill 38.2%";
+      case ICT_MSS_ENTRY_FILL:  return "M5 fill entry";
       case ICT_MSS_READY:       return "READY entry";
       default:                  return "Idle";
    }
@@ -29,51 +31,121 @@ int IctMss_FindH1FvgById(const ulong id)
    return -1;
 }
 
-// H1 FVG mục tiêu: Bear → Premium cao nhất; Bull → Discount thấp nhất (chờ hồi chạm, chưa cần fill)
-int IctMss_SelectTargetH1Fvg()
+// POI H1: FVG chưa Used, gần giá nhất (không phải Premium cao nhất / Discount thấp nhất)
+double IctMss_DistancePriceToFvg(const double price, const IctFvgZone &z)
 {
-   int    bestIdx = -1;
+   if(price >= z.lower - _Point && price <= z.upper + _Point)
+      return 0.0;
+   if(price > z.upper)
+      return price - z.upper;
+   return z.lower - price;
+}
+
+bool IctMss_IsH1PoiEligible(const IctFvgZone &z)
+{
+   if(!IctFvg_MatchesBias(z))
+      return false;
+   if(!IctFvg_IsEntryRepPd(z))
+      return false;
+   if(z.state == ICT_FVG_USED)
+      return false;
+   return true;
+}
+
+int IctMss_CountH1PoiEligible()
+{
+   int n = 0;
+   for(int i = 0; i < g_ictFvgCount; i++)
+      if(IctMss_IsH1PoiEligible(g_ictFvgZones[i]))
+         n++;
+   return n;
+}
+
+int IctMss_SelectNearestH1Poi(const string sym)
+{
+   const double px = SymbolInfoDouble(sym, SYMBOL_BID);
+   int    bestIdx  = -1;
+   double bestDist = DBL_MAX;
 
    for(int i = 0; i < g_ictFvgCount; i++)
    {
-      if(!IctFvg_MatchesBias(g_ictFvgZones[i]))
-         continue;
-      if(!IctFvg_IsEntryRepPd(g_ictFvgZones[i]))
-         continue;
-      if(g_ictFvgZones[i].state == ICT_FVG_USED && g_ictFvgZones[i].maxFillRatio < 0.01)
+      if(!IctMss_IsH1PoiEligible(g_ictFvgZones[i]))
          continue;
 
-      if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
+      const double d = IctMss_DistancePriceToFvg(px, g_ictFvgZones[i]);
+      if(d < bestDist - _Point)
       {
-         if(bestIdx < 0 || g_ictFvgZones[i].upper > g_ictFvgZones[bestIdx].upper)
-            bestIdx = i;
+         bestDist = d;
+         bestIdx  = i;
       }
-      else if(g_ictDailyBias.bias == ICT_BIAS_BULL)
+      else if(MathAbs(d - bestDist) <= _Point && bestIdx >= 0)
       {
-         if(bestIdx < 0 || g_ictFvgZones[i].lower < g_ictFvgZones[bestIdx].lower)
+         if(g_ictFvgZones[i].createdTime > g_ictFvgZones[bestIdx].createdTime)
             bestIdx = i;
       }
    }
    return bestIdx;
 }
 
-// Retest FVG H1 (POI): râu H1 chạm gap (InpMssH1RetestWickOnly) hoặc thêm % lấp thân/râu
-bool IctMss_HasH1FvgRetest(const string sym, IctFvgZone &h1)
+bool IctMss_PriceInsideFvg(const IctFvgZone &h1, const double price)
+{
+   return (price >= h1.lower - _Point && price <= h1.upper + _Point);
+}
+
+bool IctMss_BarOverlapsFvg(const IctFvgZone &h1, const double barHi, const double barLo)
+{
+   return (barHi >= h1.lower - _Point && barLo <= h1.upper + _Point);
+}
+
+bool IctMss_LivePriceTouchesFvg(const string sym, const IctFvgZone &h1)
+{
+   const double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   const double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+   return IctMss_PriceInsideFvg(h1, bid) || IctMss_PriceInsideFvg(h1, ask);
+}
+
+datetime IctMss_FirstM5TouchInFvg(const string sym, const IctFvgZone &h1)
+{
+   const ENUM_TIMEFRAMES tf = InpConfirmTf;
+   const int lim = MathMin(InpMssConfirmLookback, iBars(sym, tf) - 2);
+   datetime best = 0;
+   for(int sh = lim; sh >= 1; sh--)
+   {
+      const datetime t = iTime(sym, tf, sh);
+      if(t <= h1.createdTime)
+         break;
+      if(!IctMss_BarOverlapsFvg(h1, iHigh(sym, tf, sh), iLow(sym, tf, sh)))
+         continue;
+      if(best == 0 || t < best)
+         best = t;
+   }
+   return best;
+}
+
+datetime IctMss_GetFvgTouchTime(const string sym, IctFvgZone &h1)
 {
    IctFvg_UpdateZoneState(sym, InpFvgTf, h1);
-   if(h1.firstTouchTime <= 0)
-      return false;
 
-   if(InpMssH1RetestWickOnly)
-   {
-      h1.mssH1Touch382 = true;
-      return true;
-   }
+   datetime t = h1.firstTouchTime;
+   const datetime tM5 = IctMss_FirstM5TouchInFvg(sym, h1);
+   if(tM5 > 0 && (t <= 0 || tM5 < t))
+      t = tM5;
 
-   if(!IctFvg_HasFillAtLeast(h1, InpMssH1MinFillPct))
-      return false;
-   h1.mssH1Touch382 = true;
-   return true;
+   if(t <= 0 && IctMss_LivePriceTouchesFvg(sym, h1))
+      t = iTime(sym, InpConfirmTf, 0);
+
+   return t;
+}
+
+// Retest = giá chạm FVG (H1/M5/bid-ask). Râu H1 xuyên FVG vẫn OK; chỉ hủy khi H1 body đóng xuyên.
+bool IctMss_HasFvgPriceTouch(const string sym, IctFvgZone &h1)
+{
+   return (IctMss_GetFvgTouchTime(sym, h1) > 0);
+}
+
+bool IctMss_HasH1FvgRetest(const string sym, IctFvgZone &h1)
+{
+   return IctMss_HasFvgPriceTouch(sym, h1);
 }
 
 double IctMss_H1Atr(const string sym)
@@ -178,210 +250,114 @@ bool IctMss_BodyBrokeLevelSince(const string sym, const ENUM_TIMEFRAMES tf,
    return false;
 }
 
-bool IctMss_BarOverlapsFvg(const IctFvgZone &h1, const double barHi, const double barLo)
+bool IctMss_HasM5BarInH1Fvg(const string sym, const IctFvgZone &h1,
+                            const datetime since)
 {
-   return (barHi >= h1.lower - _Point && barLo <= h1.upper + _Point);
-}
-
-IctSwingPoint IctMss_ProtectedLowBeforeHigh(const IctSwingPoint &lows[], const int nL,
-                                          const IctSwingPoint &h0,
-                                          const datetime tTouch)
-{
-   IctSwingPoint empty;
-   empty.Clear();
-   if(!h0.Valid())
-      return empty;
-
-   int best = -1;
-   for(int i = 0; i < nL; i++)
+   const ENUM_TIMEFRAMES tf = InpConfirmTf;
+   const int lim = MathMin(InpMssConfirmLookback, iBars(sym, tf) - 2);
+   for(int sh = 1; sh <= lim; sh++)
    {
-      if(lows[i].time < tTouch)
-         continue;
-      if(lows[i].shift <= h0.shift)
-         continue;
-      if(lows[i].price >= h0.price - _Point)
-         continue;
-      if(best < 0 || lows[i].shift < lows[best].shift)
-         best = i;
+      if(since > 0 && iTime(sym, tf, sh) < since)
+         break;
+      if(IctMss_BarOverlapsFvg(h1, iHigh(sym, tf, sh), iLow(sym, tf, sh)))
+         return true;
    }
-   if(best < 0)
-      return empty;
-   return lows[best];
+   return false;
 }
 
-IctSwingPoint IctMss_ProtectedHighAfterLow(const IctSwingPoint &highs[], const int nH,
-                                           const IctSwingPoint &l0,
-                                           const datetime tTouch)
+bool IctMss_UpdateLiveM5Swings(const string sym, const ENUM_ICT_BIAS bias,
+                               const datetime tTouch)
 {
-   IctSwingPoint empty;
-   empty.Clear();
-   if(!l0.Valid())
-      return empty;
+   g_ictLowTf.mss.liveL0Price = 0.0;
+   g_ictLowTf.mss.liveH0Price = 0.0;
+   g_ictLowTf.mss.liveL0Time  = 0;
+   g_ictLowTf.mss.liveH0Time  = 0;
 
-   int best = -1;
-   for(int i = 0; i < nH; i++)
-   {
-      if(highs[i].time < tTouch || highs[i].time < l0.time)
-         continue;
-      if(highs[i].shift >= l0.shift)
-         continue;
-      if(highs[i].price <= l0.price + _Point)
-         continue;
-      if(best < 0 || highs[i].shift < highs[best].shift)
-         best = i;
-   }
-   if(best < 0)
-      return empty;
-   return highs[best];
-}
-
-bool IctMss_ReactionHighAfterTouch(const string sym, const ENUM_TIMEFRAMES tf,
-                                   const IctFvgZone &h1, const datetime tTouch,
-                                   IctSwingPoint &outHi)
-{
-   outHi.Clear();
    IctSwingSet sw;
    ENUM_ICT_STRUCT st = ICT_STRUCT_NONE;
-   if(IctBuildConfirmSwingSet(sym, sw, st) && sw.hasH0 && sw.h0.time >= tTouch)
-   {
-      outHi = sw.h0;
-      return true;
-   }
-
-   int touchSh = iBarShift(sym, tf, tTouch, true);
-   if(touchSh < 0)
-      touchSh = iBarShift(sym, tf, tTouch, false);
-   if(touchSh < 1)
+   if(!IctBuildConfirmSwingSet(sym, sw, st))
       return false;
-
-   double bestP = -DBL_MAX;
-   for(int sh = touchSh; sh >= 1; sh--)
-   {
-      if(iTime(sym, tf, sh) < tTouch)
-         continue;
-      const double hi = iHigh(sym, tf, sh);
-      const double lo = iLow(sym, tf, sh);
-      if(!IctMss_BarOverlapsFvg(h1, hi, lo))
-         continue;
-      if(hi > bestP)
-      {
-         bestP        = hi;
-         outHi.price  = hi;
-         outHi.time   = iTime(sym, tf, sh);
-         outHi.shift  = sh;
-      }
-   }
-   return outHi.Valid();
-}
-
-bool IctMss_ReactionLowAfterTouch(const string sym, const ENUM_TIMEFRAMES tf,
-                                  const IctFvgZone &h1, const datetime tTouch,
-                                  IctSwingPoint &outLo)
-{
-   outLo.Clear();
-   IctSwingSet sw;
-   ENUM_ICT_STRUCT st = ICT_STRUCT_NONE;
-   if(IctBuildConfirmSwingSet(sym, sw, st) && sw.hasL0 && sw.l0.time >= tTouch)
-   {
-      outLo = sw.l0;
-      return true;
-   }
-
-   int touchSh = iBarShift(sym, tf, tTouch, true);
-   if(touchSh < 0)
-      touchSh = iBarShift(sym, tf, tTouch, false);
-   if(touchSh < 1)
-      return false;
-
-   double bestP = DBL_MAX;
-   for(int sh = touchSh; sh >= 1; sh--)
-   {
-      if(iTime(sym, tf, sh) < tTouch)
-         continue;
-      const double hi = iHigh(sym, tf, sh);
-      const double lo = iLow(sym, tf, sh);
-      if(!IctMss_BarOverlapsFvg(h1, hi, lo))
-         continue;
-      if(lo < bestP)
-      {
-         bestP       = lo;
-         outLo.price = lo;
-         outLo.time  = iTime(sym, tf, sh);
-         outLo.shift = sh;
-      }
-   }
-   return outLo.Valid();
-}
-
-// MSS M5 sau retest FVG H1: pullback ngược cục bộ → phá L0 (bear HTF) hoặc H0 (bull HTF)
-bool IctMss_FindMssAfterFvgRetest(const string sym, const ENUM_TIMEFRAMES tf,
-                                  const IctFvgZone &h1, const datetime tTouch,
-                                  const ENUM_ICT_BIAS bias,
-                                  double &keyLevelOut, datetime &keyTimeOut,
-                                  datetime &mssBarTimeOut, double &slSwingOut)
-{
-   keyLevelOut = 0.0;
-   keyTimeOut  = 0;
-   mssBarTimeOut = 0;
-   slSwingOut  = 0.0;
-
-   IctSwingPoint highs[], lows[];
-   IctCollectSwings(sym, tf, InpConfirmSwingRange, InpConfirmSwingLookback, highs, lows);
-   const int nH = ArraySize(highs);
-   const int nL = ArraySize(lows);
 
    if(bias == ICT_BIAS_BEAR)
    {
-      IctSwingPoint h0;
-      if(!IctMss_ReactionHighAfterTouch(sym, tf, h1, tTouch, h0))
+      if(!sw.hasL0 || !sw.hasH0)
          return false;
-
-      IctSwingPoint keyLo = IctMss_ProtectedLowBeforeHigh(lows, nL, h0, tTouch);
-      if(!keyLo.Valid())
+      if(sw.l0.time < tTouch && sw.h0.time < tTouch)
          return false;
-
-      const int startSh = MathMax(1, h0.shift - 1);
-      for(int sh = startSh; sh >= 1; sh--)
-      {
-         if(iTime(sym, tf, sh) < h0.time)
-            continue;
-         if(!IctBodyBreakBelow(sym, tf, sh, keyLo.price))
-            continue;
-
-         keyLevelOut   = keyLo.price;
-         keyTimeOut    = keyLo.time;
-         mssBarTimeOut = iTime(sym, tf, sh);
-         slSwingOut    = h0.price;
-         return true;
-      }
+      g_ictLowTf.mss.liveL0Price = sw.l0.price;
+      g_ictLowTf.mss.liveL0Time  = sw.l0.time;
+      g_ictLowTf.mss.liveH0Price = sw.h0.price;
+      g_ictLowTf.mss.liveH0Time  = sw.h0.time;
+      return true;
    }
 
    if(bias == ICT_BIAS_BULL)
    {
-      IctSwingPoint l0;
-      if(!IctMss_ReactionLowAfterTouch(sym, tf, h1, tTouch, l0))
+      if(!sw.hasL0 || !sw.hasH0)
          return false;
-
-      IctSwingPoint keyHi = IctMss_ProtectedHighAfterLow(highs, nH, l0, tTouch);
-      if(!keyHi.Valid())
+      if(sw.l0.time < tTouch && sw.h0.time < tTouch)
          return false;
-
-      const int startSh = MathMax(1, l0.shift - 1);
-      for(int sh = startSh; sh >= 1; sh--)
-      {
-         if(iTime(sym, tf, sh) < l0.time)
-            continue;
-         if(!IctBodyBreakAbove(sym, tf, sh, keyHi.price))
-            continue;
-
-         keyLevelOut   = keyHi.price;
-         keyTimeOut    = keyHi.time;
-         mssBarTimeOut = iTime(sym, tf, sh);
-         slSwingOut    = l0.price;
-         return true;
-      }
+      g_ictLowTf.mss.liveL0Price = sw.l0.price;
+      g_ictLowTf.mss.liveL0Time  = sw.l0.time;
+      g_ictLowTf.mss.liveH0Price = sw.h0.price;
+      g_ictLowTf.mss.liveH0Time  = sw.h0.time;
+      return true;
    }
 
+   return false;
+}
+
+// Hủy setup: H1 đóng (shift=1) — thân xuyên FVG (không giữ giá). Râu xuyên vẫn tiếp tục MSS.
+bool IctMss_H1BodyInvalidatedSetup(const string sym, const IctFvgZone &h1,
+                                   const ENUM_ICT_BIAS bias)
+{
+   if(h1.upper <= h1.lower)
+      return false;
+
+   const double cls = iClose(sym, InpFvgTf, 1);
+   if(bias == ICT_BIAS_BEAR)
+      return (cls > h1.upper + _Point);
+   if(bias == ICT_BIAS_BULL)
+      return (cls < h1.lower - _Point);
+   return false;
+}
+
+bool IctMss_CheckH1InvalidationOnNewBar(const string sym, const IctFvgZone &h1,
+                                         const ENUM_ICT_BIAS bias)
+{
+   const datetime h1Bar1 = iTime(sym, InpFvgTf, 1);
+   if(h1Bar1 <= 0)
+      return false;
+
+   if(h1Bar1 == g_ictLowTf.mss.h1LastInvalidBarTime)
+      return false;
+
+   g_ictLowTf.mss.h1LastInvalidBarTime = h1Bar1;
+   return IctMss_H1BodyInvalidatedSetup(sym, h1, bias);
+}
+
+bool IctMss_FindMssBreakBar(const string sym, const ENUM_TIMEFRAMES tf,
+                            const double keyLevel, const datetime keyTime,
+                            const bool wantBreakBelow,
+                            datetime &breakTimeOut)
+{
+   breakTimeOut = 0;
+   if(keyLevel <= 0.0 || keyTime <= 0)
+      return false;
+
+   const int lim = MathMin(InpMssConfirmLookback, iBars(sym, tf) - 2);
+   for(int sh = 1; sh <= lim; sh++)
+   {
+      if(iTime(sym, tf, sh) < keyTime)
+         break;
+      const bool broke = wantBreakBelow ?
+                         IctBodyBreakBelow(sym, tf, sh, keyLevel) :
+                         IctBodyBreakAbove(sym, tf, sh, keyLevel);
+      if(!broke)
+         continue;
+      breakTimeOut = iTime(sym, tf, sh);
+      return true;
+   }
    return false;
 }
 
@@ -391,21 +367,48 @@ bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
    if(g_ictLowTf.mss.chochLocked && g_ictLowTf.mss.chochKeyLevel > 0.0)
       return true;
 
-   const datetime tTouch = h1.firstTouchTime;
+   const datetime tTouch = (g_ictLowTf.mss.h1TouchTime > 0) ?
+                           g_ictLowTf.mss.h1TouchTime : h1.firstTouchTime;
    if(tTouch <= 0)
       return false;
 
-   double keyLv = 0.0, slSwing = 0.0;
-   datetime keyT = 0, mssBarT = 0;
-   if(!IctMss_FindMssAfterFvgRetest(sym, tf, h1, tTouch, bias,
-                                   keyLv, keyT, mssBarT, slSwing))
+   if(!IctMss_UpdateLiveM5Swings(sym, bias, tTouch))
       return false;
 
-   g_ictLowTf.mss.chochKeyLevel = keyLv;
-   g_ictLowTf.mss.chochKeyTime  = keyT;
-   g_ictLowTf.mss.slSwingPrice  = slSwing;
-   g_ictLowTf.mss.chochTime     = mssBarT;
-   g_ictLowTf.mss.chochLocked   = true;
+   if(g_ictLowTf.mss.liveL0Time < tTouch && g_ictLowTf.mss.liveH0Time < tTouch)
+      return false;
+
+   datetime breakT = 0;
+
+   if(bias == ICT_BIAS_BEAR)
+   {
+      if(!IctMss_FindMssBreakBar(sym, tf, g_ictLowTf.mss.liveL0Price,
+                                 g_ictLowTf.mss.liveL0Time, true, breakT))
+         return false;
+      if(breakT < tTouch)
+         return false;
+
+      g_ictLowTf.mss.chochKeyLevel = g_ictLowTf.mss.liveL0Price;
+      g_ictLowTf.mss.chochKeyTime  = g_ictLowTf.mss.liveL0Time;
+      g_ictLowTf.mss.slSwingPrice  = g_ictLowTf.mss.liveH0Price;
+   }
+   else if(bias == ICT_BIAS_BULL)
+   {
+      if(!IctMss_FindMssBreakBar(sym, tf, g_ictLowTf.mss.liveH0Price,
+                                 g_ictLowTf.mss.liveH0Time, false, breakT))
+         return false;
+      if(breakT < tTouch)
+         return false;
+
+      g_ictLowTf.mss.chochKeyLevel = g_ictLowTf.mss.liveH0Price;
+      g_ictLowTf.mss.chochKeyTime  = g_ictLowTf.mss.liveH0Time;
+      g_ictLowTf.mss.slSwingPrice  = g_ictLowTf.mss.liveL0Price;
+   }
+   else
+      return false;
+
+   g_ictLowTf.mss.chochTime   = breakT;
+   g_ictLowTf.mss.chochLocked = true;
    return true;
 }
 
@@ -572,6 +575,96 @@ bool IctMss_PriceInEntryZone(const string sym, const ENUM_TIMEFRAMES tf,
    return false;
 }
 
+void IctMss_MarkFvgUsed(IctFvgZone &zone, const string sym)
+{
+   if(zone.id == 0)
+      return;
+
+   zone.state = ICT_FVG_USED;
+   if(zone.fvgUsedTime == 0)
+      zone.fvgUsedTime = iTime(sym, InpFvgTf, 0);
+   zone.timeEnd = IctFvg_GetFvgDrawTimeEnd(sym, InpFvgTf, zone);
+}
+
+void IctMss_MarkFvgUsedOnMssSuccess(const string sym, const ulong fvgId)
+{
+   if(fvgId == 0)
+      return;
+
+   const int idx = IctMss_FindH1FvgById(fvgId);
+   if(idx < 0)
+      return;
+
+   const bool fresh = (g_ictFvgZones[idx].state != ICT_FVG_USED);
+   if(fresh)
+      IctMss_MarkFvgUsed(g_ictFvgZones[idx], sym);
+
+   if(g_ictLowTf.mss.h1WatchFvgId == fvgId)
+      g_ictLowTf.mss.h1WatchFvgId = 0;
+
+   if(fresh && InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] FVG #%I64u → Used (giữ giá + MSS M5 OK)", fvgId);
+}
+
+void IctMss_FailFvgH1Body(const string sym, const ulong fvgId, const string reason)
+{
+   if(fvgId > 0)
+   {
+      const int idx = IctMss_FindH1FvgById(fvgId);
+      if(idx >= 0)
+         IctMss_MarkFvgUsed(g_ictFvgZones[idx], sym);
+   }
+
+   IctMss_ResetState();
+   g_ictLowTf.mss.displayReason = reason;
+
+   if(InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] FVG #%I64u → Used (H1 body xuyên) | %s", fvgId, reason);
+   g_ictMssJournalLast = "";
+}
+
+void IctMss_ResetPipelineKeepWatch()
+{
+   const ulong watch  = g_ictLowTf.mss.h1WatchFvgId;
+   const datetime inv = g_ictLowTf.mss.h1LastInvalidBarTime;
+   g_ictLowTf.mss.Clear();
+   g_ictLowTf.mss.h1WatchFvgId         = watch;
+   g_ictLowTf.mss.h1LastInvalidBarTime = inv;
+   IctMss_JournalReset();
+}
+
+void IctMss_CheckH1WatchInvalidation(const string sym)
+{
+   const ulong watchId = g_ictLowTf.mss.h1WatchFvgId;
+   if(watchId == 0)
+      return;
+
+   const int idx = IctMss_FindH1FvgById(watchId);
+   if(idx < 0)
+   {
+      g_ictLowTf.mss.h1WatchFvgId = 0;
+      return;
+   }
+
+   if(g_ictFvgZones[idx].state == ICT_FVG_USED)
+   {
+      g_ictLowTf.mss.h1WatchFvgId = 0;
+      return;
+   }
+
+   const ENUM_ICT_BIAS bias = g_ictDailyBias.bias;
+   if(bias != ICT_BIAS_BEAR && bias != ICT_BIAS_BULL)
+      return;
+
+   if(!IctMss_CheckH1InvalidationOnNewBar(sym, g_ictFvgZones[idx], bias))
+      return;
+
+   IctMss_FailFvgH1Body(sym, watchId,
+      (bias == ICT_BIAS_BEAR) ?
+      "FVG Used: H1 đóng thân trên Premium — không giữ giá" :
+      "FVG Used: H1 đóng thân dưới Discount — không giữ giá");
+}
+
 void IctMss_ResetState()
 {
    g_ictLowTf.mss.Clear();
@@ -582,11 +675,18 @@ void IctMss_Update(const string sym)
 {
    g_ictLowTf.mss.displayReason = IctMssPhaseText(g_ictLowTf.mss.phase);
 
+   IctMss_CheckH1WatchInvalidation(sym);
+
    if(!g_ictIntraday.isAllowTrade)
    {
       if(g_ictLowTf.mss.phase != ICT_MSS_IDLE)
-         IctMss_ResetState();
-      g_ictLowTf.mss.displayReason = "AllowTrade=false";
+      {
+         if(g_ictLowTf.mss.h1WatchFvgId == 0 && g_ictLowTf.mss.h1FvgId > 0)
+            g_ictLowTf.mss.h1WatchFvgId = g_ictLowTf.mss.h1FvgId;
+         IctMss_ResetPipelineKeepWatch();
+      }
+      if(StringFind(g_ictLowTf.mss.displayReason, "FVG Used") != 0)
+         g_ictLowTf.mss.displayReason = "AllowTrade=false (H1 lệch Bias — MSS tạm dừng)";
       return;
    }
 
@@ -599,37 +699,41 @@ void IctMss_Update(const string sym)
       return;
    }
 
-   if(g_ictLowTf.mss.phase == ICT_MSS_IDLE || g_ictLowTf.mss.h1FvgId == 0)
+   if(g_ictLowTf.mss.phase == ICT_MSS_IDLE)
    {
-      const int hIdx = IctMss_SelectTargetH1Fvg();
+      const int hIdx = IctMss_SelectNearestH1Poi(sym);
       if(hIdx < 0)
       {
-         g_ictLowTf.mss.displayReason = StringFormat("Chờ H1 %s FVG",
-                                         (wantSide == ICT_FVG_BEAR) ? "Premium" : "Discount");
+         g_ictLowTf.mss.h1FvgId = 0;
+         g_ictLowTf.mss.displayReason = StringFormat(
+            "Chờ H1 %s FVG gần giá (%d POI / %d FVG)",
+            (wantSide == ICT_FVG_BEAR) ? "Premium" : "Discount",
+            IctMss_CountH1PoiEligible(), g_ictFvgCount);
          return;
       }
 
       g_ictLowTf.mss.h1FvgId = g_ictFvgZones[hIdx].id;
 
-      if(!IctMss_HasH1FvgRetest(sym, g_ictFvgZones[hIdx]))
+      if(!IctMss_HasFvgPriceTouch(sym, g_ictFvgZones[hIdx]))
       {
-         g_ictLowTf.mss.displayReason = InpMssH1RetestWickOnly ?
-            StringFormat("Chờ râu H1 chạm FVG %s [%.0f–%.0f]",
-                         IctPdZoneText(IctFvg_GetRepPd(g_ictFvgZones[hIdx])),
-                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper) :
-            StringFormat("Chờ retest FVG H1 %s [%.0f–%.0f] (%.0f%% lấp)",
-                         IctPdZoneText(IctFvg_GetRepPd(g_ictFvgZones[hIdx])),
-                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
-                         InpMssH1MinFillPct);
+         const double px = SymbolInfoDouble(sym, SYMBOL_BID);
+         const double dist = IctMss_DistancePriceToFvg(px, g_ictFvgZones[hIdx]);
+         g_ictLowTf.mss.displayReason = StringFormat(
+            "POI #%I64u [%.0f–%.0f] dist %.0f pts — chờ chạm",
+            g_ictFvgZones[hIdx].id,
+            g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper, dist / _Point);
          return;
       }
 
+      const datetime tTouch = IctMss_GetFvgTouchTime(sym, g_ictFvgZones[hIdx]);
       g_ictLowTf.mss.phase       = ICT_MSS_H1_TOUCH;
-      g_ictLowTf.mss.h1TouchTime = g_ictFvgZones[hIdx].firstTouchTime;
-      g_ictLowTf.mss.displayReason = InpMssH1RetestWickOnly ?
-         "Retest FVG H1 OK | râu chạm POI" :
-         StringFormat("Retest FVG H1 OK | lấp %.0f%% (H1)",
-                      g_ictFvgZones[hIdx].maxFillRatio * 100.0);
+      g_ictLowTf.mss.h1FvgId     = g_ictFvgZones[hIdx].id;
+      g_ictLowTf.mss.h1WatchFvgId = g_ictFvgZones[hIdx].id;
+      g_ictLowTf.mss.h1TouchTime = tTouch;
+      g_ictLowTf.mss.h1LastInvalidBarTime = 0;
+      g_ictLowTf.mss.displayReason = StringFormat(
+         "Giá đã chạm FVG — theo dõi MSS M5 [%.0f–%.0f]",
+         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper);
    }
 
    const int h1Idx = IctMss_FindH1FvgById(g_ictLowTf.mss.h1FvgId);
@@ -640,44 +744,52 @@ void IctMss_Update(const string sym)
       return;
    }
 
-   if(g_ictLowTf.mss.phase >= ICT_MSS_H1_TOUCH &&
-      !IctMss_HasH1FvgRetest(sym, g_ictFvgZones[h1Idx]))
+   if(g_ictFvgZones[h1Idx].state == ICT_FVG_USED &&
+      g_ictLowTf.mss.phase <= ICT_MSS_H1_TOUCH &&
+      !g_ictLowTf.mss.chochLocked)
    {
       IctMss_ResetState();
-      g_ictLowTf.mss.displayReason = "FVG H1 chưa retest đủ % — reset MSS";
+      g_ictLowTf.mss.displayReason = "FVG POI Used — chọn FVG gần giá tiếp theo";
       return;
    }
 
    if(g_ictLowTf.mss.phase >= ICT_MSS_H1_TOUCH && g_ictLowTf.mss.h1TouchTime <= 0)
-      g_ictLowTf.mss.h1TouchTime = g_ictFvgZones[h1Idx].firstTouchTime;
-
-   if(g_ictLowTf.mss.phase == ICT_MSS_H1_TOUCH)
    {
-      if(!IctMss_TryLockMss(sym, cTf, g_ictFvgZones[h1Idx], g_ictDailyBias.bias))
+      const datetime t = IctMss_GetFvgTouchTime(sym, g_ictFvgZones[h1Idx]);
+      if(t > 0)
+         g_ictLowTf.mss.h1TouchTime = t;
+   }
+
+   if(g_ictLowTf.mss.phase == ICT_MSS_H1_TOUCH && !g_ictLowTf.mss.chochLocked)
+   {
+      const datetime tTouch = g_ictLowTf.mss.h1TouchTime;
+      if(IctMss_UpdateLiveM5Swings(sym, g_ictDailyBias.bias, tTouch))
       {
-         g_ictLowTf.mss.displayReason = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ?
-                                        "Retest FVG H1 OK — chờ MSS↓ phá L0 M5" :
-                                        "Retest FVG H1 OK — chờ MSS↑ phá H0 M5";
-         return;
+         if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
+            g_ictLowTf.mss.displayReason = StringFormat(
+               "Chờ MSS↓ phá L0=%.2f | H0=%.2f (M5 bull)",
+               g_ictLowTf.mss.liveL0Price, g_ictLowTf.mss.liveH0Price);
+         else
+            g_ictLowTf.mss.displayReason = StringFormat(
+               "Chờ MSS↑ phá H0=%.2f | L0=%.2f (M5 bear)",
+               g_ictLowTf.mss.liveH0Price, g_ictLowTf.mss.liveL0Price);
       }
+      else
+         g_ictLowTf.mss.displayReason = "M5 trong FVG — chờ pivot L0/H0";
+
+      if(!IctMss_TryLockMss(sym, cTf, g_ictFvgZones[h1Idx], g_ictDailyBias.bias))
+         return;
+
+      IctMss_MarkFvgUsedOnMssSuccess(sym, g_ictLowTf.mss.h1FvgId);
 
       const double keyLv   = g_ictLowTf.mss.chochKeyLevel;
       const double slSwing = g_ictLowTf.mss.slSwingPrice;
-      const datetime mssT  = g_ictLowTf.mss.chochTime;
-
-      if(!IctMss_IsChochNearH1Fvg(sym, g_ictFvgZones[h1Idx], g_ictDailyBias.bias,
-                                  keyLv, slSwing, mssT))
-      {
-         g_ictLowTf.mss.displayReason = StringFormat(
-            "MSS khóa @ %.2f — xa H1 FVG, chờ gần hơn", keyLv);
-         return;
-      }
 
       g_ictLowTf.mss.phase = ICT_MSS_CHOCH;
       IctConfirmFvg_ScanNew(sym, cTf, wantSide, g_ictLowTf.mss.chochTime, true);
       g_ictLowTf.mss.displayReason = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ?
-         StringFormat("MSS↓ khóa L0=%.2f | H0=%.2f — quét M5 FVG", keyLv, slSwing) :
-         StringFormat("MSS↑ khóa H0=%.2f | L0=%.2f — quét M5 FVG", keyLv, slSwing);
+         StringFormat("MSS↓ @ L0=%.2f | SL H0=%.2f — quét M5 FVG", keyLv, slSwing) :
+         StringFormat("MSS↑ @ H0=%.2f | SL L0=%.2f — quét M5 FVG", keyLv, slSwing);
    }
 
    if(g_ictLowTf.mss.phase == ICT_MSS_CHOCH)

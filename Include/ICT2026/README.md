@@ -49,7 +49,8 @@ MQL5/
         ├── LowTfTrend.mqh        ← iTF FVG khi IsAllowTrade
         ├── Fvg.mqh               ← detect / Available-Used
         ├── FvgDraw.mqh           ← vẽ FVG + Premium/Discount
-        ├── Panel.mqh               ← bias + intraday + IsAllowTrade (góc trên)
+        ├── EaState.mqh             ← state machine STOP / SETUP / TRADE
+        ├── Panel.mqh               ← bias + intraday + EA state (góc trên)
         └── Draw.mqh                ← label b*/i*/H0–L1 trên chart
 ```
 
@@ -216,9 +217,13 @@ FVG Used **không** kéo dài P/D thêm; P/D độc lập với Used (theo swing
 
 | | |
 |--|--|
-| **Mặc định (`InpMssH1RetestWickOnly`)** | **Râu H1** chạm `[lower … upper]` là đủ — không cần thân nến xuyên FVG |
-| **Tùy chọn** | `InpMssH1RetestWickOnly=false` → thêm lấp ≥ `InpMssH1MinFillPct` |
-| **MSS M5** | Sau râu chạm POI → M5 pullback ngược cục bộ → **phá L0** (bear HTF) hoặc **phá H0** (bull HTF) |
+| **Retest** | **Giá chạm** FVG (H1/M5/bid-ask) — không cần râu H1 riêng |
+| **Giữ giá H1** | Râu xuyên FVG → tiếp tục chờ MSS M5 |
+| **AllowTrade** | H1 trend đồng thuận Bias — **không** đánh dấu FVG Used |
+| **FVG Used (fail)** | H1 body đóng xuyên FVG — không giữ giá |
+| **FVG Used (OK)** | Giữ giá + **MSS M5** khóa → Used, tiếp tục M5 FVG / entry trên cùng setup |
+| **AllowTrade=false** | Tạm dừng MSS pipeline; vẫn **watch** FVG cho H1 body fail |
+| **MSS M5** | Sau chạm FVG → M5 pullback → **phá L0** (bear) / **phá H0** (bull) |
 
 **Định nghĩa MSS vs CHoCH (cùng rule Key H0/L0):**
 
@@ -233,6 +238,28 @@ CHoCH trên D/H1 = phá key level **ngược** xu hướng HTF (bull→bear phá
 **FVG size filter:** `InpFvgMinGap*` chỉ áp dụng **`InpFvgTf` (H1)**. **M5** (`InpConfirmTf`) — không lọc ATR → phát hiện FVG M5 nhỏ.
 
 Sau retest FVG H1 OK → arm MSS trên M5.
+
+### EA state machine (`EaState.mqh`, v1.131)
+
+Panel luôn hiển thị 3 dòng đầu: **`[CATEGORY] CODE`**, tiêu đề, chi tiết.
+
+| Category | State `CODE` | Khi nào |
+|----------|--------------|---------|
+| **STOP** | `STOP_NO_BIAS` | Daily bias = None |
+| **STOP** | `STOP_BIAS_RANGE` | Bias = Range |
+| **STOP** | `STOP_INTRADAY_NONE` | Bias Bull/Bear nhưng H1 trend = None |
+| **STOP** | `STOP_BIAS_INTRADAY_MISMATCH` | Bias ≠ H1 (vd Bull + H1 Down) |
+| **SETUP** | `WAIT_FVG_TOUCH` | AllowTrade, chờ retest FVG H1 |
+| **SETUP** | `FVG_TOUCHED_WAIT_MSS` | H1 retest + M5 trong FVG; live L0/H0 M5, chờ body phá L0 (bear) |
+| **SETUP** | `MSS_OK_WAIT_M5_FVG` | MSS khóa, chờ M5 FVG |
+| **SETUP** | `M5_FVG_WAIT_RETRACE` | Có M5 FVG, chờ hồi fill entry |
+| **SETUP** | `READY_FOR_LIMIT` | Giá trong vùng entry, sắp đặt limit |
+| **TRADE** | `LIMIT_ORDER_PENDING` | Có lệnh limit MSS magic |
+| **TRADE** | `ON_TRADE` | Có position MSS magic |
+
+`ENUM_ICT_MSS_PHASE` (nội bộ) vẫn giữ; `IctEaState_Refresh()` map sang state trên sau mỗi `IctMss_Update` / `IctMssEntry_Update`.
+
+API: `ICT2026_GetEaState()`, `ICT2026_GetEaStateCode()`, `ICT2026_GetEaStateDetail()`.
 
 ### MSS entry (Confirm TF, v1.115)
 
@@ -539,6 +566,54 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 
 ## Changelog
 
+### v1.138 — POI H1 = FVG chưa Used **gần giá nhất**
+
+- `IctMss_SelectNearestH1Poi`: khoảng cách bid → FVG; bỏ qua Used; tie → FVG mới hơn
+- H1 FVG **không** auto-Used theo % fill (chỉ MSS fail/OK đánh dấu Used)
+- IDLE: luôn chọn lại POI gần nhất; chạm → `FVG_TOUCHED_WAIT_MSS`
+
+### v1.137 — Fill FVG mặc định 25% (thay 38.2%)
+
+- `InpFvgUsedFillPct`, `InpMssEntryFillPct`, `InpMssH1MinFillPct` = 25
+
+### v1.136 — FVG Used khi MSS OK (giữ giá)
+
+- MSS khóa → `IctMss_MarkFvgUsedOnMssSuccess` (POI đã phục vụ, tiếp M5 FVG/entry)
+- Used fail vs Used OK: cùng `ICT_FVG_USED`, journal khác nhau
+- Pipeline MSS/entry vẫn chạy sau Used nếu `chochLocked`
+
+### v1.135 — Tách AllowTrade vs FVG Used
+
+- `AllowTrade=false`: pause MSS (`ResetPipelineKeepWatch`), **không** Used FVG
+- `FVG Used`: chỉ khi H1 **body đóng xuyên** FVG (`IctMss_FailFvgH1Body`)
+- `h1WatchFvgId`: theo dõi invalidation kể cả khi H1 lệch Bias
+
+### v1.134 — FVG Used khi H1 body xuyên; skip FVG Used trong target
+
+- `IctMss_SelectTargetH1Fvg`: bỏ qua mọi FVG Used
+- MSS chỉ khóa nếu break sau `h1TouchTime`
+
+### v1.133 — Retest = giá chạm FVG; H1 chỉ hủy khi body đóng xuyên
+
+- Retest: `IctMss_HasFvgPriceTouch` (H1 touch / M5 overlap / giá live trong gap)
+- Không còn “chờ râu H1”; `InpMssH1RetestWickOnly` legacy (bỏ qua)
+- Hủy: `iClose` H1[1] xuyên FVG — râu xuyên vẫn chờ MSS
+
+### v1.132 — MSS đơn giản: live L0/H0 M5 + hủy H1 body phá FVG
+
+- `FVG_TOUCHED_WAIT_MSS`: cập nhật liên tục `liveL0`/`liveH0` từ `IctBuildConfirmSwingSet` (M5 bull khi bear HTF)
+- MSS bear: body phá **L0** hiện tại → vẽ MSS tại L0, SL tại H0
+- Hủy setup: mỗi nến H1 mới, body đóng **trên** FVG (bear) / **dưới** FVG (bull)
+- Vào setup: H1 retest + ít nhất một nến M5 overlap H1 FVG
+- Bỏ gate “MSS xa H1 FVG”; vẽ L0 live (nét chấm) trước khi khóa MSS
+
+### v1.131 — EA state machine (STOP / SETUP / TRADE)
+
+- `EaState.mqh`: `IctEaState_Refresh()`, panel 3 dòng state đầu
+- STOP: no bias, range, H1 none, bias≠H1
+- SETUP: WAIT_FVG_TOUCH → … → READY_FOR_LIMIT
+- TRADE: LIMIT_ORDER_PENDING, ON_TRADE
+
 ### v1.130 — MSS = phá L0/H0 M5 (định nghĩa CHoCH đúng)
 
 - Bear HTF: hồi Bearish H1 FVG → M5 pullback (bull cục bộ) → **MSS↓ = body phá L0** (đáy tạo H0)
@@ -564,7 +639,7 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 ### v1.126 — Thuật ngữ: Retest FVG H1 (POI), không ghi chung “H1 retest”
 
 - Panel/journal: “Retest FVG H1”, “Chờ retest FVG H1 … (lấp trên H1)”
-- `IctMss_HasH1FvgRetest`, `IctMss_TryLockMss`, `chochLocked`
+- `IctMss_FailFvgH1Body`, `IctMss_CheckH1WatchInvalidation`, `chochLocked`
             |
 
 ### v1.125 — MSS = phá swing M5 (confirm), build structure như chart

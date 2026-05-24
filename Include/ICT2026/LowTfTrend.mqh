@@ -11,6 +11,7 @@
 #include <ICT2026/MssEntry.mqh>
 #include <ICT2026/FvgDraw.mqh>
 #include <ICT2026/MssDraw.mqh>
+#include <ICT2026/EaState.mqh>
 
 void IctLowTfTrend_Reset()
 {
@@ -57,9 +58,9 @@ bool IctLowTfTrend_Update(const string sym, const bool force = false)
    {
       const ENUM_ICT_FVG_SIDE side = IctFvgSideFromBias(g_ictDailyBias.bias);
       IctFvg_ScanNew(sym, tf, side, force || allowJustOn);
-      g_ictLowTf.displayReason = StringFormat("Scan iTF FVG %s | %d avail / %d total",
-                                              IctFvgSideText(side),
-                                              IctFvg_CountAvailable(), g_ictFvgCount);
+      g_ictLowTf.displayReason = StringFormat("H1 POI %d avail / %d FVG | scan %s",
+                                              IctMss_CountH1PoiEligible(), g_ictFvgCount,
+                                              IctFvgSideText(side));
    }
    else
    {
@@ -77,6 +78,7 @@ bool IctLowTfTrend_Update(const string sym, const bool force = false)
       IctConfirmFvg_UpdateAll(sym, InpConfirmTf);
       IctMss_Update(sym);
       IctMssEntry_Update(sym);
+      IctEaState_Refresh(sym);
       g_ictLowTf.confirmFvgCount = g_ictConfirmFvgCount;
    }
 
@@ -127,6 +129,7 @@ void IctLowTfTrend_TickRefresh(const string sym)
       const ENUM_ICT_MSS_PHASE prevMss = g_ictLowTf.mss.phase;
       IctMss_Update(sym);
       IctMssEntry_Update(sym);
+      IctEaState_Refresh(sym);
       if(prevMss != g_ictLowTf.mss.phase)
          dirty = true;
    }
@@ -139,7 +142,7 @@ void IctLowTfTrend_TickRefresh(const string sym)
    if(dirty)
       IctFvgDraw_Render(sym);
 
-   if(g_ictLowTf.mss.phase >= ICT_MSS_CHOCH)
+   if(g_ictLowTf.mss.phase >= ICT_MSS_H1_TOUCH)
       IctMssDraw_Render(sym);
    else if(!InpDrawMssChoch)
       IctMssDraw_DeleteAll();

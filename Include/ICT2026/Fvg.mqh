@@ -702,9 +702,12 @@ void IctFvg_UpdateZoneState(const string sym, const ENUM_TIMEFRAMES tf, IctFvgZo
 
    IctFvg_UpdateTouchAndFill(sym, tf, zone);
 
-   const double usedPct = InpFvgUsedFillPct / 100.0;
-   if(zone.maxFillRatio >= usedPct || zone.maxFillRatio >= 0.999)
-      zone.state = ICT_FVG_USED;
+   if(tf != InpFvgTf)
+   {
+      const double usedPct = InpFvgUsedFillPct / 100.0;
+      if(zone.maxFillRatio >= usedPct || zone.maxFillRatio >= 0.999)
+         zone.state = ICT_FVG_USED;
+   }
 
    if(zone.state == ICT_FVG_USED && prevState == ICT_FVG_AVAILABLE && zone.fvgUsedTime == 0)
       zone.fvgUsedTime = iTime(sym, tf, 0);

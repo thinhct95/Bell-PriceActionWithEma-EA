@@ -9,10 +9,11 @@
 #include <ICT2026/DailyBias.mqh>
 #include <ICT2026/IntradayStructure.mqh>
 #include <ICT2026/LowTfTrend.mqh>
+#include <ICT2026/EaState.mqh>
 
 const string ICT26_PANEL_PFX     = "ICT26_PNL_";
 const string ICT26_PANEL_LEGACY  = "ICT26_BIAS_PANEL";
-const int    ICT26_PANEL_MAXLINE = 14;
+const int    ICT26_PANEL_MAXLINE = 16;
 
 const color ICT_PANEL_CLR_UP      = clrLime;
 const color ICT_PANEL_CLR_DOWN    = clrOrangeRed;
@@ -59,6 +60,16 @@ color IctPanelAllowTradeColor()
    return ICT_PANEL_CLR_NEUTRAL;
 }
 
+color IctPanelEaStateColor()
+{
+   switch(g_ictEaState.category)
+   {
+      case ICT_EA_CAT_TRADE: return clrAqua;
+      case ICT_EA_CAT_SETUP: return clrGold;
+      default:               return ICT_PANEL_CLR_MUTED;
+   }
+}
+
 void IctPanel_Clear()
 {
    const long ch = ChartID();
@@ -98,6 +109,7 @@ void IctPanel_Render(const string sym)
    }
 
    IctIntraday_UpdateAllowTrade();
+   IctEaState_Refresh(sym);
 
    const long ch = ChartID();
    ObjectDelete(ch, ICT26_PANEL_LEGACY);
@@ -108,6 +120,7 @@ void IctPanel_Render(const string sym)
    const color clrBias    = IctPanelBiasDirectionColor(g_ictDailyBias.bias);
    const color clrIntra   = IctPanelIntradayDirectionColor(g_ictIntraday.trend);
    const color clrAllow   = IctPanelAllowTradeColor();
+   const color clrEa      = IctPanelEaStateColor();
 
    string lines[];
    color  colors[];
@@ -115,6 +128,27 @@ void IctPanel_Render(const string sym)
    ArrayResize(colors, 0);
 
    int n = 0;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = StringFormat("[%s] %s", IctEaState_CategoryText(g_ictEaState.category),
+                           IctEaState_Code(g_ictEaState.state));
+   colors[n++] = clrEa;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = IctEaState_TitleVi(g_ictEaState.state);
+   colors[n++] = clrEa;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = StringFormat("Chi tiet: %s", g_ictEaState.detail);
+   colors[n++] = clrEa;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = "-------------------------";
+   colors[n++] = ICT_PANEL_CLR_NEUTRAL;
 
    ArrayResize(lines, n + 1);
    ArrayResize(colors, n + 1);
@@ -153,20 +187,15 @@ void IctPanel_Render(const string sym)
 
    ArrayResize(lines, n + 1);
    ArrayResize(colors, n + 1);
-   lines[n] = StringFormat("IsAllowTrade: %s",
-                           g_ictIntraday.isAllowTrade ? "true" : "false");
+   lines[n] = StringFormat("AllowTrade: %s | MSS phase: %s",
+                           g_ictIntraday.isAllowTrade ? "YES" : "NO",
+                           IctMssPhaseText(g_ictLowTf.mss.phase));
    colors[n++] = clrAllow;
 
    ArrayResize(lines, n + 1);
    ArrayResize(colors, n + 1);
-   lines[n] = StringFormat("iTF FVG: %s", g_ictLowTf.displayReason);
+   lines[n] = StringFormat("H1 FVG: %s", g_ictLowTf.displayReason);
    colors[n++] = (g_ictLowTf.availableCount > 0) ? ICT_PANEL_CLR_ALLOW : ICT_PANEL_CLR_MUTED;
-
-   ArrayResize(lines, n + 1);
-   ArrayResize(colors, n + 1);
-   lines[n] = StringFormat("MSS: %s", g_ictLowTf.mss.displayReason);
-   colors[n++] = (g_ictLowTf.mss.phase >= ICT_MSS_READY) ? ICT_PANEL_CLR_ALLOW :
-                 (g_ictLowTf.mss.phase > ICT_MSS_IDLE) ? clrGold : ICT_PANEL_CLR_MUTED;
 
    for(int i = 0; i < n; i++)
       IctPanel_SetLine(ch, i, i * lh, lines[i], colors[i]);

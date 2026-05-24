@@ -48,7 +48,7 @@ input int             InpFvgAtrPeriod         = 14;          // ATR cho lọc k�
 input double          InpFvgMinGapATRPct      = 12.0;        // H1 only: gap tối thiểu (% ATR, 0=tắt)
 input double          InpFvgMinGapPoints      = 0.0;         // H1 only: gap tối thiểu (giá)
 input double          InpFvgMinGapVsBarPct    = 25.0;        // H1 only: gap >= % range nến B (0=tắt)
-input double          InpFvgUsedFillPct       = 38.2;        // % lấp FVG → Used
+input double          InpFvgUsedFillPct       = 25.0;        // % lấp FVG → Used
 input int             InpFvgExpireDays        = 3;           // Xóa Available sau N ngày
 input int             InpFvgMaxZones          = 24;          // Số FVG tối đa trên chart
 input bool            InpDrawFvgZones         = true;        // Vẽ FVG + Premium/Discount
@@ -59,9 +59,9 @@ input color           InpPdPremiumColor       = clrMaroon;
 input color           InpPdDiscountColor      = clrDarkGreen;
 
 input group "══ MSS / Entry (Confirm TF) ══"
-input bool            InpMssH1RetestWickOnly   = true;        // Retest FVG H1: chỉ cần râu chạm (không bắt thân nến lấp %)
-input double          InpMssH1MinFillPct      = 38.2;        // Nếu tắt wick-only: % lấp tối thiểu trên H1
-input double          InpMssEntryFillPct      = 38.2;        // M5 FVG: % lấp để sẵn sàng entry
+input bool            InpMssH1RetestWickOnly   = true;        // (legacy, bỏ qua) Retest = giá chạm FVG
+input double          InpMssH1MinFillPct      = 25.0;        // Vẽ mức % tham khảo trên chart (không chặn retest)
+input double          InpMssEntryFillPct      = 25.0;        // M5 FVG: % lấp để sẵn sàng entry
 input int             InpMssConfirmLookback   = 80;          // Lookback pivot CHoCH trên Confirm TF
 input int             InpMssConfirmFvgBars    = 40;          // Quét M5 FVG sau CHoCH
 input double          InpMssMaxDistGapPct    = 75.0;       // MSS: buffer quanh H1 FVG (% chiều cao gap)

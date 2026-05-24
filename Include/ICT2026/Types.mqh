@@ -228,6 +228,12 @@ struct IctMssState
    double               pendingEntry;
    double               pendingSl;
    double               pendingTp;
+   double               liveL0Price;
+   double               liveH0Price;
+   datetime             liveL0Time;
+   datetime             liveH0Time;
+   datetime             h1LastInvalidBarTime;
+   ulong                h1WatchFvgId;
    string               displayReason;
 
    void Clear()
@@ -246,6 +252,12 @@ struct IctMssState
       pendingEntry  = 0.0;
       pendingSl     = 0.0;
       pendingTp     = 0.0;
+      liveL0Price   = 0.0;
+      liveH0Price   = 0.0;
+      liveL0Time    = 0;
+      liveH0Time    = 0;
+      h1LastInvalidBarTime = 0;
+      h1WatchFvgId  = 0;
       displayReason = "";
    }
 };

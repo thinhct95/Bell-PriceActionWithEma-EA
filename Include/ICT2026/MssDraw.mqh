@@ -143,22 +143,32 @@ void IctMssDraw_Render(const string sym)
    datetime keyT = 0, chochT = 0;
    IctMssDraw_ResolveChoch(mss, keyLv, keyT, slSwing, chochT);
 
+   const bool mssPending = (mss.phase == ICT_MSS_H1_TOUCH && !mss.chochLocked);
+   if(mssPending && mss.liveL0Price > 0.0)
+   {
+      keyLv   = isBear ? mss.liveL0Price : mss.liveH0Price;
+      keyT    = isBear ? mss.liveL0Time  : mss.liveH0Time;
+      slSwing = isBear ? mss.liveH0Price : mss.liveL0Price;
+      chochT  = 0;
+   }
+
    if(keyLv > 0.0)
    {
       if(keyT <= 0)
          keyT = tTouch;
       if(chochT <= 0)
-         chochT = keyT;
+         chochT = mss.chochTime > 0 ? mss.chochTime : keyT;
 
       const color clrChoch = clrGold;
-      const string chochLbl = isBear ? " MSS↓ L0 " : " MSS↑ H0 ";
+      const string chochLbl = mssPending ?
+         (isBear ? " L0 live " : " H0 live ") :
+         (isBear ? " MSS↓ L0 " : " MSS↑ H0 ");
       const bool chochAbove = !isBear;
       const datetime tLineStart = (keyT > 0) ? keyT : tTouch;
       const datetime tChoch     = (chochT > 0) ? chochT : tLineStart;
-      const bool chochPending = (mss.phase == ICT_MSS_H1_TOUCH && !mss.chochLocked);
 
       IctMssDraw_HLine("CHOCH", tLineStart, tEnd, keyLv, clrChoch,
-                       chochPending ? STYLE_DASH : STYLE_SOLID, 2);
+                       mssPending ? STYLE_DOT : STYLE_SOLID, 2);
       IctMssDraw_Label("CHOCH_LBL", chochLbl, tChoch, keyLv, chochAbove, clrChoch);
    }
 
@@ -166,9 +176,14 @@ void IctMssDraw_Render(const string sym)
    {
       const string swTag = isBear ? " H0 " : " L0 ";
       const color clrSw  = clrYellow;
-      datetime tSw = (keyT > 0) ? keyT : tTouch;
+      datetime tSw = isBear ?
+         (mss.liveH0Time > 0 ? mss.liveH0Time : keyT) :
+         (mss.liveL0Time > 0 ? mss.liveL0Time : keyT);
+      if(tSw <= 0)
+         tSw = tTouch;
 
-      IctMssDraw_HLine("MSS_SW", tSw, tEnd, slSwing, clrSw, STYLE_DASH, 1);
+      IctMssDraw_HLine("MSS_SW", tSw, tEnd, slSwing, clrSw,
+                       mssPending ? STYLE_DOT : STYLE_DASH, 1);
       IctMssDraw_Label("MSS_SW_LBL", swTag, tSw, slSwing, true, clrSw);
    }
 
