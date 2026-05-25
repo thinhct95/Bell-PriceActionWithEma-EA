@@ -35,7 +35,7 @@ input int             InpChartLabelFontSize   = 9;
 
 input group "══ Confirm swing (M5) ══"
 input ENUM_TIMEFRAMES InpConfirmTf            = PERIOD_M5;  // TF confirmation (tương lai)
-input int             InpConfirmSwingRange    = 1;
+input int             InpConfirmSwingRange    = 2;          // M5 swing strength: N bar mỗi bên (5-bar fractal khi =2)
 input int             InpConfirmSwingLookback = 80;
 input int             InpConfirmRecentBars    = 40;
 
@@ -77,8 +77,12 @@ input group "══ MSS Trade ══"
 input bool            InpMssTradeEnabled      = true;        // Đặt lệnh limit MSS
 input ulong           InpMssMagic             = 202604;      // Magic number
 input double          InpMssRiskPct           = 1.0;         // R % balance mỗi lệnh
-input double          InpMssSlAtrMult           = 0.5;         // SL: buffer ngoài H0/L0 M5 (× ATR M5)
-input double          InpMssMinRR              = 2.0;         // TP tối thiểu (× risk entry→SL)
+input ENUM_TIMEFRAMES InpMssSlAtrTf             = PERIOD_M5;   // TF tính ATR cho buffer SL
+input ENUM_TIMEFRAMES InpMssTpAtrTf             = PERIOD_M5;   // TF tính ATR cho buffer TP
+input int             InpMssBufferAtrPeriod     = 14;          // Period ATR cho buffer SL/TP
+input double          InpMssSlAtrMult           = 2.0;         // SL: buffer ngoài max(H0,H1)/min(L0,L1) (× ATR M5) — tránh spike đỉnh
+input double          InpMssMinRR              = 1.5;         // TP tối thiểu (× risk entry→SL) — block trade nếu iL0/iH0 không đạt
+input double          InpMssTpAtrBuffer         = 2.0;         // TP buffer trước iL0/iH0 (× ATR M5) — chốt trước vùng cản
 input int             InpMssPendingExpireHours  = 24;         // Hết hạn pending (giờ, 0=không)
 input bool            InpMssOnePosition         = true;        // Một position/pending MSS
 input bool            InpMssCancelPendingEod    = true;        // Hủy pending cuối phiên Mỹ (nếu chưa khớp)

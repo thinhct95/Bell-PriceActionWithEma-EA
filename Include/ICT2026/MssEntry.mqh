@@ -103,9 +103,33 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
          return false;
    }
 
-   const double atrM5 = IctMssEntry_Atr(sym, InpConfirmTf, InpFvgAtrPeriod);
-   const double bufSl = (atrM5 > 0.0) ? atrM5 * InpMssSlAtrMult : 10.0 * _Point;
+   // SL dùng ATR M5 (sát swing M5, không quá rộng để giữ risk thấp + RR đạt minRR)
+   // TP dùng ATR H1 (trung bình sóng H1 đang đánh, buffer rõ ràng trên chart)
+   double atrSl = IctMssEntry_Atr(sym, InpMssSlAtrTf, InpMssBufferAtrPeriod);
+   if(atrSl <= 0.0)
+      atrSl = IctMssEntry_Atr(sym, InpConfirmTf, InpFvgAtrPeriod);
+   double atrTp = IctMssEntry_Atr(sym, InpMssTpAtrTf, InpMssBufferAtrPeriod);
+   if(atrTp <= 0.0)
+      atrTp = atrSl;
+
+   // SL: cộng spread (stop trigger theo ask/bid — bù để khỏi bị quét sớm)
+   // TP: trừ 2×spread (TP gần entry hơn để dễ khớp — không cần giá hit chính xác iL0/iH0)
+   const double spreadNow = MathMax(0.0,
+                            SymbolInfoDouble(sym, SYMBOL_ASK) -
+                            SymbolInfoDouble(sym, SYMBOL_BID));
+
+   const double bufSl = ((atrSl > 0.0) ? atrSl * InpMssSlAtrMult : 100.0 * _Point) + spreadNow;
+   const double bufTp = ((atrTp > 0.0) ? atrTp * InpMssTpAtrBuffer : 50.0 * _Point) + 2.0 * spreadNow;
    const double minRR = MathMax(1.0, InpMssMinRR);
+
+   // ── TP target = iL0 (BEAR) / iH0 (BULL): sóng H1, m5 chỉ để entry
+   // TP đặt CÁCH target một buffer (gần chạm — không chờ hit chính xác)
+   const IctSwingSet iSw = g_ictIntraday.swings;
+   double tpTarget = 0.0;
+   if(isBuy && iSw.hasH0)
+      tpTarget = iSw.h0.price;
+   else if(!isBuy && iSw.hasL0)
+      tpTarget = iSw.l0.price;
 
    if(isBuy)
    {
@@ -113,7 +137,20 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
       const double risk = entryOut - slOut;
       if(risk <= _Point)
          return false;
-      tpOut = entryOut + risk * minRR;
+
+      if(tpTarget > 0.0 && tpTarget > entryOut + bufTp + _Point)
+         tpOut = tpTarget - bufTp;
+      else
+         tpOut = entryOut + risk * minRR;  // fallback nếu iH0 không có hoặc quá gần
+
+      const double rrAchieved = (tpOut - entryOut) / risk;
+      if(rrAchieved < minRR - 0.01)
+      {
+         g_ictLowTf.mss.displayReason = StringFormat(
+            "RR=%.2f < min %.2f (entry=%.2f SL=%.2f TP=%.2f) — chốt iH0 không đủ",
+            rrAchieved, minRR, entryOut, slOut, tpOut);
+         return false;
+      }
    }
    else
    {
@@ -121,7 +158,20 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
       const double risk = slOut - entryOut;
       if(risk <= _Point)
          return false;
-      tpOut = entryOut - risk * minRR;
+
+      if(tpTarget > 0.0 && tpTarget < entryOut - bufTp - _Point)
+         tpOut = tpTarget + bufTp;
+      else
+         tpOut = entryOut - risk * minRR;  // fallback nếu iL0 không có hoặc quá gần
+
+      const double rrAchieved = (entryOut - tpOut) / risk;
+      if(rrAchieved < minRR - 0.01)
+      {
+         g_ictLowTf.mss.displayReason = StringFormat(
+            "RR=%.2f < min %.2f (entry=%.2f SL=%.2f TP=%.2f) — chốt iL0 không đủ",
+            rrAchieved, minRR, entryOut, slOut, tpOut);
+         return false;
+      }
    }
 
    entryOut = IctMssEntry_NormalizePrice(sym, entryOut);

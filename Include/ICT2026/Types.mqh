@@ -232,6 +232,10 @@ struct IctMssState
    double               liveH0Price;
    datetime             liveL0Time;
    datetime             liveH0Time;
+   double               liveL1Price;
+   double               liveH1Price;
+   datetime             liveL1Time;
+   datetime             liveH1Time;
    datetime             h1LastInvalidBarTime;
    ulong                h1WatchFvgId;
    string               displayReason;
@@ -256,6 +260,10 @@ struct IctMssState
       liveH0Price   = 0.0;
       liveL0Time    = 0;
       liveH0Time    = 0;
+      liveL1Price   = 0.0;
+      liveH1Price   = 0.0;
+      liveL1Time    = 0;
+      liveH1Time    = 0;
       h1LastInvalidBarTime = 0;
       h1WatchFvgId  = 0;
       displayReason = "";

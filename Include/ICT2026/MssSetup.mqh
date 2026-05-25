@@ -272,13 +272,17 @@ bool IctMss_UpdateLiveM5Swings(const string sym, const ENUM_ICT_BIAS bias,
    g_ictLowTf.mss.liveH0Price = 0.0;
    g_ictLowTf.mss.liveL0Time  = 0;
    g_ictLowTf.mss.liveH0Time  = 0;
+   g_ictLowTf.mss.liveL1Price = 0.0;
+   g_ictLowTf.mss.liveH1Price = 0.0;
+   g_ictLowTf.mss.liveL1Time  = 0;
+   g_ictLowTf.mss.liveH1Time  = 0;
 
    IctSwingSet sw;
    ENUM_ICT_STRUCT st = ICT_STRUCT_NONE;
    if(!IctBuildConfirmSwingSet(sym, sw, st))
       return false;
 
-   if(bias == ICT_BIAS_BEAR)
+   if(bias == ICT_BIAS_BEAR || bias == ICT_BIAS_BULL)
    {
       if(!sw.hasL0 || !sw.hasH0)
          return false;
@@ -288,19 +292,16 @@ bool IctMss_UpdateLiveM5Swings(const string sym, const ENUM_ICT_BIAS bias,
       g_ictLowTf.mss.liveL0Time  = sw.l0.time;
       g_ictLowTf.mss.liveH0Price = sw.h0.price;
       g_ictLowTf.mss.liveH0Time  = sw.h0.time;
-      return true;
-   }
-
-   if(bias == ICT_BIAS_BULL)
-   {
-      if(!sw.hasL0 || !sw.hasH0)
-         return false;
-      if(sw.l0.time < tTouch && sw.h0.time < tTouch)
-         return false;
-      g_ictLowTf.mss.liveL0Price = sw.l0.price;
-      g_ictLowTf.mss.liveL0Time  = sw.l0.time;
-      g_ictLowTf.mss.liveH0Price = sw.h0.price;
-      g_ictLowTf.mss.liveH0Time  = sw.h0.time;
+      if(sw.hasL1)
+      {
+         g_ictLowTf.mss.liveL1Price = sw.l1.price;
+         g_ictLowTf.mss.liveL1Time  = sw.l1.time;
+      }
+      if(sw.hasH1)
+      {
+         g_ictLowTf.mss.liveH1Price = sw.h1.price;
+         g_ictLowTf.mss.liveH1Time  = sw.h1.time;
+      }
       return true;
    }
 
@@ -388,9 +389,14 @@ bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
       if(breakT < tTouch)
          return false;
 
+      // SL trên cao nhất giữa H0 và H1 (cap toàn pullback bull) + buffer ATR (cộng ở MssEntry)
+      double slSwingHi = g_ictLowTf.mss.liveH0Price;
+      if(g_ictLowTf.mss.liveH1Price > slSwingHi)
+         slSwingHi = g_ictLowTf.mss.liveH1Price;
+
       g_ictLowTf.mss.chochKeyLevel = g_ictLowTf.mss.liveL0Price;
       g_ictLowTf.mss.chochKeyTime  = g_ictLowTf.mss.liveL0Time;
-      g_ictLowTf.mss.slSwingPrice  = g_ictLowTf.mss.liveH0Price;
+      g_ictLowTf.mss.slSwingPrice  = slSwingHi;
    }
    else if(bias == ICT_BIAS_BULL)
    {
@@ -400,9 +406,14 @@ bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
       if(breakT < tTouch)
          return false;
 
+      // SL dưới thấp nhất giữa L0 và L1 (đáy toàn pullback bear) + buffer ATR (trừ ở MssEntry)
+      double slSwingLo = g_ictLowTf.mss.liveL0Price;
+      if(g_ictLowTf.mss.liveL1Price > 0.0 && g_ictLowTf.mss.liveL1Price < slSwingLo)
+         slSwingLo = g_ictLowTf.mss.liveL1Price;
+
       g_ictLowTf.mss.chochKeyLevel = g_ictLowTf.mss.liveH0Price;
       g_ictLowTf.mss.chochKeyTime  = g_ictLowTf.mss.liveH0Time;
-      g_ictLowTf.mss.slSwingPrice  = g_ictLowTf.mss.liveL0Price;
+      g_ictLowTf.mss.slSwingPrice  = slSwingLo;
    }
    else
       return false;
@@ -449,12 +460,20 @@ bool IctMss_GetConfirmMssSwing(const string sym, const ENUM_ICT_BIAS bias, doubl
    {
       if(bias == ICT_BIAS_BEAR && sw.hasH0)
       {
-         swingOut = sw.h0.price;
+         // BEAR SL: max(H0, H1) — cap toàn pullback bull
+         double hi = sw.h0.price;
+         if(sw.hasH1 && sw.h1.price > hi)
+            hi = sw.h1.price;
+         swingOut = hi;
          return true;
       }
       if(bias == ICT_BIAS_BULL && sw.hasL0)
       {
-         swingOut = sw.l0.price;
+         // BULL SL: min(L0, L1) — đáy toàn pullback bear
+         double lo = sw.l0.price;
+         if(sw.hasL1 && sw.l1.price < lo)
+            lo = sw.l1.price;
+         swingOut = lo;
          return true;
       }
    }
@@ -466,12 +485,20 @@ bool IctMss_GetConfirmMssSwing(const string sym, const ENUM_ICT_BIAS bias, doubl
    const int nL = ArraySize(lows);
    if(bias == ICT_BIAS_BEAR && nH > 0)
    {
-      swingOut = highs[nH - 1].price;
+      // max của 2 swing high gần nhất
+      double hi = highs[nH - 1].price;
+      if(nH >= 2 && highs[nH - 2].price > hi)
+         hi = highs[nH - 2].price;
+      swingOut = hi;
       return true;
    }
    if(bias == ICT_BIAS_BULL && nL > 0)
    {
-      swingOut = lows[nL - 1].price;
+      // min của 2 swing low gần nhất
+      double lo = lows[nL - 1].price;
+      if(nL >= 2 && lows[nL - 2].price < lo)
+         lo = lows[nL - 2].price;
+      swingOut = lo;
       return true;
    }
    return false;

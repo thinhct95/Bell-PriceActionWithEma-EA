@@ -3,8 +3,8 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.142"
-#property description "ICT2026 MSS limit entry + SL swing CHoCH + TP intraday"
+#property version   "1.151"
+#property description "ICT2026 MSS | SL = swing + ATR + spread | TP = iL0/iH0 + ATR − 2×spread (dễ khớp)"
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/DailyBias.mqh>
