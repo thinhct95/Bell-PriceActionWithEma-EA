@@ -81,6 +81,9 @@ input double          InpMssSlAtrMult           = 0.5;         // SL: buffer ngo
 input double          InpMssMinRR              = 2.0;         // TP tối thiểu (× risk entry→SL)
 input int             InpMssPendingExpireHours  = 24;         // Hết hạn pending (giờ, 0=không)
 input bool            InpMssOnePosition         = true;        // Một position/pending MSS
+input bool            InpMssCancelPendingEod    = true;        // Hủy pending cuối phiên Mỹ (nếu chưa khớp)
+input int             InpMssEodHour             = 23;          // Giờ EOD theo SERVER time (24h, vd EET broker = 23h ≈ 16:00 ET DST)
+input int             InpMssEodMinute           = 0;           // Phút EOD
 
 input group "══ Debug ══"
 input bool            InpDebug            = true;

@@ -10,10 +10,11 @@
 #include <ICT2026/IntradayStructure.mqh>
 #include <ICT2026/LowTfTrend.mqh>
 #include <ICT2026/EaState.mqh>
+#include <ICT2026/Stats.mqh>
 
 const string ICT26_PANEL_PFX     = "ICT26_PNL_";
 const string ICT26_PANEL_LEGACY  = "ICT26_BIAS_PANEL";
-const int    ICT26_PANEL_MAXLINE = 16;
+const int    ICT26_PANEL_MAXLINE = 20;
 
 const color ICT_PANEL_CLR_UP      = clrLime;
 const color ICT_PANEL_CLR_DOWN    = clrOrangeRed;
@@ -196,6 +197,25 @@ void IctPanel_Render(const string sym)
    ArrayResize(colors, n + 1);
    lines[n] = StringFormat("H1 FVG: %s", g_ictLowTf.displayReason);
    colors[n++] = (g_ictLowTf.availableCount > 0) ? ICT_PANEL_CLR_ALLOW : ICT_PANEL_CLR_MUTED;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = "-------------------------";
+   colors[n++] = ICT_PANEL_CLR_NEUTRAL;
+
+   const color clrStatsCounts = (g_ictMssStats.total > 0) ? ICT_PANEL_CLR_ALLOW : ICT_PANEL_CLR_MUTED;
+   const color clrStatsPerf   = (g_ictMssStats.netProfit > 0.0) ? ICT_PANEL_CLR_UP :
+                                (g_ictMssStats.netProfit < 0.0) ? ICT_PANEL_CLR_DOWN : ICT_PANEL_CLR_MUTED;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = IctMssStats_LineCounts();
+   colors[n++] = clrStatsCounts;
+
+   ArrayResize(lines, n + 1);
+   ArrayResize(colors, n + 1);
+   lines[n] = IctMssStats_LinePerf();
+   colors[n++] = clrStatsPerf;
 
    for(int i = 0; i < n; i++)
       IctPanel_SetLine(ch, i, i * lh, lines[i], colors[i]);

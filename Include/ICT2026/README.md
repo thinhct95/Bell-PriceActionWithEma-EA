@@ -566,6 +566,36 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 
 ## Changelog
 
+### v1.142 — Fix Stats đếm thiếu lệnh
+
+- Bug v1.141: `IctMssStats_ComputeR` gọi `HistorySelectByPosition` **bên trong vòng quét history toàn cục**
+  → selection bị thay → các index sau đọc từ history của 1 position → chỉ đếm được lệnh đầu tiên
+- Fix: 2-pass — collect ticket/reason/net trước (selection toàn cục còn nguyên), tính R sau
+- Thêm log journal `[ICT2026/Stats] Recompute …` để verify mỗi lần quét
+
+### v1.141 — Stats lệnh MSS trên panel
+
+- `Stats.mqh`: `IctMssStats_Recompute` quét HistoryDeals theo magic
+- Tính: total, TP, SL, khác, win, loss, sumR, netProfit
+- R thực = (close - entry)/(entry - SL) lấy từ deal IN + order SL
+- WR = TP / (TP+SL); Ravg = sumR/total
+- Hiển thị 2 dòng cuối panel: counts + WR/Ravg/Net
+- Recompute trên `OnInit` và sau mỗi `OnTradeTransaction` close
+
+### v1.140 — Hủy pending cuối phiên Mỹ (EOD)
+
+- Input: `InpMssCancelPendingEod` (true), `InpMssEodHour` (23), `InpMssEodMinute` (0) — **server time**
+- Mỗi tick: nếu có `pendingTicket` chưa fill + thời gian ≥ EOD → `OrderDelete` + `IctMss_ResetState`
+- Idempotent theo ngày: dùng `s_lastEodHandledDate` để không lặp
+- Bỏ qua nếu đang có position magic (chỉ hủy pending, không động vào lệnh đã khớp)
+
+### v1.139 — Reset MSS pipeline sau SL/TP/close (option A)
+
+- `OnTradeTransaction` lọc `DEAL_ENTRY_OUT` + magic → `IctMss_OnPositionClosed`
+- Mark **M5 FVG → Used**, `IctMss_ResetState`, journal lý do (SL/TP/Manual/…)
+- Fallback: detect transition `hadPosition → false` trong `IctMssEntry_Update` (miss OnTradeTransaction)
+- Sau close: EaState = `WAIT_FVG_TOUCH` → `SelectNearestH1Poi` (H1 cũ đã Used từ v1.136 → bỏ qua)
+
 ### v1.138 — POI H1 = FVG chưa Used **gần giá nhất**
 
 - `IctMss_SelectNearestH1Poi`: khoảng cách bid → FVG; bỏ qua Used; tie → FVG mới hơn

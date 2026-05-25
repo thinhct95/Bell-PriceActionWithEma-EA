@@ -136,7 +136,7 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
    return true;
 }
 
-bool IctMssEntry_HasOpenExposure(const string sym)
+bool IctMssEntry_HasOpenPositionMagic(const string sym)
 {
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -148,6 +148,13 @@ bool IctMssEntry_HasOpenExposure(const string sym)
       if((ulong)PositionGetInteger(POSITION_MAGIC) == InpMssMagic)
          return true;
    }
+   return false;
+}
+
+bool IctMssEntry_HasOpenExposure(const string sym)
+{
+   if(IctMssEntry_HasOpenPositionMagic(sym))
+      return true;
 
    for(int i = OrdersTotal() - 1; i >= 0; i--)
    {
@@ -163,6 +170,109 @@ bool IctMssEntry_HasOpenExposure(const string sym)
          return true;
    }
    return false;
+}
+
+string IctMssEntry_DealReasonText(const long r)
+{
+   switch((ENUM_DEAL_REASON)r)
+   {
+      case DEAL_REASON_SL:     return "SL";
+      case DEAL_REASON_TP:     return "TP";
+      case DEAL_REASON_SO:     return "Stop Out";
+      case DEAL_REASON_EXPERT: return "Expert close";
+      case DEAL_REASON_CLIENT: return "Manual";
+      case DEAL_REASON_MOBILE: return "Mobile";
+      case DEAL_REASON_WEB:    return "Web";
+      default:                 return (r < 0) ? "Detected" : "Unknown";
+   }
+}
+
+void IctMssEntry_MarkM5FvgUsed(const string sym, const ulong fvgId)
+{
+   if(fvgId == 0)
+      return;
+   const int idx = IctConfirmFvg_FindById(fvgId);
+   if(idx < 0)
+      return;
+   g_ictConfirmFvgZones[idx].state = ICT_FVG_USED;
+   if(g_ictConfirmFvgZones[idx].fvgUsedTime == 0)
+      g_ictConfirmFvgZones[idx].fvgUsedTime = iTime(sym, InpConfirmTf, 0);
+}
+
+void IctMss_OnEodCancel(const string sym, const ulong ticket)
+{
+   const ulong m5Id = g_ictLowTf.mss.m5FvgId;
+   const ulong h1Id = g_ictLowTf.mss.h1FvgId;
+
+   if(ticket > 0 && OrderSelect(ticket))
+      g_ictMssTrade.OrderDelete(ticket);
+
+   IctMss_ResetState();
+   g_ictLowTf.mss.displayReason = StringFormat(
+      "EOD cancel pending #%I64u | H1 #%I64u — reset, chờ phiên mới",
+      ticket, h1Id);
+
+   if(InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] EOD cancel limit #%I64u | H1 #%I64u | M5 #%I64u | reset → WAIT_FVG_TOUCH",
+                  ticket, h1Id, m5Id);
+}
+
+void IctMssEntry_CheckEodCancel(const string sym)
+{
+   if(!InpMssCancelPendingEod)
+      return;
+   if(g_ictLowTf.mss.pendingTicket == 0)
+      return;
+   if(IctMssEntry_HasOpenPositionMagic(sym))
+      return;
+
+   const ulong ticket = g_ictLowTf.mss.pendingTicket;
+   if(!OrderSelect(ticket))
+   {
+      g_ictLowTf.mss.pendingTicket = 0;
+      return;
+   }
+
+   MqlDateTime mdt;
+   TimeToStruct(TimeCurrent(), mdt);
+   const int nowMinutes = mdt.hour * 60 + mdt.min;
+   const int eodMinutes = InpMssEodHour * 60 + InpMssEodMinute;
+   if(nowMinutes < eodMinutes)
+      return;
+
+   MqlDateTime d0;
+   d0.year = mdt.year;
+   d0.mon  = mdt.mon;
+   d0.day  = mdt.day;
+   d0.hour = 0;
+   d0.min  = 0;
+   d0.sec  = 0;
+   const datetime dayStart = StructToTime(d0);
+
+   static datetime s_lastEodHandledDate = 0;
+   if(s_lastEodHandledDate == dayStart)
+      return;
+   s_lastEodHandledDate = dayStart;
+
+   IctMss_OnEodCancel(sym, ticket);
+}
+
+void IctMss_OnPositionClosed(const string sym, const long reason, const double netProfit)
+{
+   const ulong m5Id = g_ictLowTf.mss.m5FvgId;
+   const ulong h1Id = g_ictLowTf.mss.h1FvgId;
+   const string rt  = IctMssEntry_DealReasonText(reason);
+
+   IctMssEntry_MarkM5FvgUsed(sym, m5Id);
+
+   IctMss_ResetState();
+   g_ictLowTf.mss.displayReason = StringFormat(
+      "Đóng %s (net %.2f) | M5 FVG #%I64u → Used | chờ POI mới",
+      rt, netProfit, m5Id);
+
+   if(InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] Close (%s, net=%.2f) | H1 #%I64u | M5 #%I64u → Used | reset → WAIT_FVG_TOUCH",
+                  rt, netProfit, h1Id, m5Id);
 }
 
 bool IctMssEntry_CancelTicket(const ulong ticket)
@@ -216,6 +326,18 @@ void IctMssEntry_Init()
 
 void IctMssEntry_Update(const string sym)
 {
+   static bool s_hadPosition = false;
+   const bool nowPosition = IctMssEntry_HasOpenPositionMagic(sym);
+
+   if(s_hadPosition && !nowPosition && g_ictLowTf.mss.phase != ICT_MSS_IDLE)
+   {
+      // Fallback nếu OnTradeTransaction miss (reload, disconnect, …)
+      IctMss_OnPositionClosed(sym, -1L, 0.0);
+   }
+   s_hadPosition = nowPosition;
+
+   IctMssEntry_CheckEodCancel(sym);
+
    if(g_ictLowTf.mss.phase == ICT_MSS_IDLE && g_ictLowTf.mss.pendingTicket > 0)
    {
       IctMssEntry_CancelTicket(g_ictLowTf.mss.pendingTicket);
