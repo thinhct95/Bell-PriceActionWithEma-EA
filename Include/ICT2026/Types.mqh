@@ -225,6 +225,7 @@ struct IctMssState
    double               slSwingPrice;
    bool                 chochLocked;
    ulong                pendingTicket;
+   datetime             pendingPlacedTime;
    double               pendingEntry;
    double               pendingSl;
    double               pendingTp;
@@ -252,10 +253,11 @@ struct IctMssState
       m5FvgTime     = 0;
       slSwingPrice  = 0.0;
       chochLocked   = false;
-      pendingTicket = 0;
-      pendingEntry  = 0.0;
-      pendingSl     = 0.0;
-      pendingTp     = 0.0;
+      pendingTicket     = 0;
+      pendingPlacedTime = 0;
+      pendingEntry      = 0.0;
+      pendingSl         = 0.0;
+      pendingTp         = 0.0;
       liveL0Price   = 0.0;
       liveH0Price   = 0.0;
       liveL0Time    = 0;

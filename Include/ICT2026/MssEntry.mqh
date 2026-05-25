@@ -55,22 +55,6 @@ double IctMssEntry_VolumeForRisk(const string sym, const bool isBuy,
    return riskMoney / lossPerLot;
 }
 
-double IctMssEntry_Atr(const string sym, const ENUM_TIMEFRAMES tf, const int period)
-{
-   const int h = iATR(sym, tf, period);
-   if(h == INVALID_HANDLE)
-      return 0.0;
-   double buf[];
-   ArraySetAsSeries(buf, true);
-   if(CopyBuffer(h, 0, 1, 1, buf) != 1)
-   {
-      IndicatorRelease(h);
-      return 0.0;
-   }
-   IndicatorRelease(h);
-   return buf[0];
-}
-
 double IctMssEntry_LimitPrice(const IctFvgZone &zone)
 {
    if(zone.side == ICT_FVG_BULL)
@@ -81,13 +65,18 @@ double IctMssEntry_LimitPrice(const IctFvgZone &zone)
 }
 
 bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
-                               double &entryOut, double &slOut, double &tpOut)
+                               double &entryOut, double &slOut, double &tpOut,
+                               string &reasonOut)
 {
    entryOut = slOut = tpOut = 0.0;
+   reasonOut = "";
 
    entryOut = IctMssEntry_LimitPrice(m5Zone);
    if(entryOut <= 0.0)
+   {
+      reasonOut = "M5 FVG side không xác định";
       return false;
+   }
 
    const bool isBuy = (m5Zone.side == ICT_FVG_BULL);
    const ENUM_ICT_BIAS bias = isBuy ? ICT_BIAS_BULL : ICT_BIAS_BEAR;
@@ -100,26 +89,22 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
       if(g_ictLowTf.mss.slSwingPrice > 0.0)
          swingSl = g_ictLowTf.mss.slSwingPrice;
       else
+      {
+         reasonOut = "Chưa có swing H0/L0 M5 cho SL";
          return false;
+      }
    }
 
-   // SL dùng ATR M5 (sát swing M5, không quá rộng để giữ risk thấp + RR đạt minRR)
-   // TP dùng ATR H1 (trung bình sóng H1 đang đánh, buffer rõ ràng trên chart)
-   double atrSl = IctMssEntry_Atr(sym, InpMssSlAtrTf, InpMssBufferAtrPeriod);
-   if(atrSl <= 0.0)
-      atrSl = IctMssEntry_Atr(sym, InpConfirmTf, InpFvgAtrPeriod);
-   double atrTp = IctMssEntry_Atr(sym, InpMssTpAtrTf, InpMssBufferAtrPeriod);
-   if(atrTp <= 0.0)
-      atrTp = atrSl;
-
-   // SL: cộng spread (stop trigger theo ask/bid — bù để khỏi bị quét sớm)
-   // TP: trừ 2×spread (TP gần entry hơn để dễ khớp — không cần giá hit chính xác iL0/iH0)
+   // Buffer SL/TP thuần spread — ổn định, không lệ thuộc ATR động
+   //   SL = swing + InpMssSlSpreadMult × spread (cộng ra ngoài đỉnh/đáy)
+   //   TP = iL0/iH0 ± InpMssTpSpreadMult × spread (chốt trước vùng cản để dễ khớp)
    const double spreadNow = MathMax(0.0,
                             SymbolInfoDouble(sym, SYMBOL_ASK) -
                             SymbolInfoDouble(sym, SYMBOL_BID));
+   const double spreadUnit = (spreadNow > 0.0) ? spreadNow : _Point;
 
-   const double bufSl = ((atrSl > 0.0) ? atrSl * InpMssSlAtrMult : 100.0 * _Point) + spreadNow;
-   const double bufTp = ((atrTp > 0.0) ? atrTp * InpMssTpAtrBuffer : 50.0 * _Point) + 2.0 * spreadNow;
+   const double bufSl = InpMssSlSpreadMult * spreadUnit;
+   const double bufTp = InpMssTpSpreadMult * spreadUnit;
    const double minRR = MathMax(1.0, InpMssMinRR);
 
    // ── TP target = iL0 (BEAR) / iH0 (BULL): sóng H1, m5 chỉ để entry
@@ -131,47 +116,54 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
    else if(!isBuy && iSw.hasL0)
       tpTarget = iSw.l0.price;
 
+   // ── Logic TP (1 ngưỡng duy nhất):
+   //   RR(TP@iL0/iH0) > InpMssMinRR (= 2.0) → dùng TP tại iL0/iH0 (mục tiêu sóng H1)
+   //   Ngược lại (RR ≤ 2.0 hoặc iL0/iH0 không khả dụng) → TP cố định = entry ± risk × InpMssMinRR (= 2R)
    if(isBuy)
    {
       slOut = swingSl - bufSl;
       const double risk = entryOut - slOut;
       if(risk <= _Point)
-         return false;
-
-      if(tpTarget > 0.0 && tpTarget > entryOut + bufTp + _Point)
-         tpOut = tpTarget - bufTp;
-      else
-         tpOut = entryOut + risk * minRR;  // fallback nếu iH0 không có hoặc quá gần
-
-      const double rrAchieved = (tpOut - entryOut) / risk;
-      if(rrAchieved < minRR - 0.01)
       {
-         g_ictLowTf.mss.displayReason = StringFormat(
-            "RR=%.2f < min %.2f (entry=%.2f SL=%.2f TP=%.2f) — chốt iH0 không đủ",
-            rrAchieved, minRR, entryOut, slOut, tpOut);
+         reasonOut = StringFormat("Risk≤0 (SL %.5f ≥ entry %.5f)", slOut, entryOut);
          return false;
       }
+
+      double tpAtIH0 = 0.0;
+      double rrAtIH0 = 0.0;
+      if(tpTarget > 0.0 && tpTarget > entryOut + bufTp + _Point)
+      {
+         tpAtIH0 = tpTarget - bufTp;
+         rrAtIH0 = (tpAtIH0 - entryOut) / risk;
+      }
+
+      if(rrAtIH0 > minRR)
+         tpOut = tpAtIH0;
+      else
+         tpOut = entryOut + risk * minRR;
    }
    else
    {
       slOut = swingSl + bufSl;
       const double risk = slOut - entryOut;
       if(risk <= _Point)
-         return false;
-
-      if(tpTarget > 0.0 && tpTarget < entryOut - bufTp - _Point)
-         tpOut = tpTarget + bufTp;
-      else
-         tpOut = entryOut - risk * minRR;  // fallback nếu iL0 không có hoặc quá gần
-
-      const double rrAchieved = (entryOut - tpOut) / risk;
-      if(rrAchieved < minRR - 0.01)
       {
-         g_ictLowTf.mss.displayReason = StringFormat(
-            "RR=%.2f < min %.2f (entry=%.2f SL=%.2f TP=%.2f) — chốt iL0 không đủ",
-            rrAchieved, minRR, entryOut, slOut, tpOut);
+         reasonOut = StringFormat("Risk≤0 (SL %.5f ≤ entry %.5f)", slOut, entryOut);
          return false;
       }
+
+      double tpAtIL0 = 0.0;
+      double rrAtIL0 = 0.0;
+      if(tpTarget > 0.0 && tpTarget < entryOut - bufTp - _Point)
+      {
+         tpAtIL0 = tpTarget + bufTp;
+         rrAtIL0 = (entryOut - tpAtIL0) / risk;
+      }
+
+      if(rrAtIL0 > minRR)
+         tpOut = tpAtIL0;
+      else
+         tpOut = entryOut - risk * minRR;
    }
 
    entryOut = IctMssEntry_NormalizePrice(sym, entryOut);
@@ -179,9 +171,17 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
    tpOut    = IctMssEntry_NormalizePrice(sym, tpOut);
 
    if(isBuy && (slOut >= entryOut - _Point || tpOut <= entryOut + _Point))
+   {
+      reasonOut = StringFormat("SL/TP sai phía (BUY entry=%.5f SL=%.5f TP=%.5f)",
+                               entryOut, slOut, tpOut);
       return false;
+   }
    if(!isBuy && (slOut <= entryOut + _Point || tpOut >= entryOut - _Point))
+   {
+      reasonOut = StringFormat("SL/TP sai phía (SELL entry=%.5f SL=%.5f TP=%.5f)",
+                               entryOut, slOut, tpOut);
       return false;
+   }
 
    return true;
 }
@@ -267,6 +267,59 @@ void IctMss_OnEodCancel(const string sym, const ulong ticket)
                   ticket, h1Id, m5Id);
 }
 
+void IctMss_OnPendingTimeout(const string sym, const ulong ticket, const int hours)
+{
+   const ulong m5Id = g_ictLowTf.mss.m5FvgId;
+   const ulong h1Id = g_ictLowTf.mss.h1FvgId;
+
+   if(ticket > 0 && OrderSelect(ticket))
+      g_ictMssTrade.OrderDelete(ticket);
+
+   IctMssEntry_MarkM5FvgUsed(sym, m5Id);
+   IctMss_ResetState();
+
+   // Guard giống OnPositionClosed: chỉ accept H1 FVG có touch sau timeout
+   g_ictMssAfterCloseGuard = TimeCurrent();
+
+   g_ictLowTf.mss.displayReason = StringFormat(
+      "Timeout %dh pending #%I64u | M5 FVG #%I64u → Used | chờ touch FVG mới",
+      hours, ticket, m5Id);
+
+   if(InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] Pending timeout %dh #%I64u | H1 #%I64u | M5 #%I64u → Used | guard=%s | reset → WAIT_FVG_TOUCH",
+                  hours, ticket, h1Id, m5Id,
+                  TimeToString(g_ictMssAfterCloseGuard, TIME_DATE | TIME_MINUTES));
+}
+
+void IctMssEntry_CheckPendingTimeout(const string sym)
+{
+   if(InpMssPendingExpireHours <= 0)
+      return;
+   if(g_ictLowTf.mss.pendingTicket == 0)
+      return;
+   if(g_ictLowTf.mss.pendingPlacedTime == 0)
+      return;
+   if(IctMssEntry_HasOpenPositionMagic(sym))
+      return;
+
+   const ulong ticket = g_ictLowTf.mss.pendingTicket;
+   if(!OrderSelect(ticket))
+   {
+      // Pending đã biến mất (broker expire / cancel manual) mà chưa thành position
+      // → vẫn coi như timeout, reset state để chờ FVG mới
+      IctMss_OnPendingTimeout(sym, 0, InpMssPendingExpireHours);
+      return;
+   }
+
+   const datetime placed = g_ictLowTf.mss.pendingPlacedTime;
+   const int elapsedSec  = (int)(TimeCurrent() - placed);
+   const int timeoutSec  = InpMssPendingExpireHours * 3600;
+   if(elapsedSec < timeoutSec)
+      return;
+
+   IctMss_OnPendingTimeout(sym, ticket, InpMssPendingExpireHours);
+}
+
 void IctMssEntry_CheckEodCancel(const string sym)
 {
    if(!InpMssCancelPendingEod)
@@ -316,13 +369,19 @@ void IctMss_OnPositionClosed(const string sym, const long reason, const double n
    IctMssEntry_MarkM5FvgUsed(sym, m5Id);
 
    IctMss_ResetState();
+
+   // Guard: chặn pipeline pick H1 FVG có touch trước thời điểm này.
+   // Phải đợi touch mới (FVG mới hoặc re-touch) thì mới setup MSS + entry mới.
+   g_ictMssAfterCloseGuard = TimeCurrent();
+
    g_ictLowTf.mss.displayReason = StringFormat(
-      "Đóng %s (net %.2f) | M5 FVG #%I64u → Used | chờ POI mới",
+      "Đóng %s (net %.2f) | M5 FVG #%I64u → Used | chờ touch FVG mới",
       rt, netProfit, m5Id);
 
    if(InpMssLogJournal)
-      PrintFormat("[ICT2026/MSS] Close (%s, net=%.2f) | H1 #%I64u | M5 #%I64u → Used | reset → WAIT_FVG_TOUCH",
-                  rt, netProfit, h1Id, m5Id);
+      PrintFormat("[ICT2026/MSS] Close (%s, net=%.2f) | H1 #%I64u | M5 #%I64u → Used | guard=%s | reset → WAIT_FVG_TOUCH",
+                  rt, netProfit, h1Id, m5Id,
+                  TimeToString(g_ictMssAfterCloseGuard, TIME_DATE | TIME_MINUTES));
 }
 
 bool IctMssEntry_CancelTicket(const ulong ticket)
@@ -387,6 +446,7 @@ void IctMssEntry_Update(const string sym)
    s_hadPosition = nowPosition;
 
    IctMssEntry_CheckEodCancel(sym);
+   IctMssEntry_CheckPendingTimeout(sym);
 
    if(g_ictLowTf.mss.phase == ICT_MSS_IDLE && g_ictLowTf.mss.pendingTicket > 0)
    {
@@ -437,10 +497,12 @@ void IctMssEntry_Update(const string sym)
 
    const IctFvgZone m5 = g_ictConfirmFvgZones[mIdx];
    double entry = 0.0, sl = 0.0, tp = 0.0;
-   if(!IctMssEntry_ComputeLevels(sym, m5, entry, sl, tp))
+   string lvlReason = "";
+   if(!IctMssEntry_ComputeLevels(sym, m5, entry, sl, tp, lvlReason))
    {
-      g_ictLowTf.mss.displayReason = StringFormat("%s | chờ H0/L0 M5 cho SL",
-                                      IctMssPhaseText(g_ictLowTf.mss.phase));
+      g_ictLowTf.mss.displayReason = StringFormat("%s | %s",
+                                      IctMssPhaseText(g_ictLowTf.mss.phase),
+                                      lvlReason);
       IctMss_JournalEntryBlock(g_ictLowTf.mss.displayReason);
       return;
    }
@@ -483,10 +545,11 @@ void IctMssEntry_Update(const string sym)
       return;
    }
 
-   g_ictLowTf.mss.pendingTicket = ticket;
-   g_ictLowTf.mss.pendingEntry  = entry;
-   g_ictLowTf.mss.pendingSl     = sl;
-   g_ictLowTf.mss.pendingTp     = tp;
+   g_ictLowTf.mss.pendingTicket     = ticket;
+   g_ictLowTf.mss.pendingPlacedTime = TimeCurrent();
+   g_ictLowTf.mss.pendingEntry      = entry;
+   g_ictLowTf.mss.pendingSl         = sl;
+   g_ictLowTf.mss.pendingTp         = tp;
    g_ictLowTf.mss.displayReason = StringFormat("Sell/Buy limit %.2f | SL %.2f (H0/L0) | TP %.2f RR%.1f",
                                    entry, sl, tp, rr);
 }

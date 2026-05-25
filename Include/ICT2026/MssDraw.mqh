@@ -92,6 +92,8 @@ void IctMssDraw_ResolveChoch(const IctMssState &mss,
 
 void IctMssDraw_Render(const string sym)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(!InpDrawMssChoch)
    {
       IctMssDraw_DeleteAll();

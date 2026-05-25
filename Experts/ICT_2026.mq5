@@ -3,8 +3,8 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.151"
-#property description "ICT2026 MSS | SL = swing + ATR + spread | TP = iL0/iH0 + ATR − 2×spread (dễ khớp)"
+#property version   "1.163"
+#property description "ICT2026 MSS | OnlyStatsMode: skip render + in stats mỗi lệnh close + tổng kết deinit"
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/DailyBias.mqh>
@@ -12,6 +12,7 @@
 #include <ICT2026/LowTfTrend.mqh>
 #include <ICT2026/Panel.mqh>
 #include <ICT2026/Draw.mqh>
+#include <ICT2026/Stats.mqh>
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -28,6 +29,12 @@ int OnInit()
       Print("[ICT2026] LowTF/FVG: chưa đủ dữ liệu ", EnumToString(InpFvgTf));
 
    IctMssStats_Recompute(_Symbol, InpMssMagic);
+
+   if(InpOnlyStatsMode)
+   {
+      PrintFormat("[ICT2026] OnlyStatsMode = ON — skip render/draw, chỉ in stats khi deinit");
+      return INIT_SUCCEEDED;
+   }
 
    if(biasOk || intraOk)
    {
@@ -49,6 +56,13 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   IctMssStats_Recompute(_Symbol, InpMssMagic);
+   PrintFormat("[ICT2026] === FINAL %s | %s ===",
+               IctMssStats_LineCounts(), IctMssStats_LinePerf());
+
+   if(InpOnlyStatsMode)
+      return;
+
    IctPanel_Clear();
    IctDraw_Clear();
    IctFvgDraw_DeleteAll();
@@ -71,6 +85,9 @@ void OnTick()
 
    IctLowTfTrend_TickRefresh(_Symbol);
 
+   if(InpOnlyStatsMode)
+      return;
+
    if(refresh || !panelBoot)
    {
       IctPanel_Render(_Symbol);
@@ -81,6 +98,8 @@ void OnTick()
 
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(id == CHARTEVENT_CHART_CHANGE)
    {
       IctPanel_Render(_Symbol);
@@ -117,6 +136,14 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 
    IctMss_OnPositionClosed(_Symbol, reason, net);
    IctMssStats_Recompute(_Symbol, InpMssMagic);
+
+   if(InpOnlyStatsMode)
+   {
+      PrintFormat("[ICT2026] %s | %s",
+                  IctMssStats_LineCounts(), IctMssStats_LinePerf());
+      return;
+   }
+
    IctEaState_Refresh(_Symbol);
    IctPanel_Render(_Symbol);
    IctMssDraw_Render(_Symbol);

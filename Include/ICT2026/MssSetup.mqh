@@ -10,6 +10,11 @@
 #include <ICT2026/StructureCore.mqh>
 #include <ICT2026/Swing.mqh>
 
+// Guard: sau khi 1 lệnh đóng (TP/SL/manual), pipeline KHÔNG được pick H1 FVG
+// nào có firstTouch trước thời điểm này. Phải đợi 1 touch mới (FVG mới hoặc
+// FVG cũ được re-touched) thì mới tiếp tục setup MSS + entry.
+datetime g_ictMssAfterCloseGuard = 0;
+
 string IctMssPhaseText(const ENUM_ICT_MSS_PHASE ph)
 {
    switch(ph)
@@ -141,6 +146,18 @@ datetime IctMss_GetFvgTouchTime(const string sym, IctFvgZone &h1)
 bool IctMss_HasFvgPriceTouch(const string sym, IctFvgZone &h1)
 {
    return (IctMss_GetFvgTouchTime(sym, h1) > 0);
+}
+
+// Touch hợp lệ cho POI mới = touch xảy ra SAU thời điểm lệnh trước đóng.
+// Tránh pick H1 FVG đã có firstTouch từ trước khi lệnh cũ TP/SL.
+bool IctMss_HasFreshFvgTouch(const string sym, IctFvgZone &h1)
+{
+   const datetime tTouch = IctMss_GetFvgTouchTime(sym, h1);
+   if(tTouch <= 0)
+      return false;
+   if(g_ictMssAfterCloseGuard > 0 && tTouch < g_ictMssAfterCloseGuard)
+      return false;
+   return true;
 }
 
 bool IctMss_HasH1FvgRetest(const string sym, IctFvgZone &h1)
@@ -741,14 +758,21 @@ void IctMss_Update(const string sym)
 
       g_ictLowTf.mss.h1FvgId = g_ictFvgZones[hIdx].id;
 
-      if(!IctMss_HasFvgPriceTouch(sym, g_ictFvgZones[hIdx]))
+      if(!IctMss_HasFreshFvgTouch(sym, g_ictFvgZones[hIdx]))
       {
          const double px = SymbolInfoDouble(sym, SYMBOL_BID);
          const double dist = IctMss_DistancePriceToFvg(px, g_ictFvgZones[hIdx]);
-         g_ictLowTf.mss.displayReason = StringFormat(
-            "POI #%I64u [%.0f–%.0f] dist %.0f pts — chờ chạm",
-            g_ictFvgZones[hIdx].id,
-            g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper, dist / _Point);
+         const datetime tTouch = IctMss_GetFvgTouchTime(sym, g_ictFvgZones[hIdx]);
+         const bool staleTouch = (tTouch > 0 && g_ictMssAfterCloseGuard > 0 &&
+                                  tTouch < g_ictMssAfterCloseGuard);
+         g_ictLowTf.mss.displayReason = staleTouch ?
+            StringFormat("POI #%I64u [%.0f–%.0f] — chờ touch mới (sau lệnh trước)",
+                         g_ictFvgZones[hIdx].id,
+                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper) :
+            StringFormat("POI #%I64u [%.0f–%.0f] dist %.0f pts — chờ chạm",
+                         g_ictFvgZones[hIdx].id,
+                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
+                         dist / _Point);
          return;
       }
 

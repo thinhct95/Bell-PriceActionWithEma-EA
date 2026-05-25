@@ -582,6 +582,14 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 - Hiển thị 2 dòng cuối panel: counts + WR/Ravg/Net
 - Recompute trên `OnInit` và sau mỗi `OnTradeTransaction` close
 
+### v1.160 — Pending timeout 4h → reset chờ FVG mới
+
+- Input: `InpMssPendingExpireHours = 4` (mặc định, 0 = không timeout)
+- Tracked `pendingPlacedTime` trong `IctMssState`
+- Mỗi tick (`IctMssEntry_CheckPendingTimeout`): nếu `TimeCurrent() - pendingPlacedTime ≥ N×3600s` hoặc order biến mất (broker expire) → `OrderDelete` + `MarkM5FvgUsed` + `IctMss_ResetState` + set `g_ictMssAfterCloseGuard`
+- Hành vi giống TP/SL close: reset về `WAIT_FVG_TOUCH`, chỉ accept H1 FVG có touch sau timeout
+- Bỏ qua nếu đang có position magic (chỉ tác động lên pending)
+
 ### v1.140 — Hủy pending cuối phiên Mỹ (EOD)
 
 - Input: `InpMssCancelPendingEod` (true), `InpMssEodHour` (23), `InpMssEodMinute` (0) — **server time**
@@ -721,7 +729,7 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 ### v1.117 — MSS entry: SL = H0/L0 M5, TP min 2R
 
 - Sell limit @ **lower** M5 FVG | Buy limit @ **upper**
-- SL: trên **H0** M5 (bear) / dưới **L0** M5 (bull) + `InpMssSlAtrMult`×ATR
+- SL: trên **max(H0,H1)** M5 (bear) / dưới **min(L0,L1)** M5 (bull) + `InpMssSlSpreadMult`×spread
 - TP: tối thiểu `InpMssMinRR` (mặc định 2R), không phụ thuộc swing H1
 
 ### v1.116 — MSS limit entry: FVG edge, SL swing CHoCH, TP trước iH0/iL0

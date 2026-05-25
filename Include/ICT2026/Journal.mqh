@@ -22,6 +22,8 @@ bool IctMss_IsEntryReadyReason(const string reason)
 
 void IctMss_JournalPipeline(const string reason)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(!InpMssLogJournal)
       return;
    if(IctMss_IsEntryReadyReason(reason))
@@ -35,6 +37,8 @@ void IctMss_JournalPipeline(const string reason)
 
 void IctMss_JournalEntryBlock(const string reason)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(!InpMssLogJournal)
       return;
    if(reason == g_ictMssEntryJournalLast)

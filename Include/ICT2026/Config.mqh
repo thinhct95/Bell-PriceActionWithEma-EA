@@ -19,6 +19,9 @@ input int             InpIntradaySwingRange   = 2;           // Pivot intraday
 input int             InpIntradaySwingLookback = 120;        // Lookback quét pivot H1
 input int             InpIntradayRecentBars    = 80;         // Chỉ dùng pivot trong N bar gần nhất
 
+input group "══ Test mode ══"
+input bool            InpOnlyStatsMode    = false;     // true = skip toàn bộ render/draw + journal verbose (chạy tester nhanh, chỉ in stats cuối)
+
 input group "══ Hiển thị ══"
 input bool            InpDrawPanel        = true;      // Panel bias góc trên trái
 input int             InpPanelX           = 12;
@@ -77,13 +80,10 @@ input group "══ MSS Trade ══"
 input bool            InpMssTradeEnabled      = true;        // Đặt lệnh limit MSS
 input ulong           InpMssMagic             = 202604;      // Magic number
 input double          InpMssRiskPct           = 1.0;         // R % balance mỗi lệnh
-input ENUM_TIMEFRAMES InpMssSlAtrTf             = PERIOD_M5;   // TF tính ATR cho buffer SL
-input ENUM_TIMEFRAMES InpMssTpAtrTf             = PERIOD_M5;   // TF tính ATR cho buffer TP
-input int             InpMssBufferAtrPeriod     = 14;          // Period ATR cho buffer SL/TP
-input double          InpMssSlAtrMult           = 2.0;         // SL: buffer ngoài max(H0,H1)/min(L0,L1) (× ATR M5) — tránh spike đỉnh
-input double          InpMssMinRR              = 1.5;         // TP tối thiểu (× risk entry→SL) — block trade nếu iL0/iH0 không đạt
-input double          InpMssTpAtrBuffer         = 2.0;         // TP buffer trước iL0/iH0 (× ATR M5) — chốt trước vùng cản
-input int             InpMssPendingExpireHours  = 24;         // Hết hạn pending (giờ, 0=không)
+input int             InpMssSlSpreadMult        = 8;           // SL buffer = N × spread (cộng ra ngoài max(H0,H1)/min(L0,L1))
+input int             InpMssTpSpreadMult        = 16;          // TP buffer = N × spread (chốt trước iL0/iH0 để dễ khớp)
+input double          InpMssMinRR              = 2.0;         // Ngưỡng RR: nếu TP@iL0/iH0 < ngưỡng → dùng TP cố định = entry ± risk × InpMssMinRR (= 2R), ngược lại TP tại iL0/iH0
+input int             InpMssPendingExpireHours  = 4;          // Hết hạn pending limit (giờ): hủy + reset → WAIT_FVG_TOUCH (0=không timeout)
 input bool            InpMssOnePosition         = true;        // Một position/pending MSS
 input bool            InpMssCancelPendingEod    = true;        // Hủy pending cuối phiên Mỹ (nếu chưa khớp)
 input int             InpMssEodHour             = 23;          // Giờ EOD theo SERVER time (24h, vd EET broker = 23h ≈ 16:00 ET DST)

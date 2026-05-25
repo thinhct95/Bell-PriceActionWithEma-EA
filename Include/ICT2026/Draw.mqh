@@ -96,6 +96,8 @@ bool IctDraw_BuildConfirmSwings(const string sym, IctSwingSet &sw)
 
 void IctDraw_Render(const string sym)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(!InpDrawChartLabels)
    {
       IctDraw_Clear();

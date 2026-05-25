@@ -103,6 +103,8 @@ void IctPanel_SetLine(const long ch, const int index, const int yOffset,
 
 void IctPanel_Render(const string sym)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(!InpDrawPanel)
    {
       IctPanel_Clear();

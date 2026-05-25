@@ -59,6 +59,8 @@ void IctFvgDraw_HLine(const string name, const datetime t1, const datetime t2,
 
 void IctFvgDraw_Render(const string sym)
 {
+   if(InpOnlyStatsMode)
+      return;
    if(!InpDrawFvgZones)
    {
       IctFvgDraw_DeleteAll();
