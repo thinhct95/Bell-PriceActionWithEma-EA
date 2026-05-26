@@ -210,6 +210,28 @@ bool IctFvg_OverlapsDiscount(const IctFvgZone &zone)
    return (zone.lower < zone.pdEq - _Point && zone.upper > zone.pdLow - _Point);
 }
 
+// % chiều cao FVG nằm trên equilibrium (Premium portion)
+double IctFvg_PremiumOverlapPct(const IctFvgZone &zone)
+{
+   const double h = zone.upper - zone.lower;
+   if(h <= _Point || zone.pdEq <= 0.0)
+      return 0.0;
+   const double premLo  = MathMax(zone.lower, zone.pdEq);
+   const double portion = MathMax(0.0, zone.upper - premLo);
+   return 100.0 * portion / h;
+}
+
+// % chiều cao FVG nằm dưới equilibrium (Discount portion)
+double IctFvg_DiscountOverlapPct(const IctFvgZone &zone)
+{
+   const double h = zone.upper - zone.lower;
+   if(h <= _Point || zone.pdEq <= 0.0)
+      return 0.0;
+   const double discHi  = MathMin(zone.upper, zone.pdEq);
+   const double portion = MathMax(0.0, discHi - zone.lower);
+   return 100.0 * portion / h;
+}
+
 ENUM_ICT_PD_ZONE IctFvg_ComputeRepPd(const IctFvgZone &zone)
 {
    if(zone.pdEq <= 0.0)
@@ -436,11 +458,42 @@ bool IctFvg_IsEntryRepPd(const IctFvgZone &zone)
 {
    if(zone.pdEq <= 0.0)
       return false;
+   const double minPct = MathMax(0.0, MathMin(100.0, InpFvgPdMinOverlapPct));
+   double pct = 0.0;
    if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
-      return IctFvg_OverlapsPremium(zone);
-   if(g_ictDailyBias.bias == ICT_BIAS_BULL)
-      return IctFvg_OverlapsDiscount(zone);
-   return false;
+      pct = IctFvg_PremiumOverlapPct(zone);
+   else if(g_ictDailyBias.bias == ICT_BIAS_BULL)
+      pct = IctFvg_DiscountOverlapPct(zone);
+   else
+      return false;
+
+   // minPct = 0 → chấp nhận bất kỳ overlap > 0
+   if(minPct <= 0.0)
+      return pct > 1e-9;
+   return pct >= minPct - 1e-9;
+}
+
+// Touch threshold cho POI:
+//  - FVG nằm hẳn trong Premium (bear) / Discount (bull) → 25%
+//  - FVG straddle equilibrium (mixed) → 50%
+//  - Trả về 100 nếu FVG sai vùng (không thể là POI)
+double IctFvg_RequiredTouchFillPct(const IctFvgZone &zone)
+{
+   if(zone.pdEq <= 0.0)
+      return 100.0;
+   double pct = 0.0;
+   if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
+      pct = IctFvg_PremiumOverlapPct(zone);
+   else if(g_ictDailyBias.bias == ICT_BIAS_BULL)
+      pct = IctFvg_DiscountOverlapPct(zone);
+   else
+      return 100.0;
+
+   if(pct >= 100.0 - 1e-6)
+      return InpFvgTouchFillPure;   // 100% trong vùng đúng → threshold thấp
+   if(pct > 1e-9)
+      return InpFvgTouchFillMixed;  // Mixed → threshold cao
+   return 100.0;                     // 0% trong vùng đúng → không qualify
 }
 
 bool IctFvg_HasFillAtLeast(const IctFvgZone &zone, const double pct)

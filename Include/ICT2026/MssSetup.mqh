@@ -148,14 +148,21 @@ bool IctMss_HasFvgPriceTouch(const string sym, IctFvgZone &h1)
    return (IctMss_GetFvgTouchTime(sym, h1) > 0);
 }
 
-// Touch hợp lệ cho POI mới = touch xảy ra SAU thời điểm lệnh trước đóng.
-// Tránh pick H1 FVG đã có firstTouch từ trước khi lệnh cũ TP/SL.
+// Touch hợp lệ cho POI mới = touch xảy ra SAU thời điểm lệnh trước đóng + đạt FILL threshold theo PD position.
+// - FVG nằm hẳn trong vùng đúng chiều → InpFvgTouchFillPure (25%)
+// - FVG straddle equilibrium             → InpFvgTouchFillMixed (50%)
 bool IctMss_HasFreshFvgTouch(const string sym, IctFvgZone &h1)
 {
    const datetime tTouch = IctMss_GetFvgTouchTime(sym, h1);
    if(tTouch <= 0)
       return false;
    if(g_ictMssAfterCloseGuard > 0 && tTouch < g_ictMssAfterCloseGuard)
+      return false;
+
+   const double requiredPct = IctFvg_RequiredTouchFillPct(h1);
+   if(requiredPct >= 100.0 - 1e-6)
+      return false;
+   if(h1.maxFillRatio * 100.0 < requiredPct - 1e-9)
       return false;
    return true;
 }
@@ -393,20 +400,24 @@ bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
    if(!IctMss_UpdateLiveM5Swings(sym, bias, tTouch))
       return false;
 
-   if(g_ictLowTf.mss.liveL0Time < tTouch && g_ictLowTf.mss.liveH0Time < tTouch)
-      return false;
-
    datetime breakT = 0;
 
    if(bias == ICT_BIAS_BEAR)
    {
+      // Pullback bullish phải có CẤU TRÚC ĐẦY ĐỦ: 2 đỉnh (H0 & H1) đều SAU touch
+      //   → tránh case mới có 1 đỉnh từ pullback mới, H1 còn dính sóng cũ
+      if(g_ictLowTf.mss.liveH1Price <= 0.0 ||
+         g_ictLowTf.mss.liveH0Time < tTouch ||
+         g_ictLowTf.mss.liveH1Time < tTouch)
+         return false;
+
       if(!IctMss_FindMssBreakBar(sym, tf, g_ictLowTf.mss.liveL0Price,
                                  g_ictLowTf.mss.liveL0Time, true, breakT))
          return false;
       if(breakT < tTouch)
          return false;
 
-      // SL trên cao nhất giữa H0 và H1 (cap toàn pullback bull) + buffer ATR (cộng ở MssEntry)
+      // SL trên cao nhất giữa H0 và H1 (cap toàn pullback bull) + buffer (cộng ở MssEntry)
       double slSwingHi = g_ictLowTf.mss.liveH0Price;
       if(g_ictLowTf.mss.liveH1Price > slSwingHi)
          slSwingHi = g_ictLowTf.mss.liveH1Price;
@@ -417,13 +428,20 @@ bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
    }
    else if(bias == ICT_BIAS_BULL)
    {
+      // Pullback bearish phải có CẤU TRÚC ĐẦY ĐỦ: 2 đáy (L0 & L1) đều SAU touch
+      //   → tránh case mới có 1 đáy từ pullback mới, L1 còn dính sóng cũ
+      if(g_ictLowTf.mss.liveL1Price <= 0.0 ||
+         g_ictLowTf.mss.liveL0Time < tTouch ||
+         g_ictLowTf.mss.liveL1Time < tTouch)
+         return false;
+
       if(!IctMss_FindMssBreakBar(sym, tf, g_ictLowTf.mss.liveH0Price,
                                  g_ictLowTf.mss.liveH0Time, false, breakT))
          return false;
       if(breakT < tTouch)
          return false;
 
-      // SL dưới thấp nhất giữa L0 và L1 (đáy toàn pullback bear) + buffer ATR (trừ ở MssEntry)
+      // SL dưới thấp nhất giữa L0 và L1 (đáy toàn pullback bear) + buffer (trừ ở MssEntry)
       double slSwingLo = g_ictLowTf.mss.liveL0Price;
       if(g_ictLowTf.mss.liveL1Price > 0.0 && g_ictLowTf.mss.liveL1Price < slSwingLo)
          slSwingLo = g_ictLowTf.mss.liveL1Price;
@@ -437,6 +455,7 @@ bool IctMss_TryLockMss(const string sym, const ENUM_TIMEFRAMES tf,
 
    g_ictLowTf.mss.chochTime   = breakT;
    g_ictLowTf.mss.chochLocked = true;
+   g_ictLowTf.mss.chochBias   = bias;
    return true;
 }
 
@@ -765,14 +784,25 @@ void IctMss_Update(const string sym)
          const datetime tTouch = IctMss_GetFvgTouchTime(sym, g_ictFvgZones[hIdx]);
          const bool staleTouch = (tTouch > 0 && g_ictMssAfterCloseGuard > 0 &&
                                   tTouch < g_ictMssAfterCloseGuard);
-         g_ictLowTf.mss.displayReason = staleTouch ?
-            StringFormat("POI #%I64u [%.0f–%.0f] — chờ touch mới (sau lệnh trước)",
-                         g_ictFvgZones[hIdx].id,
-                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper) :
-            StringFormat("POI #%I64u [%.0f–%.0f] dist %.0f pts — chờ chạm",
-                         g_ictFvgZones[hIdx].id,
-                         g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
-                         dist / _Point);
+         const double reqPct = IctFvg_RequiredTouchFillPct(g_ictFvgZones[hIdx]);
+         const double curPct = g_ictFvgZones[hIdx].maxFillRatio * 100.0;
+         if(staleTouch)
+            g_ictLowTf.mss.displayReason = StringFormat(
+               "POI #%I64u [%.0f–%.0f] — chờ touch mới (sau lệnh trước)",
+               g_ictFvgZones[hIdx].id,
+               g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper);
+         else if(tTouch > 0 && curPct < reqPct)
+            g_ictLowTf.mss.displayReason = StringFormat(
+               "POI #%I64u [%.0f–%.0f] fill %.0f%% / cần %.0f%% — chờ vào sâu hơn",
+               g_ictFvgZones[hIdx].id,
+               g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
+               curPct, reqPct);
+         else
+            g_ictLowTf.mss.displayReason = StringFormat(
+               "POI #%I64u [%.0f–%.0f] dist %.0f pts — chờ chạm",
+               g_ictFvgZones[hIdx].id,
+               g_ictFvgZones[hIdx].lower, g_ictFvgZones[hIdx].upper,
+               dist / _Point);
          return;
       }
 
@@ -816,14 +846,33 @@ void IctMss_Update(const string sym)
       const datetime tTouch = g_ictLowTf.mss.h1TouchTime;
       if(IctMss_UpdateLiveM5Swings(sym, g_ictDailyBias.bias, tTouch))
       {
-         if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
+         // Check cấu trúc pullback đầy đủ (2 đỉnh/đáy đều sau touch)
+         const bool fullStruct = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ?
+            (g_ictLowTf.mss.liveH1Price > 0.0 &&
+             g_ictLowTf.mss.liveH0Time >= tTouch &&
+             g_ictLowTf.mss.liveH1Time >= tTouch) :
+            (g_ictLowTf.mss.liveL1Price > 0.0 &&
+             g_ictLowTf.mss.liveL0Time >= tTouch &&
+             g_ictLowTf.mss.liveL1Time >= tTouch);
+
+         if(!fullStruct)
+         {
+            g_ictLowTf.mss.displayReason = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ?
+               "Chờ pullback đủ cấu trúc (2 đỉnh H0&H1 sau touch)" :
+               "Chờ pullback đủ cấu trúc (2 đáy L0&L1 sau touch)";
+         }
+         else if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
             g_ictLowTf.mss.displayReason = StringFormat(
-               "Chờ MSS↓ phá L0=%.2f | H0=%.2f (M5 bull)",
-               g_ictLowTf.mss.liveL0Price, g_ictLowTf.mss.liveH0Price);
+               "Chờ MSS↓ phá L0=%.2f | H0=%.2f H1=%.2f (M5 bull)",
+               g_ictLowTf.mss.liveL0Price,
+               g_ictLowTf.mss.liveH0Price,
+               g_ictLowTf.mss.liveH1Price);
          else
             g_ictLowTf.mss.displayReason = StringFormat(
-               "Chờ MSS↑ phá H0=%.2f | L0=%.2f (M5 bear)",
-               g_ictLowTf.mss.liveH0Price, g_ictLowTf.mss.liveL0Price);
+               "Chờ MSS↑ phá H0=%.2f | L0=%.2f L1=%.2f (M5 bear)",
+               g_ictLowTf.mss.liveH0Price,
+               g_ictLowTf.mss.liveL0Price,
+               g_ictLowTf.mss.liveL1Price);
       }
       else
          g_ictLowTf.mss.displayReason = "M5 trong FVG — chờ pivot L0/H0";

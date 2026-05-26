@@ -582,6 +582,19 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 - Hiển thị 2 dòng cuối panel: counts + WR/Ravg/Net
 - Recompute trên `OnInit` và sau mỗi `OnTradeTransaction` close
 
+### v1.164 — Entry chọn M5 FVG vs MSS keyLV theo SL gần nhất
+
+- **Bỏ yêu cầu phải có M5 FVG**: gating mở từ `phase >= ICT_MSS_CHOCH` (sau MSS lock) — không chờ M5_FVG
+- Thêm field `chochBias` trong `IctMssState` (lưu side BEAR/BULL khi `TryLockMss` thành công)
+- `IctMssEntry_ComputeLevels`: tính 2 candidate entries, chọn cái có risk = `|entry − SL|` nhỏ hơn:
+  - **A) M5 FVG limit** (nếu có): `IctMssEntry_LimitPrice(m5Zone)`
+  - **B) MSS keyLV**: `chochKeyLevel` (L0 phá cho BEAR, H0 phá cho BULL)
+- Lọc validity: limit phải đúng phía thị trường (`entry < ask` cho BUY, `entry > bid` cho SELL), risk > 0
+- Nếu có FVG nhưng entry@FVG cho risk lớn hơn entry@MSS → chọn MSS
+- Nếu chưa có FVG → chọn MSS ngay khi MSS lock
+- DisplayReason in nguồn entry: `"M5 FVG (risk X < MSS Y)"` hoặc `"MSS keyLV (risk X ≤ FVG Y)"` / `"MSS keyLV (no M5 FVG)"`
+- Trên mỗi tick: nếu candidate mới tốt hơn (M5 FVG xuất hiện sau MSS) → cancel limit cũ + replace
+
 ### v1.160 — Pending timeout 4h → reset chờ FVG mới
 
 - Input: `InpMssPendingExpireHours = 4` (mặc định, 0 = không timeout)

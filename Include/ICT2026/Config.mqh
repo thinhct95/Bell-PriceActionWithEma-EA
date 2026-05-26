@@ -52,6 +52,9 @@ input double          InpFvgMinGapATRPct      = 12.0;        // H1 only: gap t�
 input double          InpFvgMinGapPoints      = 0.0;         // H1 only: gap tối thiểu (giá)
 input double          InpFvgMinGapVsBarPct    = 25.0;        // H1 only: gap >= % range nến B (0=tắt)
 input double          InpFvgUsedFillPct       = 25.0;        // % lấp FVG → Used
+input double          InpFvgPdMinOverlapPct   = 0.0;         // POI filter: % chiều cao FVG nằm trong Premium/Discount (0=chấp nhận bất kỳ overlap > 0)
+input double          InpFvgTouchFillPure     = 25.0;        // Touch threshold khi FVG nằm hẳn trong vùng PD đúng chiều (bear→Premium, bull→Discount)
+input double          InpFvgTouchFillMixed    = 50.0;        // Touch threshold khi FVG straddle equilibrium (overlap cả Premium & Discount)
 input int             InpFvgExpireDays        = 3;           // Xóa Available sau N ngày
 input int             InpFvgMaxZones          = 24;          // Số FVG tối đa trên chart
 input bool            InpDrawFvgZones         = true;        // Vẽ FVG + Premium/Discount
@@ -83,6 +86,7 @@ input double          InpMssRiskPct           = 1.0;         // R % balance mỗ
 input int             InpMssSlSpreadMult        = 8;           // SL buffer = N × spread (cộng ra ngoài max(H0,H1)/min(L0,L1))
 input int             InpMssTpSpreadMult        = 16;          // TP buffer = N × spread (chốt trước iL0/iH0 để dễ khớp)
 input double          InpMssMinRR              = 2.0;         // Ngưỡng RR: nếu TP@iL0/iH0 < ngưỡng → dùng TP cố định = entry ± risk × InpMssMinRR (= 2R), ngược lại TP tại iL0/iH0
+input double          InpMssPartialClosePct    = 50.0;        // % volume chốt khi giá đạt swing iL0/iH0 (TP gồng xa hơn) — sau đó dời SL về BE (0=tắt)
 input int             InpMssPendingExpireHours  = 4;          // Hết hạn pending limit (giờ): hủy + reset → WAIT_FVG_TOUCH (0=không timeout)
 input bool            InpMssOnePosition         = true;        // Một position/pending MSS
 input bool            InpMssCancelPendingEod    = true;        // Hủy pending cuối phiên Mỹ (nếu chưa khớp)

@@ -3,8 +3,8 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.163"
-#property description "ICT2026 MSS | OnlyStatsMode: skip render + in stats mỗi lệnh close + tổng kết deinit"
+#property version   "1.168"
+#property description "ICT2026 MSS | Partial close 50% + SL→BE khi giá đạt swing iL0/iH0 (TP gồng xa hơn)"
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/DailyBias.mqh>
