@@ -1,10 +1,30 @@
 //+------------------------------------------------------------------+
-//| ICT_2026.mq5 — Daily Bias + Intraday Structure (H1)              |
-//| BOS = Continue | CHoCH = Reversal                                |
+//| ICT_2026.mq5 — Root EA (orchestrator only, no business logic)    |
+//+------------------------------------------------------------------+
+//| Layer pipeline (đọc từ trên xuống = TF cao xuống thấp):           |
+//|   D1   → DailyBias       — bias hôm nay (BULL/BEAR/RANGE/NONE)    |
+//|   H1   → IntradayStructure — H1 trend + IsAllowTrade              |
+//|   H1   → LowTfTrend      — orchestrator FVG + MSS pipeline        |
+//|           ├── Fvg          — detect/state/PD                      |
+//|           ├── ConfirmFvg   — M5 FVG pool                          |
+//|           ├── MssSetup     — phase machine + keylv lock           |
+//|           └── MssEntry     — order + partial + BE + timeout       |
+//|   UI   → Panel / Draw / FvgDraw / MssDraw + Stats                 |
+//|                                                                   |
+//| Trigger:                                                          |
+//|   OnInit              — init từng module, gọi Update force=true   |
+//|   OnTick              — orchestrator (xem README ▸ "Current      |
+//|                          architecture A.")                        |
+//|   OnTradeTransaction  — filter DEAL_ENTRY_OUT magic → call        |
+//|                          IctMss_OnPositionClosed (reset state)    |
+//|   OnDeinit            — clean up objects                          |
+//|                                                                   |
+//| Quy ước: file này KHÔNG được chứa business logic. Mọi rule đi vào|
+//| module tương ứng.                                                 |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.170"
-#property description "ICT2026 MSS | Pipeline gate=Bias, Entry gate=AllowTrade — track MSS cả khi intraday ngược, chỉ block entry"
+#property version   "1.187"
+#property description "ICT2026 MSS | strict body-break, PD-for-all-FVG, bias-aware touch, stale-limit cap"
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/DailyBias.mqh>

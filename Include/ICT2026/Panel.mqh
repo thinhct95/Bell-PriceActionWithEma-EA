@@ -1,6 +1,38 @@
 //+------------------------------------------------------------------+
-//| Panel.mqh — Daily Bias + Intraday (mỗi dòng = 1 OBJ_LABEL)         |
-//| Bias/Intraday: xanh = Up, đỏ = Down — cùng màu = canh trade       |
+//| Panel.mqh — overview panel góc trên trái (~10 dòng)              |
+//+------------------------------------------------------------------+
+//| Mỗi dòng = 1 OBJ_LABEL độc lập (OBJ_LABEL không hỗ trợ \n trong  |
+//| MT5). Stack dọc với spacing InpPanelLineSpacing px.               |
+//|                                                                   |
+//| Layout (top→bottom):                                              |
+//|   [CATEGORY] CODE                  ← EaState                     |
+//|   <state title>                                                   |
+//|   <state detail>                                                  |
+//|   ────────────                                                    |
+//|   Bias: <bias>           (xanh=Up, đỏ=Down, vàng=Range, xám=None)|
+//|   Ly do: <reason>                                                 |
+//|   ────────────                                                    |
+//|   PERIOD_<intradayTf>                                             |
+//|   Intraday: <trend>                                               |
+//|   Ly do: <intraday reason>                                        |
+//|   IsAllowTrade: <true/false>                                      |
+//|   AllowEntry:   <true/false>                                      |
+//|   ────────────                                                    |
+//|   <MSS pipeline displayReason>                                    |
+//|   ────────────                                                    |
+//|   Stats: N lệnh | TP X | SL Y                                     |
+//|   WR XX.X% | Ravg ±N.NNR | Net ±N.NN                              |
+//|                                                                   |
+//| Trigger render: từ ICT_2026.mq5 OnTick khi có nến mới Bias/       |
+//| Intraday/LowTF, hoặc force=true ở OnInit.                         |
+//|                                                                   |
+//| Skip nếu: InpOnlyStatsMode = true                                 |
+//|                                                                   |
+//| Object prefix: ICT26_PNL_                                         |
+//|                                                                   |
+//| Public API:                                                       |
+//|   void IctPanel_Render(sym)                                       |
+//|   void IctPanel_DeleteAll()                                       |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_PANEL_MQH
 #define ICT2026_PANEL_MQH

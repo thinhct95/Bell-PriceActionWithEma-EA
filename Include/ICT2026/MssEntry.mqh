@@ -1,5 +1,64 @@
 //+------------------------------------------------------------------+
-//| MssEntry.mqh — Limit @ M5 FVG edge | SL H0/L0 M5 | TP min RR     |
+//| MssEntry.mqh — Order management cho MSS pipeline                 |
+//+------------------------------------------------------------------+
+//| Trách nhiệm: tính SL/TP/lot, đặt + sửa + huỷ pending limit,       |
+//| theo dõi position để partial close + BE + cancel.                 |
+//|                                                                   |
+//| Gating (từ ngoài vào trong):                                      |
+//|   gate1: InpMssTradeEnabled                                       |
+//|   gate2: phase >= CHOCH && chochLocked && chochKeyLevel > 0       |
+//|   gate3: !intradayBlock                                           |
+//|          intradayBlock = InpMssRequireIntradayAligned             |
+//|                          && !isAllowTrade  (v1.181)               |
+//|   gate4: !InpMssOnePosition || no existing position+pending       |
+//|                                                                   |
+//| ComputeLevels (v1.164 + v1.184):                                  |
+//|   side       ← (m5Zone.side) hoặc chochBias                       |
+//|   SL         ← max(H0,H1)+buf (BEAR) / min(L0,L1)-buf (BULL)      |
+//|                buf = InpMssSlSpreadMult × spread                  |
+//|   2 candidates entry:                                             |
+//|     A) M5 FVG limit price                                         |
+//|     B) MSS keyLV (chochKeyLevel)                                  |
+//|   ⇒ chọn cái có risk = |entry-SL| nhỏ hơn (đúng phía thị trường) |
+//|   TP target = iH0/iL0 (sóng H1):                                  |
+//|     RR(TP@swing) > InpMssMinRR ⇒ TP @ swing - InpMssTpSpreadMult  |
+//|     else ⇒ TP = entry ± risk × InpMssMinRR (2R fixed)             |
+//|   partialTrigger = swingTp nếu TP gồng xa hơn swing               |
+//|   ⇒ partial 50% + SL→BE khi giá đạt swingTp                       |
+//|                                                                   |
+//|   CHECK CUỐI (v1.184):                                            |
+//|     |entry - market| ≤ InpMssMaxLimitDistAtrMult × ATR(FvgTf)     |
+//|     Quá xa ⇒ skip + mark FVG used + reset state                   |
+//|                                                                   |
+//| Lot sizing: IctMssEntry_VolumeForRisk uses InpMssRiskPct × balance|
+//|                                                                   |
+//| Per-tick checks (gọi trong IctMssEntry_Update):                   |
+//|   IctMssEntry_CheckEodCancel(sym)              — EOD phiên Mỹ     |
+//|   IctMssEntry_CheckPendingTimeout(sym)         — timeout 1h       |
+//|   IctMssEntry_CheckTpReachedBeforeFill(sym)    — TP chạm trước fill|
+//|                                                   (v1.185)        |
+//|   IctMssEntry_CheckStaleLimit(sym)             — limit xa giá     |
+//|                                                   > N×ATR (v1.184)|
+//|   IctMssEntry_CheckBreakevenAtRR(sym)          — SL→entry @ N×R   |
+//|                                                   (v1.176-7, off) |
+//|   IctMssEntry_CheckPartialClose(sym)           — partial 50% +    |
+//|                                                   SL→BE @ swingTp |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictMssTrade  — CTrade instance dùng cho tất cả order ops      |
+//|                                                                   |
+//| Lifecycle:                                                        |
+//|   IctMss_OnPositionClosed (gọi từ OnTradeTransaction trong EA):   |
+//|     - MarkM5FvgUsed                                               |
+//|     - IctMss_ResetState                                           |
+//|     - set g_ictMssAfterCloseGuard = TimeCurrent                   |
+//|     - reset về WAIT_FVG_TOUCH                                     |
+//|                                                                   |
+//| Public API (chính):                                               |
+//|   void IctMssEntry_Init() / IctMssEntry_Update(sym)               |
+//|   bool IctMssEntry_ComputeLevels(sym, m5Zone, &entry, &sl, &tp,   |
+//|                                   &reasonOut)                     |
+//|   void IctMss_OnPositionClosed(sym, reason, netProfit)            |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_MSSENTRY_MQH
 #define ICT2026_MSSENTRY_MQH
@@ -62,6 +121,32 @@ double IctMssEntry_LimitPrice(const IctFvgZone &zone)
    if(zone.side == ICT_FVG_BEAR)
       return zone.lower;
    return 0.0;
+}
+
+// Cap khoảng cách entry-giá theo bội số ATR(FvgTf):
+//   BUY  ⇒ distance = Ask - entry (entry phải nằm dưới Ask cho limit buy)
+//   SELL ⇒ distance = entry - Bid (entry phải nằm trên Bid cho limit sell)
+// Trả về true nếu distance > InpMssMaxLimitDistAtrMult × ATR ⇒ "limit quá xa" (chết).
+bool IctMssEntry_IsLimitTooFar(const string sym, const double entry, const bool isBuy,
+                               double &distOut, double &thresholdOut)
+{
+   distOut = 0.0;
+   thresholdOut = 0.0;
+   if(InpMssMaxLimitDistAtrMult <= 0.0)
+      return false;
+
+   const double atr = IctFvg_AtrFvgTf(sym);
+   if(atr <= 0.0)
+      return false;
+
+   const double mkt = isBuy ? SymbolInfoDouble(sym, SYMBOL_ASK)
+                            : SymbolInfoDouble(sym, SYMBOL_BID);
+   if(mkt <= 0.0 || entry <= 0.0)
+      return false;
+
+   distOut      = isBuy ? (mkt - entry) : (entry - mkt);
+   thresholdOut = atr * InpMssMaxLimitDistAtrMult;
+   return (distOut > thresholdOut + _Point);
 }
 
 bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
@@ -163,6 +248,18 @@ bool IctMssEntry_ComputeLevels(const string sym, const IctFvgZone &m5Zone,
       reasonOut = StringFormat(
          "Cả 2 entry không hợp lệ | mkt=%.2f/%.2f | FVG=%.2f | MSS=%.2f | SL=%.2f",
          mktBid, mktAsk, entryFvg, entryMss, slOut);
+      return false;
+   }
+
+   // Cap khoảng cách entry-giá: tránh đặt limit "chết" sau khi MSS confirm muộn
+   //   ⇒ limit phải nằm trong InpMssMaxLimitDistAtrMult × ATR(FvgTf) tính từ giá hiện tại
+   double tooFarDist = 0.0, tooFarThresh = 0.0;
+   if(IctMssEntry_IsLimitTooFar(sym, entryOut, isBuy, tooFarDist, tooFarThresh))
+   {
+      reasonOut = StringFormat(
+         "Entry xa giá %.0f pts > %.0f pts (%.1f×ATR) — bỏ qua [src=%s]",
+         tooFarDist / _Point, tooFarThresh / _Point,
+         InpMssMaxLimitDistAtrMult, entrySource);
       return false;
    }
 
@@ -350,6 +447,198 @@ void IctMss_OnPendingTimeout(const string sym, const ulong ticket, const int hou
       PrintFormat("[ICT2026/MSS] Pending timeout %dh #%I64u | H1 #%I64u | M5 #%I64u → Used | guard=%s | reset → WAIT_FVG_TOUCH",
                   hours, ticket, h1Id, m5Id,
                   TimeToString(g_ictMssAfterCloseGuard, TIME_DATE | TIME_MINUTES));
+}
+
+// Cancel pending + mark FVG used + reset state khi limit rời xa giá vượt cap.
+//   ⇒ tránh case MSS confirm muộn → limit đặt rất xa hiện tại, không bao giờ khớp.
+//   Trigger:
+//     - Bị gọi mỗi tick trong IctMssEntry_Update
+//     - InpMssCancelStaleLimit phải bật
+//     - Có pendingTicket hợp lệ (đã đặt limit)
+//     - (mkt - entry) (BUY) hoặc (entry - mkt) (SELL) > InpMssMaxLimitDistAtrMult × ATR(FvgTf)
+void IctMssEntry_CheckStaleLimit(const string sym)
+{
+   if(!InpMssCancelStaleLimit)
+      return;
+   if(InpMssMaxLimitDistAtrMult <= 0.0)
+      return;
+   if(g_ictLowTf.mss.pendingTicket == 0)
+      return;
+   if(!OrderSelect(g_ictLowTf.mss.pendingTicket))
+      return;
+
+   const ENUM_ORDER_TYPE otype = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   if(otype != ORDER_TYPE_BUY_LIMIT && otype != ORDER_TYPE_SELL_LIMIT)
+      return;
+
+   const bool   isBuy = (otype == ORDER_TYPE_BUY_LIMIT);
+   const double entry = OrderGetDouble(ORDER_PRICE_OPEN);
+
+   double dist = 0.0, thresh = 0.0;
+   if(!IctMssEntry_IsLimitTooFar(sym, entry, isBuy, dist, thresh))
+      return;
+
+   const ulong ticket = g_ictLowTf.mss.pendingTicket;
+   const ulong m5Id   = g_ictLowTf.mss.m5FvgId;
+   const ulong h1Id   = g_ictLowTf.mss.h1FvgId;
+
+   g_ictMssTrade.OrderDelete(ticket);
+   g_ictLowTf.mss.pendingTicket = 0;
+   IctMssEntry_MarkM5FvgUsed(sym, m5Id);
+   IctMss_ResetState();
+   g_ictMssAfterCloseGuard = TimeCurrent();
+
+   g_ictLowTf.mss.displayReason = StringFormat(
+      "Limit chết: cách giá %.0f pts > %.0f pts (%.1f×ATR) — cancel #%I64u + reset",
+      dist / _Point, thresh / _Point, InpMssMaxLimitDistAtrMult, ticket);
+
+   if(InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] Stale limit cancel %s #%I64u | dist=%.0f pts thresh=%.0f pts | H1 #%I64u | M5 #%I64u → Used | guard=%s | reset → WAIT_FVG_TOUCH",
+                  isBuy ? "BUY" : "SELL", ticket,
+                  dist / _Point, thresh / _Point, h1Id, m5Id,
+                  TimeToString(g_ictMssAfterCloseGuard, TIME_DATE | TIME_MINUTES));
+}
+
+// Cancel pending limit khi giá chạm TP TRƯỚC khi limit khớp.
+//   ⇒ Tránh case: giá chạy thẳng đến TP target, không hồi lại entry, sau đó
+//      đảo chiều quay về khớp limit ở entry cũ → lệnh chạy ngược, SL.
+//   Logic:
+//     BUY  limit: nếu Bid ≥ TP ⇒ giá đã chạm TP (lúc fill xong sẽ TP ngay)
+//     SELL limit: nếu Ask ≤ TP ⇒ giá đã chạm TP
+//   Sau cancel: mark FVG used + reset (giống stale limit) + guard sau-close.
+void IctMssEntry_CheckTpReachedBeforeFill(const string sym)
+{
+   if(!InpMssCancelLimitWhenTpReached)
+      return;
+   if(g_ictLowTf.mss.pendingTicket == 0)
+      return;
+   if(!OrderSelect(g_ictLowTf.mss.pendingTicket))
+      return;
+
+   const ENUM_ORDER_TYPE otype = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+   if(otype != ORDER_TYPE_BUY_LIMIT && otype != ORDER_TYPE_SELL_LIMIT)
+      return;
+
+   const bool   isBuy = (otype == ORDER_TYPE_BUY_LIMIT);
+   const double tp    = OrderGetDouble(ORDER_TP);
+   if(tp <= 0.0)
+      return;
+
+   const double bid = SymbolInfoDouble(sym, SYMBOL_BID);
+   const double ask = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+   const bool reached = isBuy ? (bid >= tp - _Point)
+                              : (ask <= tp + _Point);
+   if(!reached)
+      return;
+
+   const ulong  ticket = g_ictLowTf.mss.pendingTicket;
+   const ulong  m5Id   = g_ictLowTf.mss.m5FvgId;
+   const ulong  h1Id   = g_ictLowTf.mss.h1FvgId;
+   const double entry  = OrderGetDouble(ORDER_PRICE_OPEN);
+
+   g_ictMssTrade.OrderDelete(ticket);
+   g_ictLowTf.mss.pendingTicket = 0;
+   IctMssEntry_MarkM5FvgUsed(sym, m5Id);
+   IctMss_ResetState();
+   g_ictMssAfterCloseGuard = TimeCurrent();
+
+   g_ictLowTf.mss.displayReason = StringFormat(
+      "Giá chạm TP trước khi khớp limit (TP=%.2f, %s=%.2f) — cancel #%I64u + reset",
+      tp, isBuy ? "Bid" : "Ask", isBuy ? bid : ask, ticket);
+
+   if(InpMssLogJournal)
+      PrintFormat("[ICT2026/MSS] TP-reached cancel %s #%I64u | entry=%.5f tp=%.5f bid=%.5f ask=%.5f | H1 #%I64u | M5 #%I64u → Used | guard=%s | reset → WAIT_FVG_TOUCH",
+                  isBuy ? "BUY" : "SELL", ticket,
+                  entry, tp, bid, ask, h1Id, m5Id,
+                  TimeToString(g_ictMssAfterCloseGuard, TIME_DATE | TIME_MINUTES));
+}
+
+// Dời SL về entry (BE) khi lệnh đi được N×R (mặc định 2R) — bảo toàn vốn sớm.
+//   - Không partial close (khác với CheckPartialClose ở swing iL0/iH0)
+//   - Skip nếu BE đã move (beMovedDone) hoặc partial close đã chạy (đã set BE)
+void IctMssEntry_CheckBreakevenAtRR(const string sym)
+{
+   if(!InpMssBeEnabled)
+      return;
+   if(InpMssBeAtRR <= 0.0)
+      return;
+   if(g_ictLowTf.mss.beMovedDone || g_ictLowTf.mss.partialCloseDone)
+      return;
+   if(g_ictLowTf.mss.pendingEntry <= 0.0 || g_ictLowTf.mss.pendingSl <= 0.0)
+      return;
+
+   const double entry = g_ictLowTf.mss.pendingEntry;
+   const double slOrig = g_ictLowTf.mss.pendingSl;
+   const double risk  = MathAbs(entry - slOrig);
+   if(risk <= 0.0)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      const ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != sym)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMssMagic)
+         continue;
+
+      const ENUM_POSITION_TYPE ptype = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      const double openPx = PositionGetDouble(POSITION_PRICE_OPEN);
+      const double curSl  = PositionGetDouble(POSITION_SL);
+      const double curTp  = PositionGetDouble(POSITION_TP);
+      const double bid    = SymbolInfoDouble(sym, SYMBOL_BID);
+      const double ask    = SymbolInfoDouble(sym, SYMBOL_ASK);
+
+      bool reached = false;
+      double trigPx = 0.0;
+      if(ptype == POSITION_TYPE_BUY)
+      {
+         trigPx = openPx + InpMssBeAtRR * risk;
+         reached = (bid >= trigPx - _Point);
+      }
+      else if(ptype == POSITION_TYPE_SELL)
+      {
+         trigPx = openPx - InpMssBeAtRR * risk;
+         reached = (ask <= trigPx + _Point);
+      }
+
+      if(!reached)
+         return;
+
+      // Skip nếu SL hiện tại đã ≥ BE (tránh dời lùi)
+      bool slAlreadyAtBe = false;
+      if(ptype == POSITION_TYPE_BUY)
+         slAlreadyAtBe = (curSl >= openPx - _Point);
+      else
+         slAlreadyAtBe = (curSl > 0.0 && curSl <= openPx + _Point);
+
+      if(slAlreadyAtBe)
+      {
+         g_ictLowTf.mss.beMovedDone = true;
+         return;
+      }
+
+      g_ictMssTrade.SetExpertMagicNumber(InpMssMagic);
+      if(!g_ictMssTrade.PositionModify(ticket, openPx, curTp))
+      {
+         if(InpMssLogJournal)
+            PrintFormat("[ICT2026/MSS] BE@%.1fR move fail #%I64u — %d %s",
+                        InpMssBeAtRR, ticket, g_ictMssTrade.ResultRetcode(),
+                        g_ictMssTrade.ResultRetcodeDescription());
+         return;
+      }
+
+      g_ictLowTf.mss.beMovedDone = true;
+
+      if(InpMssLogJournal)
+         PrintFormat("[ICT2026/MSS] BE@%.1fR #%I64u price=%.2f → SL %.2f→%.2f (entry) | TP %.2f",
+                     InpMssBeAtRR, ticket,
+                     (ptype == POSITION_TYPE_BUY ? bid : ask),
+                     curSl, openPx, curTp);
+      return;
+   }
 }
 
 // Chốt 50% volume + dời SL về BE khi giá đạt swing iL0/iH0 (chỉ áp dụng khi TP gồng xa hơn swing)
@@ -581,6 +870,9 @@ void IctMssEntry_Update(const string sym)
 
    IctMssEntry_CheckEodCancel(sym);
    IctMssEntry_CheckPendingTimeout(sym);
+   IctMssEntry_CheckTpReachedBeforeFill(sym);
+   IctMssEntry_CheckStaleLimit(sym);
+   IctMssEntry_CheckBreakevenAtRR(sym);
    IctMssEntry_CheckPartialClose(sym);
 
    if(g_ictLowTf.mss.phase == ICT_MSS_IDLE && g_ictLowTf.mss.pendingTicket > 0)
@@ -597,8 +889,14 @@ void IctMssEntry_Update(const string sym)
    }
 
    // Cho phép entry từ CHOCH trở lên (không bắt buộc M5 FVG):
-   // ComputeLevels sẽ chọn entry giữa M5 FVG (nếu có) và MSS keyLV (luôn có sau lock)
-   if(!g_ictIntraday.isAllowTrade ||
+   // ComputeLevels sẽ chọn entry giữa M5 FVG (nếu có) và MSS keyLV (luôn có sau lock).
+   //
+   // Intraday gate: CHỈ chặn khi InpMssRequireIntradayAligned=true.
+   //   Mặc định (false) ⇒ entry chỉ dựa vào Daily Bias, không quan tâm Intraday trend
+   //   (tránh miss setup khi trend chuyển hướng muộn).
+   const bool intradayBlock = (InpMssRequireIntradayAligned && !g_ictIntraday.isAllowTrade);
+
+   if(intradayBlock ||
       g_ictLowTf.mss.phase < ICT_MSS_CHOCH ||
       !g_ictLowTf.mss.chochLocked ||
       g_ictLowTf.mss.chochKeyLevel <= 0.0)
@@ -610,8 +908,8 @@ void IctMssEntry_Update(const string sym)
       }
       if(g_ictLowTf.mss.phase >= ICT_MSS_H1_TOUCH)
       {
-         if(!g_ictIntraday.isAllowTrade)
-            IctMss_JournalEntryBlock("AllowTrade=false");
+         if(intradayBlock)
+            IctMss_JournalEntryBlock("Intraday ngược Bias (InpMssRequireIntradayAligned=true)");
          else if(g_ictLowTf.mss.phase < ICT_MSS_CHOCH)
             IctMss_JournalEntryBlock(g_ictLowTf.mss.displayReason);
          else
@@ -648,6 +946,27 @@ void IctMssEntry_Update(const string sym)
                                       IctMssPhaseText(g_ictLowTf.mss.phase),
                                       lvlReason);
       IctMss_JournalEntryBlock(g_ictLowTf.mss.displayReason);
+
+      // Nếu fail vì "Entry xa giá" + bật cancel-stale ⇒ reset setup ngay
+      // (tránh stuck CHOCH với entry không bao giờ khớp; chờ POI/touch mới)
+      if(InpMssCancelStaleLimit && StringFind(lvlReason, "Entry xa giá") == 0)
+      {
+         const ulong h1Id = g_ictLowTf.mss.h1FvgId;
+         const ulong m5Id = g_ictLowTf.mss.m5FvgId;
+         if(g_ictLowTf.mss.pendingTicket > 0)
+         {
+            IctMssEntry_CancelTicket(g_ictLowTf.mss.pendingTicket);
+            g_ictLowTf.mss.pendingTicket = 0;
+         }
+         IctMssEntry_MarkM5FvgUsed(sym, m5Id);
+         IctMss_ResetState();
+         g_ictMssAfterCloseGuard = TimeCurrent();
+         g_ictLowTf.mss.displayReason = StringFormat(
+            "%s | %s — reset, chờ POI/touch mới", IctMssPhaseText(ICT_MSS_IDLE), lvlReason);
+         if(InpMssLogJournal)
+            PrintFormat("[ICT2026/MSS] Skip entry (too far): %s | H1 #%I64u | M5 #%I64u → Used | reset",
+                        lvlReason, h1Id, m5Id);
+      }
       return;
    }
 

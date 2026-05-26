@@ -1,5 +1,42 @@
 //+------------------------------------------------------------------+
-//| Fvg.mqh — iTF Fair Value Gap (Available / Used)                    |
+//| Fvg.mqh — FVG detection + state + Premium/Discount (FvgTf = H1)  |
+//+------------------------------------------------------------------+
+//| Quản lý FVG trên `InpFvgTf` (default H1):                         |
+//|   - Detect FVG 3 nến A-B-C (Bull: A.High<C.Low; Bear: A.Low>C.High)|
+//|   - State: AVAILABLE / USED (fill ≥ InpFvgUsedFillPct ⇒ USED)     |
+//|   - PD zone (Premium/Discount) từ 2 pivot swing-1 + swing-2:      |
+//|       swing-1 = pivot gần FVG nhất (trước bar C)                  |
+//|       swing-2 = pivot ngược chiều đầu tiên SAU FVG                |
+//|       pdHigh / pdLow / pdEq (giữa)                                |
+//|   - `pdComplete` khoá khi swing-2 xác nhận (không cập nhật nữa)   |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictFvgZones[]  — array FVG (max InpFvgMaxZones)               |
+//|   g_ictFvgCount    — số FVG đang track                            |
+//|                                                                   |
+//| Filters kích thước (chỉ áp dụng `InpFvgTf` — H1, không M5):       |
+//|   InpFvgMinGapATRPct (12%)  — gap ≥ % ATR(14)                     |
+//|   InpFvgMinGapPoints  (0)   — gap tuyệt đối                       |
+//|   InpFvgMinGapVsBarPct(25%) — gap ≥ % range nến B                 |
+//|                                                                   |
+//| PD filter (Premium/Discount eligibility):                         |
+//|   IctFvg_IsEntryRepPd(zone, bias):                                |
+//|     - !InpFvgPdEnabled (v1.179) ⇒ true                            |
+//|     - else: BEAR overlap Premium / BULL overlap Discount          |
+//|     - (v1.187) bỏ large-FVG bypass — áp PD cho TẤT CẢ FVG         |
+//|                                                                   |
+//| Touch threshold (Pure/Mixed — v1.167):                            |
+//|   IctFvg_RequiredTouchFillPct(zone):                              |
+//|     - PD tắt (InpFvgPdEnabled=false)        ⇒ Pure (25%)          |
+//|     - FVG hoàn toàn trong vùng PD đúng chiều ⇒ Pure (25%)         |
+//|     - FVG straddle equilibrium               ⇒ Mixed (50%)        |
+//|                                                                   |
+//| Public API (chính):                                               |
+//|   void IctFvg_Init() / IctFvg_UpdateAll(sym, tf)                  |
+//|   void IctFvg_ScanNew(sym, tf, side, force)                       |
+//|   int  IctFvg_CountAvailable()                                    |
+//|   void IctFvg_UpdateZoneState(sym, tf, zone)                      |
+//|   double IctFvg_AtrFvgTf(sym)  — ATR helper (M5/H1 buffers, v1.184)|
 //+------------------------------------------------------------------+
 #ifndef ICT2026_FVG_MQH
 #define ICT2026_FVG_MQH
@@ -454,10 +491,33 @@ ENUM_ICT_PD_ZONE IctFvg_GetRepPd(const IctFvgZone &zone)
    return zone.pdZone;
 }
 
+// Lấy ATR(InpFvgTf, period) tại bar shift=1 (đã đóng)
+double IctFvg_AtrFvgTf(const string sym)
+{
+   const int h = iATR(sym, InpFvgTf, InpFvgAtrPeriod);
+   if(h == INVALID_HANDLE)
+      return 0.0;
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   const int got = CopyBuffer(h, 0, 1, 1, buf);
+   IndicatorRelease(h);
+   return (got == 1) ? buf[0] : 0.0;
+}
+
 bool IctFvg_IsEntryRepPd(const IctFvgZone &zone)
 {
+   // Toggle global: tắt PD ⇒ chấp nhận mọi FVG có pdEq hợp lệ
+   //   (vẫn yêu cầu có Bias rõ ràng để chọn side BEAR/BULL)
+   if(!InpFvgPdEnabled)
+   {
+      if(g_ictDailyBias.bias != ICT_BIAS_BEAR && g_ictDailyBias.bias != ICT_BIAS_BULL)
+         return false;
+      return true;
+   }
+
    if(zone.pdEq <= 0.0)
       return false;
+
    const double minPct = MathMax(0.0, MathMin(100.0, InpFvgPdMinOverlapPct));
    double pct = 0.0;
    if(g_ictDailyBias.bias == ICT_BIAS_BEAR)
@@ -474,11 +534,16 @@ bool IctFvg_IsEntryRepPd(const IctFvgZone &zone)
 }
 
 // Touch threshold cho POI:
+//  - PD toàn cục tắt (InpFvgPdEnabled=false): luôn 25% (không phân biệt vùng)
 //  - FVG nằm hẳn trong Premium (bear) / Discount (bull) → 25%
 //  - FVG straddle equilibrium (mixed) → 50%
 //  - Trả về 100 nếu FVG sai vùng (không thể là POI)
 double IctFvg_RequiredTouchFillPct(const IctFvgZone &zone)
 {
+   // Toggle global tắt PD ⇒ dùng touch threshold thấp
+   if(!InpFvgPdEnabled)
+      return InpFvgTouchFillPure;
+
    if(zone.pdEq <= 0.0)
       return 100.0;
    double pct = 0.0;

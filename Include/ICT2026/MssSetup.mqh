@@ -1,10 +1,60 @@
 //+------------------------------------------------------------------+
-//| MssSetup.mqh — MSS: retest FVG H1 → M5 MSS (phá L0/H0) → M5 FVG → entry |
+//| MssSetup.mqh — MSS pipeline (setup phase, không đặt order)       |
+//+------------------------------------------------------------------+
+//| Flow:                                                             |
+//|   IDLE                                                            |
+//|    │  IctMss_SelectNearestH1Poi() ⇒ chọn H1 FVG gần giá nhất     |
+//|    │  IctMss_HasFreshFvgTouch()   ⇒ touch hợp lệ                 |
+//|    ↓                                                              |
+//|   H1_TOUCH                                                        |
+//|    │  IctMss_UpdateLiveM5Swings() ⇒ liveL0/H0/L1/H1 structural  |
+//|    │                                  (v1.171: keylv lock)        |
+//|    │  IctMss_TryLockMss()         ⇒ break body M5 qua L0/H0      |
+//|    │  veto MSS nếu InpMssRequireIntradayAligned && ngược bias    |
+//|    ↓                                                              |
+//|   CHOCH (locked)                                                  |
+//|    │  IctConfirmFvg_ScanNew()      ⇒ tìm M5 FVG sau chochTime    |
+//|    │  IctMss_ZonesOverlapH1()      ⇒ M5 FVG gần H1 FVG           |
+//|    ↓                                                              |
+//|   M5_FVG → ENTRY_FILL → READY (chờ giá hồi vào M5 FVG)            |
+//|                                                                   |
+//| FVG fresh touch (v1.182) — cutoff bias-aware:                     |
+//|   cutoff = max(g_ictMssAfterCloseGuard,                          |
+//|                g_ictBiasInto{Bull,Bear}Time)                      |
+//|   Touch hợp lệ phải xảy ra SAU cutoff.                            |
+//|                                                                   |
+//| Structural keylv (v1.171) — không phải "pivot mới nhất":          |
+//|   BEAR (pullback UP):                                             |
+//|     liveH0 = đỉnh CAO NHẤT sau touch (extreme)                   |
+//|     liveL0 = đáy gần nhất trước liveH0 (keylv MSS↓)              |
+//|     liveH1 = đỉnh trước liveL0                                    |
+//|   BULL (pullback DOWN):                                           |
+//|     liveL0 = đáy THẤP NHẤT sau touch (extreme)                   |
+//|     liveH0 = đỉnh gần nhất trước liveL0 (keylv MSS↑)             |
+//|     liveL1 = đáy trước liveH0                                     |
+//|   ⇒ "lock" tự nhiên: pivot SAU extreme không đổi keylv            |
+//|                                                                   |
+//| MSS lock yêu cầu (v1.165):                                        |
+//|   - cấu trúc đủ 2 đỉnh/đáy SAU touch                              |
+//|   - body M5 phá liveL0 (BEAR) / liveH0 (BULL)                     |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictMssAfterCloseGuard — TS sau khi 1 lệnh đóng (TP/SL/timeout/|
+//|     stale limit): pipeline phải đợi touch fresh sau TS này        |
+//|                                                                   |
+//| Public API (chính):                                               |
+//|   void IctMss_Update(sym)                                         |
+//|   bool IctMss_HasFreshFvgTouch(sym, &h1Zone)                      |
+//|   datetime IctMss_GetFvgTouchTime(sym, &h1Zone)                   |
+//|   void IctMss_ResetState()                                        |
+//|   bool IctMss_TryLockMss(sym, tf, h1, bias)                       |
+//|   int  IctMss_CountH1PoiEligible()                                |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_MSSSETUP_MQH
 #define ICT2026_MSSSETUP_MQH
 
 #include <ICT2026/ConfirmFvg.mqh>
+#include <ICT2026/DailyBias.mqh>
 #include <ICT2026/Journal.mqh>
 #include <ICT2026/LowTfApi.mqh>
 #include <ICT2026/StructureCore.mqh>
@@ -109,16 +159,18 @@ bool IctMss_LivePriceTouchesFvg(const string sym, const IctFvgZone &h1)
    return IctMss_PriceInsideFvg(h1, bid) || IctMss_PriceInsideFvg(h1, ask);
 }
 
-datetime IctMss_FirstM5TouchInFvg(const string sym, const IctFvgZone &h1)
+// Touch M5 đầu tiên sau `since` (0 = bất kỳ)
+datetime IctMss_FirstM5TouchInFvg(const string sym, const IctFvgZone &h1, const datetime since = 0)
 {
    const ENUM_TIMEFRAMES tf = InpConfirmTf;
    const int lim = MathMin(InpMssConfirmLookback, iBars(sym, tf) - 2);
+   const datetime minT = (since > h1.createdTime) ? since : h1.createdTime;
    datetime best = 0;
    for(int sh = lim; sh >= 1; sh--)
    {
       const datetime t = iTime(sym, tf, sh);
-      if(t <= h1.createdTime)
-         break;
+      if(t <= minT)
+         continue;
       if(!IctMss_BarOverlapsFvg(h1, iHigh(sym, tf, sh), iLow(sym, tf, sh)))
          continue;
       if(best == 0 || t < best)
@@ -127,17 +179,41 @@ datetime IctMss_FirstM5TouchInFvg(const string sym, const IctFvgZone &h1)
    return best;
 }
 
+// Cutoff bias-aware: touch chỉ hợp lệ khi xảy ra SAU thời điểm Bias chuyển vào
+// side hiện tại VÀ sau thời điểm lệnh trước đóng.
+datetime IctMss_GetFvgTouchCutoff()
+{
+   datetime cutoff = 0;
+   if(g_ictDailyBias.bias == ICT_BIAS_BULL && g_ictBiasIntoBullTime > 0)
+      cutoff = g_ictBiasIntoBullTime;
+   else if(g_ictDailyBias.bias == ICT_BIAS_BEAR && g_ictBiasIntoBearTime > 0)
+      cutoff = g_ictBiasIntoBearTime;
+   if(g_ictMssAfterCloseGuard > cutoff)
+      cutoff = g_ictMssAfterCloseGuard;
+   return cutoff;
+}
+
 datetime IctMss_GetFvgTouchTime(const string sym, IctFvgZone &h1)
 {
    IctFvg_UpdateZoneState(sym, InpFvgTf, h1);
+   const datetime cutoff = IctMss_GetFvgTouchCutoff();
 
-   datetime t = h1.firstTouchTime;
-   const datetime tM5 = IctMss_FirstM5TouchInFvg(sym, h1);
+   // firstTouchTime chỉ hợp lệ nếu xảy ra sau cutoff
+   datetime t = 0;
+   if(h1.firstTouchTime > 0 && h1.firstTouchTime >= cutoff)
+      t = h1.firstTouchTime;
+
+   // Quét M5 bars để tìm touch fresh sau cutoff (bao gồm cả re-touch sau bias flip)
+   const datetime tM5 = IctMss_FirstM5TouchInFvg(sym, h1, cutoff);
    if(tM5 > 0 && (t <= 0 || tM5 < t))
       t = tM5;
 
    if(t <= 0 && IctMss_LivePriceTouchesFvg(sym, h1))
-      t = iTime(sym, InpConfirmTf, 0);
+   {
+      const datetime curBar = iTime(sym, InpConfirmTf, 0);
+      if(curBar >= cutoff)
+         t = curBar;
+   }
 
    return t;
 }
@@ -148,15 +224,14 @@ bool IctMss_HasFvgPriceTouch(const string sym, IctFvgZone &h1)
    return (IctMss_GetFvgTouchTime(sym, h1) > 0);
 }
 
-// Touch hợp lệ cho POI mới = touch xảy ra SAU thời điểm lệnh trước đóng + đạt FILL threshold theo PD position.
-// - FVG nằm hẳn trong vùng đúng chiều → InpFvgTouchFillPure (25%)
-// - FVG straddle equilibrium             → InpFvgTouchFillMixed (50%)
+// Touch hợp lệ cho POI mới — cutoff đã được apply trong `IctMss_GetFvgTouchTime`:
+//   - touch xảy ra SAU lệnh trước đóng (g_ictMssAfterCloseGuard)
+//   - touch xảy ra SAU Bias chuyển vào side hiện tại (g_ictBiasInto*Time)
+//   - đạt FILL threshold theo PD position (Pure 25% / Mixed 50%)
 bool IctMss_HasFreshFvgTouch(const string sym, IctFvgZone &h1)
 {
    const datetime tTouch = IctMss_GetFvgTouchTime(sym, h1);
    if(tTouch <= 0)
-      return false;
-   if(g_ictMssAfterCloseGuard > 0 && tTouch < g_ictMssAfterCloseGuard)
       return false;
 
    const double requiredPct = IctFvg_RequiredTouchFillPct(h1);
@@ -289,6 +364,29 @@ bool IctMss_HasM5BarInH1Fvg(const string sym, const IctFvgZone &h1,
    return false;
 }
 
+// Structural keylv — KHÔNG dùng "pivot mới nhất" (nhảy mỗi nến).
+// Định nghĩa: keylv = pivot GẦN NHẤT TRƯỚC extreme của pullback ⇒
+//   tự nhiên "lock" tới khi pullback mở rộng (BEAR: tạo high mới cao hơn;
+//   BULL: tạo low mới thấp hơn).
+//
+// BEAR bias (pullback UP, mục tiêu MSS↓ phá L0):
+//   liveH0 = ĐỈNH CAO NHẤT sau tTouch  (extreme đỉnh pullback)
+//   liveL0 = đáy gần nhất theo time TRƯỚC liveH0  (keylv — "đáy tạo ra đỉnh cao nhất")
+//   liveH1 = đỉnh gần nhất TRƯỚC liveL0           (đỉnh cũ — đủ cấu trúc 2 đỉnh)
+//   liveL1 = đáy gần nhất TRƯỚC liveH1            (đáy cũ — đủ cấu trúc 2 đáy)
+//   SL = max(H0, H1) + buffer
+//
+// BULL bias (pullback DOWN, mục tiêu MSS↑ phá H0):
+//   liveL0 = ĐÁY THẤP NHẤT sau tTouch  (extreme đáy pullback)
+//   liveH0 = đỉnh gần nhất theo time TRƯỚC liveL0  (keylv — "đỉnh tạo ra đáy thấp nhất")
+//   liveL1 = đáy gần nhất TRƯỚC liveH0             (đáy cũ — đủ cấu trúc 2 đáy)
+//   liveH1 = đỉnh gần nhất TRƯỚC liveL1            (đỉnh cũ — đủ cấu trúc 2 đỉnh)
+//   SL = min(L0, L1) − buffer
+//
+// Nhờ tham chiếu "TRƯỚC extreme":
+//   - Đỉnh mới tạo SAU extreme low (bullish bias) ⇒ KHÔNG ảnh hưởng keylv
+//   - Đáy mới tạo SAU extreme high (bearish bias) ⇒ KHÔNG ảnh hưởng keylv
+//   ⇒ keylv chỉ "nhảy" khi pullback thực sự mở rộng tạo extreme mới
 bool IctMss_UpdateLiveM5Swings(const string sym, const ENUM_ICT_BIAS bias,
                                const datetime tTouch)
 {
@@ -301,38 +399,184 @@ bool IctMss_UpdateLiveM5Swings(const string sym, const ENUM_ICT_BIAS bias,
    g_ictLowTf.mss.liveL1Time  = 0;
    g_ictLowTf.mss.liveH1Time  = 0;
 
-   IctSwingSet sw;
-   ENUM_ICT_STRUCT st = ICT_STRUCT_NONE;
-   if(!IctBuildConfirmSwingSet(sym, sw, st))
+   if(bias != ICT_BIAS_BEAR && bias != ICT_BIAS_BULL)
       return false;
 
-   if(bias == ICT_BIAS_BEAR || bias == ICT_BIAS_BULL)
+   // BẮT BUỘC có tTouch hợp lệ — nếu không pipeline sẽ lấy cả pivot trước touch
+   //   (filter `time < tTouch` không có tác dụng khi tTouch = 0).
+   if(tTouch <= 0)
+      return false;
+
+   IctSwingPoint highs[], lows[];
+   IctCollectSwings(sym, InpConfirmTf, InpConfirmSwingRange,
+                    InpConfirmSwingLookback, highs, lows);
+   const int nH = ArraySize(highs);
+   const int nL = ArraySize(lows);
+   if(nH == 0 || nL == 0)
+      return false;
+
+   if(bias == ICT_BIAS_BEAR)
    {
-      if(!sw.hasL0 || !sw.hasH0)
-         return false;
-      if(sw.l0.time < tTouch && sw.h0.time < tTouch)
-         return false;
-      g_ictLowTf.mss.liveL0Price = sw.l0.price;
-      g_ictLowTf.mss.liveL0Time  = sw.l0.time;
-      g_ictLowTf.mss.liveH0Price = sw.h0.price;
-      g_ictLowTf.mss.liveH0Time  = sw.h0.time;
-      if(sw.hasL1)
+      // 1) liveH0 = đỉnh cao nhất sau tTouch (extreme của pullback up)
+      int idxH0 = -1;
+      double maxHigh = -DBL_MAX;
+      for(int i = 0; i < nH; i++)
       {
-         g_ictLowTf.mss.liveL1Price = sw.l1.price;
-         g_ictLowTf.mss.liveL1Time  = sw.l1.time;
+         if(highs[i].time < tTouch) continue;
+         if(highs[i].price > maxHigh)
+         {
+            maxHigh = highs[i].price;
+            idxH0 = i;
+         }
       }
-      if(sw.hasH1)
+      if(idxH0 < 0) return false;
+      g_ictLowTf.mss.liveH0Price = highs[idxH0].price;
+      g_ictLowTf.mss.liveH0Time  = highs[idxH0].time;
+      const datetime tH0 = highs[idxH0].time;
+
+      // 2) liveL0 = đáy GẦN NHẤT THEO TIME TRƯỚC liveH0 (keylv MSS↓)
+      int idxL0 = -1;
+      datetime tL0Best = 0;
+      for(int i = 0; i < nL; i++)
       {
-         g_ictLowTf.mss.liveH1Price = sw.h1.price;
-         g_ictLowTf.mss.liveH1Time  = sw.h1.time;
+         if(lows[i].time < tTouch) continue;
+         if(lows[i].time >= tH0) continue;
+         if(lows[i].time > tL0Best)
+         {
+            tL0Best = lows[i].time;
+            idxL0 = i;
+         }
+      }
+      if(idxL0 < 0) return false;
+      g_ictLowTf.mss.liveL0Price = lows[idxL0].price;
+      g_ictLowTf.mss.liveL0Time  = lows[idxL0].time;
+      const datetime tL0 = lows[idxL0].time;
+
+      // 3) liveH1 = đỉnh GẦN NHẤT THEO TIME TRƯỚC liveL0
+      int idxH1 = -1;
+      datetime tH1Best = 0;
+      for(int i = 0; i < nH; i++)
+      {
+         if(highs[i].time < tTouch) continue;
+         if(highs[i].time >= tL0) continue;
+         if(highs[i].time > tH1Best)
+         {
+            tH1Best = highs[i].time;
+            idxH1 = i;
+         }
+      }
+      if(idxH1 >= 0)
+      {
+         g_ictLowTf.mss.liveH1Price = highs[idxH1].price;
+         g_ictLowTf.mss.liveH1Time  = highs[idxH1].time;
+      }
+
+      // 4) liveL1 = đáy GẦN NHẤT THEO TIME TRƯỚC liveH1 (nếu có)
+      if(idxH1 >= 0)
+      {
+         int idxL1 = -1;
+         datetime tL1Best = 0;
+         for(int i = 0; i < nL; i++)
+         {
+            if(lows[i].time < tTouch) continue;
+            if(lows[i].time >= tH1Best) continue;
+            if(lows[i].time > tL1Best)
+            {
+               tL1Best = lows[i].time;
+               idxL1 = i;
+            }
+         }
+         if(idxL1 >= 0)
+         {
+            g_ictLowTf.mss.liveL1Price = lows[idxL1].price;
+            g_ictLowTf.mss.liveL1Time  = lows[idxL1].time;
+         }
       }
       return true;
    }
 
-   return false;
+   // BULL bias (pullback DOWN)
+   // 1) liveL0 = đáy thấp nhất sau tTouch (extreme của pullback down)
+   int idxL0 = -1;
+   double minLow = DBL_MAX;
+   for(int i = 0; i < nL; i++)
+   {
+      if(lows[i].time < tTouch) continue;
+      if(lows[i].price < minLow)
+      {
+         minLow = lows[i].price;
+         idxL0 = i;
+      }
+   }
+   if(idxL0 < 0) return false;
+   g_ictLowTf.mss.liveL0Price = lows[idxL0].price;
+   g_ictLowTf.mss.liveL0Time  = lows[idxL0].time;
+   const datetime tL0 = lows[idxL0].time;
+
+   // 2) liveH0 = đỉnh GẦN NHẤT THEO TIME TRƯỚC liveL0 (keylv MSS↑)
+   int idxH0 = -1;
+   datetime tH0Best = 0;
+   for(int i = 0; i < nH; i++)
+   {
+      if(highs[i].time < tTouch) continue;
+      if(highs[i].time >= tL0) continue;
+      if(highs[i].time > tH0Best)
+      {
+         tH0Best = highs[i].time;
+         idxH0 = i;
+      }
+   }
+   if(idxH0 < 0) return false;
+   g_ictLowTf.mss.liveH0Price = highs[idxH0].price;
+   g_ictLowTf.mss.liveH0Time  = highs[idxH0].time;
+   const datetime tH0 = highs[idxH0].time;
+
+   // 3) liveL1 = đáy GẦN NHẤT THEO TIME TRƯỚC liveH0
+   int idxL1 = -1;
+   datetime tL1Best = 0;
+   for(int i = 0; i < nL; i++)
+   {
+      if(lows[i].time < tTouch) continue;
+      if(lows[i].time >= tH0) continue;
+      if(lows[i].time > tL1Best)
+      {
+         tL1Best = lows[i].time;
+         idxL1 = i;
+      }
+   }
+   if(idxL1 >= 0)
+   {
+      g_ictLowTf.mss.liveL1Price = lows[idxL1].price;
+      g_ictLowTf.mss.liveL1Time  = lows[idxL1].time;
+   }
+
+   // 4) liveH1 = đỉnh GẦN NHẤT THEO TIME TRƯỚC liveL1 (nếu có)
+   if(idxL1 >= 0)
+   {
+      int idxH1 = -1;
+      datetime tH1Best = 0;
+      for(int i = 0; i < nH; i++)
+      {
+         if(highs[i].time < tTouch) continue;
+         if(highs[i].time >= tL1Best) continue;
+         if(highs[i].time > tH1Best)
+         {
+            tH1Best = highs[i].time;
+            idxH1 = i;
+         }
+      }
+      if(idxH1 >= 0)
+      {
+         g_ictLowTf.mss.liveH1Price = highs[idxH1].price;
+         g_ictLowTf.mss.liveH1Time  = highs[idxH1].time;
+      }
+   }
+   return true;
 }
 
 // Hủy setup: H1 đóng (shift=1) — thân xuyên FVG (không giữ giá). Râu xuyên vẫn tiếp tục MSS.
+//   v1.186: dùng IctBodyBreakBuffer (N × spread) thay vì _Point — siết để
+//   một close-through "sát mép" do nhiễu không làm invalidate setup.
 bool IctMss_H1BodyInvalidatedSetup(const string sym, const IctFvgZone &h1,
                                    const ENUM_ICT_BIAS bias)
 {
@@ -340,10 +584,11 @@ bool IctMss_H1BodyInvalidatedSetup(const string sym, const IctFvgZone &h1,
       return false;
 
    const double cls = iClose(sym, InpFvgTf, 1);
+   const double buf = IctBodyBreakBuffer(sym);
    if(bias == ICT_BIAS_BEAR)
-      return (cls > h1.upper + _Point);
+      return (cls > h1.upper + buf);
    if(bias == ICT_BIAS_BULL)
-      return (cls < h1.lower - _Point);
+      return (cls < h1.lower - buf);
    return false;
 }
 
@@ -874,6 +1119,22 @@ void IctMss_Update(const string sym)
 
       if(!IctMss_TryLockMss(sym, cTf, g_ictFvgZones[h1Idx], g_ictDailyBias.bias))
          return;
+
+      // Veto MSS nếu Intraday NGƯỢC Bias — CHỈ áp dụng khi yêu cầu align (mặc định OFF).
+      //   Mặc định: cho phép MSS dù Intraday ngược ⇒ entry sớm hơn khi trend đổi muộn,
+      //              giảm trường hợp "giá chạy tới TP rồi mới khớp limit → quay lại SL".
+      if(InpMssRequireIntradayAligned &&
+         !IctIntraday_TrendAlignsWithBias(g_ictDailyBias.bias, g_ictIntraday.trend))
+      {
+         IctMss_MarkFvgUsedOnMssSuccess(sym, g_ictLowTf.mss.h1FvgId);
+         const string sideLbl  = (g_ictDailyBias.bias == ICT_BIAS_BEAR) ? "MSS↓" : "MSS↑";
+         const string trendLbl = IctTrendDisplayShort(g_ictIntraday.trend);
+         IctMss_ResetState();
+         g_ictLowTf.mss.displayReason = StringFormat(
+            "%s khớp khi Intraday=%s ngược Bias — bỏ POI, chờ POI mới",
+            sideLbl, trendLbl);
+         return;
+      }
 
       IctMss_MarkFvgUsedOnMssSuccess(sym, g_ictLowTf.mss.h1FvgId);
 

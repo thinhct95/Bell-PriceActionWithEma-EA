@@ -1,5 +1,26 @@
 //+------------------------------------------------------------------+
-//| ConfirmFvg.mqh — FVG trên Confirm TF (M5) cho MSS entry          |
+//| ConfirmFvg.mqh — pool FVG trên Confirm TF (M5) cho MSS entry     |
+//+------------------------------------------------------------------+
+//| Pool độc lập với g_ictFvgZones (H1) — chỉ dùng làm entry zone     |
+//| sau khi MSS lock trên Confirm TF.                                 |
+//|                                                                   |
+//| KHÁC với H1 FVG:                                                  |
+//|   - KHÔNG áp dụng size filter (InpFvgMinGap*) — phát hiện M5 FVG  |
+//|     nhỏ là cần thiết cho entry precision                          |
+//|   - KHÔNG track PD                                                |
+//|   - Scan trigger từ ngoài: IctConfirmFvg_ScanNew(sym, tf, side,   |
+//|     sinceTime, force) — chỉ scan FVG hình thành SAU chochTime     |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictConfirmFvgZones[]  — array M5 FVG (max InpFvgMaxZones)    |
+//|   g_ictConfirmFvgCount    — số M5 FVG                             |
+//|                                                                   |
+//| Public API:                                                       |
+//|   void IctConfirmFvg_Init()                                       |
+//|   void IctConfirmFvg_UpdateAll(sym, tf) — update state/fill       |
+//|   void IctConfirmFvg_ScanNew(sym, tf, side, sinceTime, force)     |
+//|   int  IctConfirmFvg_FindLatestAfter(sinceTime, side)             |
+//|   int  IctConfirmFvg_FindById(id)                                 |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_CONFIRMFVG_MQH
 #define ICT2026_CONFIRMFVG_MQH

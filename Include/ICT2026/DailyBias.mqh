@@ -1,5 +1,35 @@
 //+------------------------------------------------------------------+
-//| DailyBias.mqh — Bias rõ (HH-HL/LH-LL) vs sớm (sau CHoCH)       |
+//| DailyBias.mqh — Daily Bias resolver (D1)                         |
+//+------------------------------------------------------------------+
+//| Trả lời câu hỏi: "Hôm nay nên ưu tiên BUY hay SELL?"             |
+//|                                                                   |
+//| Thứ tự ưu tiên (cao→thấp, v1.175):                                |
+//|   1) D1/D2 pattern (IctDailyBias_ResolveD1D2):                    |
+//|        - D[1].close > D[2].high            → BULL (breakout)      |
+//|        - D[1].close < D[2].low             → BEAR (breakdown)     |
+//|        - D[1] sweep D[2] high + close back → BEAR (sweep bear liq)|
+//|        - D[1] sweep D[2] low  + close back → BULL (sweep bull liq)|
+//|   2) Structural HH-HL / LH-LL (IctResolveTrend)                   |
+//|   3) HTF fallback (IctUpdateHTFBias — Previous Day Model)         |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictDailyBias        — IctDailyBiasState (kết quả + reason)    |
+//|   g_ictDailyCtx         — IctTrendResolveCtx (input cho resolver) |
+//|   g_ictBiasIntoBullTime — TS Bias chuyển vào BULL (v1.182)        |
+//|   g_ictBiasIntoBearTime — TS Bias chuyển vào BEAR (v1.182)        |
+//|     ⇒ làm cutoff cho IctMss_HasFreshFvgTouch (loại touch xảy ra   |
+//|        trước khi bias xoay sang side hiện tại)                    |
+//|                                                                   |
+//| Public API:                                                       |
+//|   bool IctDailyBias_Init(sym)                                     |
+//|   bool IctDailyBias_Update(sym)  — true khi có nến D1 mới         |
+//|   void IctDailyBias_Get(IctDailyBiasState &out)                   |
+//|   bool IctDailyBias_IsBull/IsBear()                               |
+//|   ENUM_ICT_BIAS ICT2026_GetDailyBias()                            |
+//|                                                                   |
+//| Internal:                                                         |
+//|   IctDailyBias_TrackTransition() — gọi cuối Update để cập nhật    |
+//|     g_ictBiasInto*Time khi bias xoay side                         |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_DAILYBIAS_MQH
 #define ICT2026_DAILYBIAS_MQH
@@ -11,6 +41,99 @@
 
 IctDailyBiasState g_ictDailyBias;
 IctTrendResolveCtx g_ictDailyCtx;
+
+// Thời điểm Bias chuyển vào mỗi side — dùng để gác "fresh touch":
+//   FVG touch xảy ra TRƯỚC thời điểm Bias chuyển sang side đó ⇒ KHÔNG hợp lệ.
+//   Tránh case: bias UP → bear FVG bị chạm (lúc EA bỏ qua) → bias xoay DOWN → EA
+//   tưởng đã chạm POI từ quá khứ → vào lệnh limit luôn.
+datetime g_ictBiasIntoBullTime = 0;
+datetime g_ictBiasIntoBearTime = 0;
+
+void IctDailyBias_TrackTransition()
+{
+   static ENUM_ICT_BIAS prev = ICT_BIAS_NONE;
+   const ENUM_ICT_BIAS cur = g_ictDailyBias.bias;
+   if(cur == prev)
+      return;
+   const datetime now = TimeCurrent();
+   if(cur == ICT_BIAS_BULL && prev != ICT_BIAS_BULL)
+      g_ictBiasIntoBullTime = now;
+   else if(cur == ICT_BIAS_BEAR && prev != ICT_BIAS_BEAR)
+      g_ictBiasIntoBearTime = now;
+   prev = cur;
+}
+
+// Bias từ pattern D1 vs D2 (ưu tiên cao hơn structural HH-HL/LH-LL).
+//
+// Thứ tự ưu tiên:
+//   1. Breakout/Breakdown rõ ràng:
+//      - D[1].close > D[2].high → BULL
+//      - D[1].close < D[2].low  → BEAR
+//   2. Liquidity sweep (false breakout):
+//      - D[1].high > D[2].high & D[1].close < D[2].high & close > D[2].low
+//        → sweep bear liquidity (quét stop trên) → BEAR
+//      - D[1].low  < D[2].low  & D[1].close > D[2].low  & close < D[2].high
+//        → sweep bull liquidity (quét stop dưới) → BULL
+//   3. Trường hợp đặc biệt: D1 sweep CẢ 2 phía + close kẹt trong range D2
+//      ⇒ không xác định ⇒ rơi xuống fallback structural
+//
+// Return: true nếu match 1 trong các pattern (biasOut + reasonOut được set).
+bool IctDailyBias_ResolveD1D2(const string sym, const ENUM_TIMEFRAMES tf,
+                              ENUM_ICT_BIAS &biasOut, string &reasonOut)
+{
+   biasOut   = ICT_BIAS_NONE;
+   reasonOut = "";
+
+   const double b1H = iHigh(sym, tf, 1);
+   const double b1L = iLow(sym, tf, 1);
+   const double b1C = iClose(sym, tf, 1);
+   const double b2H = iHigh(sym, tf, 2);
+   const double b2L = iLow(sym, tf, 2);
+
+   if(b2H <= 0.0 || b2L <= 0.0 || b1H <= 0.0)
+      return false;
+
+   // 1) Clear breakout / breakdown
+   if(b1C > b2H)
+   {
+      biasOut   = ICT_BIAS_BULL;
+      reasonOut = "D[1].close > D[2].high → Breakout BULL";
+      return true;
+   }
+   if(b1C < b2L)
+   {
+      biasOut   = ICT_BIAS_BEAR;
+      reasonOut = "D[1].close < D[2].low → Breakdown BEAR";
+      return true;
+   }
+
+   // Đến đây: b2L ≤ b1C ≤ b2H (close kẹt trong range D2)
+   const bool sweepHigh = (b1H > b2H);
+   const bool sweepLow  = (b1L < b2L);
+
+   // 2a) Cả 2 phía cùng sweep + close inside ⇒ không xác định
+   if(sweepHigh && sweepLow)
+      return false;
+
+   // 2b) Sweep bear liquidity
+   if(sweepHigh)
+   {
+      biasOut   = ICT_BIAS_BEAR;
+      reasonOut = "D[1].high > D[2].high & close < D[2].high → sweep bear liq → BEAR";
+      return true;
+   }
+
+   // 2c) Sweep bull liquidity
+   if(sweepLow)
+   {
+      biasOut   = ICT_BIAS_BULL;
+      reasonOut = "D[1].low < D[2].low & close > D[2].low → sweep bull liq → BULL";
+      return true;
+   }
+
+   // Inside day hoặc trùng range — không match D1/D2 pattern
+   return false;
+}
 
 ENUM_ICT_BIAS IctBiasFromTrend(const ENUM_ICT_TREND trend)
 {
@@ -291,13 +414,41 @@ bool IctDailyBias_Update(const string sym, const bool force = false)
    IctResolveTrend(sym, tf, sw, pivotStruct, g_ictDailyCtx, 1);
    IctDailyBias_SyncFromCtx(sw, pivotStruct);
 
-   if(g_ictDailyBias.bias == ICT_BIAS_NONE)
-      IctDailyBias_ApplyHtfFallback();
-   else
+   // ƯU TIÊN 1: D1/D2 pattern (4 cases: breakout, breakdown, 2 sweeps).
+   //   D1/D2 thắng cả structural — override bias nếu match.
+   ENUM_ICT_BIAS d1d2Bias = ICT_BIAS_NONE;
+   string d1d2Reason     = "";
+   if(IctDailyBias_ResolveD1D2(sym, tf, d1d2Bias, d1d2Reason))
+   {
+      g_ictDailyBias.bias      = d1d2Bias;
+      g_ictDailyBias.biasPhase = ICT_TREND_PHASE_CLEAR;
+      g_ictDailyBias.reason    = d1d2Reason;
+      g_ictDailyBias.keyLv1    = 0.0;
+      g_ictDailyBias.keyLv2    = 0.0;
+      if(sw.IsComplete())
+      {
+         const ENUM_ICT_STRUCT keyStruct = (d1d2Bias == ICT_BIAS_BULL)
+                                           ? ICT_STRUCT_BULL : ICT_STRUCT_BEAR;
+         IctGetKeyLevels(keyStruct, sw, g_ictDailyBias.keyLv1, g_ictDailyBias.keyLv2);
+      }
+      g_ictDailyBias.displayReason = d1d2Reason;
+   }
+   // ƯU TIÊN 2: Structural HH-HL/LH-LL (đã set ở SyncFromCtx ở trên).
+   else if(g_ictDailyBias.bias == ICT_BIAS_BULL || g_ictDailyBias.bias == ICT_BIAS_BEAR)
+   {
       g_ictDailyBias.reason = StringFormat("Structural: %s",
                                            IctBiasText(g_ictDailyBias.bias));
+      g_ictDailyBias.displayReason = IctBuildDisplayReason(g_ictDailyBias, sym, tf);
+   }
+   // ƯU TIÊN 3: HTF fallback (outside day / range).
+   else
+   {
+      IctDailyBias_ApplyHtfFallback();
+      g_ictDailyBias.displayReason = IctBuildDisplayReason(g_ictDailyBias, sym, tf);
+   }
 
-   g_ictDailyBias.displayReason = IctBuildDisplayReason(g_ictDailyBias, sym, tf);
+   // Cập nhật timestamp Bias chuyển side (để gác fresh touch sau Bias flip)
+   IctDailyBias_TrackTransition();
 
    if(InpDebug)
    {

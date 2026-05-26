@@ -1,5 +1,28 @@
 //+------------------------------------------------------------------+
-//| StructureTrend.mqh — trend rõ (HH-HL/LH-LL) vs sớm (sau CHoCH)   |
+//| StructureTrend.mqh — phân giải trend "rõ" vs "sớm"               |
+//+------------------------------------------------------------------+
+//| Module dùng chung cho cả Daily + Intraday — chia 2 phase:         |
+//|                                                                   |
+//|   CLEAR  ("rõ ràng") — HH-HL hoặc LH-LL pivot xác nhận            |
+//|     ⇒ trend = UP / DOWN                                           |
+//|                                                                   |
+//|   EARLY  ("sớm")     — sau CHoCH nhưng cấu trúc mới chưa rõ       |
+//|     ⇒ trend = UP_EARLY / DOWN_EARLY (Bull/Bear sớm)               |
+//|       giữ phase EARLY cho đến khi:                                |
+//|         - Pivot xác nhận HH-HL/LH-LL → CLEAR                      |
+//|         - CHoCH ngược → đổi phase EARLY ngược                     |
+//|                                                                   |
+//| CHoCH ưu tiên trước pivot: nếu pivot vẫn LH-LL nhưng H[1] body    |
+//| phá H0 ⇒ trend = Bull sớm (không giữ Down).                       |
+//|                                                                   |
+//| Mixed (không HH-HL không LH-LL) + không EARLY ⇒ NONE.             |
+//|                                                                   |
+//| Lưu ý "rõ" vs "sớm" do user tự đặt tên trong tiếng Việt — code   |
+//| dùng enum ENUM_ICT_TREND_PHASE = {CLEAR, EARLY}.                  |
+//|                                                                   |
+//| Public API:                                                       |
+//|   bool IctResolveTrend(&ctx, &trendOut, &phaseOut, &eventOut)    |
+//|     ctx = {sym, tf, swings, prevStructural, prevTrend, ...}      |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_STRUCTURETREND_MQH
 #define ICT2026_STRUCTURETREND_MQH

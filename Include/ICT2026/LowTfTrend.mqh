@@ -1,5 +1,32 @@
 //+------------------------------------------------------------------+
-//| LowTfTrend.mqh — Low TF layer: iTF FVG khi IsAllowTrade            |
+//| LowTfTrend.mqh — Orchestrator cho FVG + MSS pipeline             |
+//+------------------------------------------------------------------+
+//| File này KHÔNG chứa logic core. Chỉ điều phối:                    |
+//|   1) Nến mới `InpFvgTf` (H1) ⇒ IctLowTfTrend_Update:              |
+//|      - IctIntraday_UpdateAllowTrade                               |
+//|      - IctFvg_UpdateAll (state + fill + PD)                       |
+//|      - IctFvg_ScanNew (FVG thuận Bias) — nếu Bias rõ              |
+//|      - Nến mới `InpConfirmTf` (M5) ⇒ IctConfirmFvg_UpdateAll,    |
+//|        IctMss_Update, IctMssEntry_Update, IctEaState_Refresh      |
+//|      - Render: IctFvgDraw_Render, IctMssDraw_Render               |
+//|                                                                   |
+//|   2) Tick (giữa nến) ⇒ IctLowTfTrend_TickRefresh:                 |
+//|      - IctFvg_UpdateZoneState mỗi FVG (refresh fill ratio)        |
+//|      - IctFvg_UpdateAllPd (PD update khi pivot thay đổi)          |
+//|      - Nếu Bias rõ: IctMss_Update + IctMssEntry_Update on tick    |
+//|        (catch live MSS lock + per-tick checks)                    |
+//|                                                                   |
+//| Pipeline gate (v1.170): chỉ check `g_ictDailyBias.bias != NONE`.  |
+//| Không gate theo IsAllowTrade (cho phép MSS detect khi intraday    |
+//| transition).                                                      |
+//|                                                                   |
+//| Globals dùng:                                                     |
+//|   g_ictLowTf (từ LowTfApi.mqh) — state aggregate                  |
+//|                                                                   |
+//| Public API:                                                       |
+//|   bool IctLowTfTrend_Init(sym)                                    |
+//|   bool IctLowTfTrend_Update(sym, force=false)                     |
+//|   void IctLowTfTrend_TickRefresh(sym)                             |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_LOWTFTREND_MQH
 #define ICT2026_LOWTFTREND_MQH

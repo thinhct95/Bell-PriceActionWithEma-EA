@@ -1,5 +1,46 @@
 //+------------------------------------------------------------------+
-//| Types.mqh — ICT 2026 data model                                  |
+//| Types.mqh — ICT 2026 data model (foundation layer)               |
+//+------------------------------------------------------------------+
+//| Mục đích:                                                         |
+//|   File này CHỈ CHỨA enums + structs + một vài hằng số. KHÔNG có   |
+//|   function logic. Bất kỳ file nào trong ICT2026 module đều có thể |
+//|   include trực tiếp file này mà không lo cycle dependency.        |
+//|                                                                   |
+//| Enums chính:                                                      |
+//|   ENUM_ICT_BIAS         : BULL / BEAR / NONE / RANGE              |
+//|   ENUM_ICT_STRUCT       : HH_HL / LH_LL / MIXED / UNKNOWN         |
+//|   ENUM_ICT_MS_EVENT     : NONE / BOS / CHOCH                      |
+//|   ENUM_ICT_TREND        : UP / DOWN / NONE (+ EARLY phase)        |
+//|   ENUM_ICT_FVG_SIDE     : BULL / BEAR / NONE                      |
+//|   ENUM_ICT_FVG_STATE    : AVAILABLE / USED                        |
+//|   ENUM_ICT_MSS_PHASE    : IDLE → H1_TOUCH → CHOCH → M5_FVG →      |
+//|                            ENTRY_FILL → READY                     |
+//|   ENUM_ICT_HTF_BIAS     : UP / DOWN / SIDEWAY / NONE (PreviousDay)|
+//|   ENUM_ICT_TREND_PHASE  : CLEAR (HH-HL/LH-LL rõ) / EARLY (sau     |
+//|                            CHoCH chưa rõ)                         |
+//|                                                                   |
+//| Structs chính:                                                    |
+//|   IctSwingPoint       : 1 pivot {price, time, shift}              |
+//|   IctSwingSet         : 4 pivot H0/L0/H1/L1 + flags isComplete    |
+//|   IctTrendResolveCtx  : input for IctResolveTrend                 |
+//|   IctDailyBiasState   : bias, structural, lastEvent, pdh/pdl/eq,  |
+//|                          keyLv1/keyLv2, swings, reason, htf       |
+//|   IctIntradayState    : trend, isAllowTrade, swings, lastEvent    |
+//|   IctFvgZone          : side, state, lower/upper, createdTime,    |
+//|                          firstTouchTime, maxFillRatio, pdHigh/Low,|
+//|                          pdEq, pdComplete, pdSwing1Set, id, ...   |
+//|   IctMssState         : phase, h1FvgId, h1TouchTime, h1WatchFvgId,|
+//|                          chochLocked, chochBias, chochKeyLevel,   |
+//|                          chochKeyTime, chochTime, slSwingPrice,   |
+//|                          liveL0/H0/L1/H1 price+time,              |
+//|                          m5FvgId, m5FvgTime, pendingTicket,       |
+//|                          pendingEntry/Sl/Tp, pendingPlacedTime,   |
+//|                          partialTriggerPrice, partialCloseDone,   |
+//|                          beMovedDone, displayReason               |
+//|   IctEaState          : code (STATE enum), title, detail          |
+//|   IctLowTfState       : lastBarTime, lastConfirmBarTime, mss,     |
+//|                          activeCount, availableCount,             |
+//|                          confirmFvgCount, displayReason           |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_TYPES_MQH
 #define ICT2026_TYPES_MQH
@@ -232,6 +273,7 @@ struct IctMssState
    double               pendingTp;
    double               partialTriggerPrice;
    bool                 partialCloseDone;
+   bool                 beMovedDone;
    double               liveL0Price;
    double               liveH0Price;
    datetime             liveL0Time;
@@ -264,6 +306,7 @@ struct IctMssState
       pendingTp           = 0.0;
       partialTriggerPrice = 0.0;
       partialCloseDone    = false;
+      beMovedDone         = false;
       liveL0Price   = 0.0;
       liveH0Price   = 0.0;
       liveL0Time    = 0;

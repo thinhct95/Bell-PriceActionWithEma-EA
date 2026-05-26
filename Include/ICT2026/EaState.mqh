@@ -1,5 +1,37 @@
 //+------------------------------------------------------------------+
-//| EaState.mqh — State machine tổng: STOP vs SETUP pipeline MSS      |
+//| EaState.mqh — STATE machine cao cấp cho panel + API export       |
+//+------------------------------------------------------------------+
+//| Map (mss.phase + flags + bias/intraday) → CODE category:          |
+//|                                                                   |
+//|   STOP  — không trade được:                                        |
+//|     STOP_NO_BIAS                — bias = NONE                     |
+//|     STOP_BIAS_RANGE             — bias = RANGE                    |
+//|     STOP_INTRADAY_NONE          — bias rõ + intraday = NONE       |
+//|     STOP_BIAS_INTRADAY_MISMATCH — bias ≠ intraday                 |
+//|                                                                   |
+//|   SETUP — đang setup:                                              |
+//|     WAIT_FVG_TOUCH        — chờ retest H1 POI                     |
+//|     FVG_TOUCHED_WAIT_MSS  — H1 retest + chờ M5 phá keylv          |
+//|     MSS_OK_WAIT_M5_FVG    — MSS lock + chờ M5 FVG                 |
+//|     M5_FVG_WAIT_RETRACE   — có M5 FVG + chờ hồi fill              |
+//|     READY_FOR_LIMIT       — vùng entry, sắp đặt                  |
+//|                                                                   |
+//|   TRADE — có order:                                                |
+//|     LIMIT_ORDER_PENDING   — pending limit magic                   |
+//|     ON_TRADE              — position magic                       |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictEaState  — IctEaState (code, title, detail)                |
+//|                                                                   |
+//| Lưu ý category vs code:                                            |
+//|   Category {STOP/SETUP/TRADE} là "phân nhóm" hiển thị; code là    |
+//|   "vị trí cụ thể trong nhóm".                                     |
+//|                                                                   |
+//| Public API:                                                       |
+//|   void IctEaState_Init() / IctEaState_Refresh(sym)                |
+//|   ENUM_ICT_EA_STATE ICT2026_GetEaState()                          |
+//|   string ICT2026_GetEaStateCode()                                 |
+//|   string ICT2026_GetEaStateDetail()                               |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_EASTATE_MQH
 #define ICT2026_EASTATE_MQH

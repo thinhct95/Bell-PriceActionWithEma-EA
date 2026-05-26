@@ -1,5 +1,30 @@
 //+------------------------------------------------------------------+
-//| MssDraw.mqh — vẽ MSS sau H1 chạm FVG: touch, 38.2%, CHoCH, H0    |
+//| MssDraw.mqh — render MSS objects (touch line, keylv, entry/SL/TP)|
+//+------------------------------------------------------------------+
+//| Vẽ khi phase >= H1_TOUCH && h1FvgId > 0. Hết phase ⇒ DeleteAll.   |
+//|                                                                   |
+//| Objects:                                                          |
+//|   H1_TOUCH (vline + label)  — TS giá chạm H1 FVG (dodger blue)    |
+//|   H1_382 (hline)             — mức touch fill % tham khảo          |
+//|   CHOCH (hline + label):                                          |
+//|     - dotted gold + "L0 live"/"H0 live" khi phase=H1_TOUCH         |
+//|                                       && !chochLocked              |
+//|     - solid gold + "MSS↓ L0"/"MSS↑ H0" khi chochLocked             |
+//|   MSS_SW (hline) — swing đối diện (SL anchor) — yellow             |
+//|   ENTRY/SL/TP (hline) — khi pendingEntry > 0 + phase >= M5_FVG    |
+//|                                                                   |
+//| Lưu ý visibility:                                                 |
+//|   - "live" label chỉ vẽ khi UpdateLiveM5Swings tìm được pivot     |
+//|     hợp lệ (đủ cấu trúc 2 đỉnh/đáy SAU touch — v1.165/1.171)      |
+//|   - Phase reset (TP/SL/EOD/timeout/stale/bias flip) ⇒ DeleteAll  |
+//|                                                                   |
+//| Skip nếu: InpOnlyStatsMode = true                                 |
+//|                                                                   |
+//| Object prefix: ICT26_MSS_                                         |
+//|                                                                   |
+//| Public API:                                                       |
+//|   void IctMssDraw_Render(sym)                                     |
+//|   void IctMssDraw_DeleteAll()                                     |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_MSSDRAW_MQH
 #define ICT2026_MSSDRAW_MQH

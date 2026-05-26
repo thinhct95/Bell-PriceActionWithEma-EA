@@ -1,6 +1,29 @@
 //+------------------------------------------------------------------+
-//| Draw.mqh — label swing theo TF chart hiện tại                      |
-//| Chart lớn (D1): b* | Chart H1: b*+i* | Chart M5: b*+i*+H0–L1      |
+//| Draw.mqh — swing labels trên chart (adaptive theo chart TF)      |
+//+------------------------------------------------------------------+
+//| Vẽ 3 lớp swing labels, tự động ẩn lớp có TF nhỏ hơn chart hiện   |
+//| tại để không bị nhiễu:                                            |
+//|                                                                   |
+//|   Chart TF      | Vẽ                                              |
+//|   --------------+-------------------------------------------------|
+//|   ≥ InpBiasTf   | bH0, bH1, bL0, bL1                              |
+//|   ≥ InpIntra    | + iH0, iH1, iL0, iL1                            |
+//|   ≥ InpConfirm  | + H0, H1, L0, L1 (Confirm TF swing)             |
+//|                                                                   |
+//| Bật/tắt từng lớp:                                                 |
+//|   InpDrawBiasSwingLabels                                          |
+//|   InpDrawIntraSwingLabels                                         |
+//|   InpDrawConfirmLabels                                            |
+//|                                                                   |
+//| So sánh: PeriodSeconds(chart) vs PeriodSeconds(InpXxxTf).         |
+//|                                                                   |
+//| Skip nếu: InpOnlyStatsMode = true                                 |
+//|                                                                   |
+//| Object prefix: ICT26_DR_                                          |
+//|                                                                   |
+//| Public API:                                                       |
+//|   void IctDraw_Render(sym)                                        |
+//|   void IctDraw_DeleteAll()                                        |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_DRAW_MQH
 #define ICT2026_DRAW_MQH

@@ -1,5 +1,34 @@
 //+------------------------------------------------------------------+
-//| Stats.mqh — thống kê lệnh MSS từ history (theo magic)             |
+//| Stats.mqh — thống kê lệnh MSS từ HistoryDeals (theo magic)       |
+//+------------------------------------------------------------------+
+//| Quét HistoryDeals filter symbol + magic = InpMssMagic. Compute:   |
+//|   total / tpCount / slCount / otherCount                          |
+//|   winCount / lossCount / sumR / netProfit                         |
+//|                                                                   |
+//| v1.183 — chỉ TP/SL được đếm vào total/win/loss/sumR/tp/sl. Partial|
+//| close / manual / EA-close → otherCount (chỉ log, không vào panel).|
+//| netProfit cộng dồn TẤT CẢ deals (kể cả partial — P&L thực).       |
+//| AvgR = sumR / (tpCount + slCount) — đồng nhất với cách đếm.       |
+//|                                                                   |
+//| 2-pass scan (v1.142 fix):                                         |
+//|   Pass 1: chỉ collect ticket + reason + net (global selection còn |
+//|           nguyên, không gọi HistorySelectByPosition)               |
+//|   Pass 2: tính R cho từng ticket (mỗi call thay selection)        |
+//|                                                                   |
+//| R computation (ComputeR):                                         |
+//|   R = (closePrice - entryPrice) / (entryPrice - slPrice)  for BUY |
+//|     = (entryPrice - closePrice) / (slPrice - entryPrice)  for SELL|
+//|   entryPrice + slPrice lấy từ DEAL_ENTRY_IN + ORDER_SL của        |
+//|   position.                                                       |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictMssStats           — IctMssStats struct                    |
+//|   g_ictMssStatsLastScan   — TS scan gần nhất (debounce)           |
+//|                                                                   |
+//| Public API:                                                       |
+//|   void IctMssStats_Recompute(sym, magic)                          |
+//|   double IctMssStats_WinratePct() / IctMssStats_AvgR()            |
+//|   string IctMssStats_LineCounts() / IctMssStats_LinePerf()        |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_STATS_MQH
 #define ICT2026_STATS_MQH
@@ -114,22 +143,29 @@ void IctMssStats_Recompute(const string sym, const ulong magic)
       cached++;
    }
 
-   // Pass 2: tính R cho từng deal (mỗi lần gọi sẽ thay selection — không ảnh hưởng vì đã cache xong).
+   // Pass 2: chỉ tính TP/SL vào stats. Partial close / manual close
+   // không phải kết quả lệnh ⇒ skip total/tp/sl/win/loss/sumR.
+   // netProfit vẫn cộng dồn TẤT CẢ deals để phản ánh đúng P&L thực tế.
    for(int k = 0; k < cached; k++)
    {
-      const double r = IctMssStats_ComputeR(outTickets[k]);
-
-      g_ictMssStats.total++;
       g_ictMssStats.netProfit += nets[k];
-      g_ictMssStats.sumR      += r;
 
       const ENUM_DEAL_REASON rs = (ENUM_DEAL_REASON)reasons[k];
-      if(rs == DEAL_REASON_TP)
-         g_ictMssStats.tpCount++;
-      else if(rs == DEAL_REASON_SL)
-         g_ictMssStats.slCount++;
-      else
+      const bool isTp = (rs == DEAL_REASON_TP);
+      const bool isSl = (rs == DEAL_REASON_SL);
+      if(!isTp && !isSl)
+      {
          g_ictMssStats.otherCount++;
+         continue;
+      }
+
+      const double r = IctMssStats_ComputeR(outTickets[k]);
+      g_ictMssStats.total++;
+      g_ictMssStats.sumR += r;
+      if(isTp)
+         g_ictMssStats.tpCount++;
+      else
+         g_ictMssStats.slCount++;
 
       if(nets[k] > 0.0)
          g_ictMssStats.winCount++;
@@ -140,7 +176,7 @@ void IctMssStats_Recompute(const string sym, const ulong magic)
    g_ictMssStatsLastScan = TimeCurrent();
 
    if(InpMssLogJournal)
-      PrintFormat("[ICT2026/Stats] Recompute %s magic=%I64u | total=%d TP=%d SL=%d khác=%d | net=%.2f sumR=%.2f",
+      PrintFormat("[ICT2026/Stats] Recompute %s magic=%I64u | total=%d TP=%d SL=%d (skip khác=%d) | net=%.2f sumR=%.2f",
                   sym, magic,
                   g_ictMssStats.total, g_ictMssStats.tpCount,
                   g_ictMssStats.slCount, g_ictMssStats.otherCount,
@@ -157,18 +193,18 @@ double IctMssStats_WinratePct()
 
 double IctMssStats_AvgR()
 {
-   if(g_ictMssStats.total <= 0)
+   const int decided = g_ictMssStats.tpCount + g_ictMssStats.slCount;
+   if(decided <= 0)
       return 0.0;
-   return g_ictMssStats.sumR / (double)g_ictMssStats.total;
+   return g_ictMssStats.sumR / (double)decided;
 }
 
 string IctMssStats_LineCounts()
 {
-   return StringFormat("Stats: %d lệnh | TP %d | SL %d | khác %d",
+   return StringFormat("Stats: %d lệnh | TP %d | SL %d",
                        g_ictMssStats.total,
                        g_ictMssStats.tpCount,
-                       g_ictMssStats.slCount,
-                       g_ictMssStats.otherCount);
+                       g_ictMssStats.slCount);
 }
 
 string IctMssStats_LinePerf()

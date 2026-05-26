@@ -1,5 +1,36 @@
 //+------------------------------------------------------------------+
-//| IntradayStructure.mqh — trend rõ (HH-HL/LH-LL) vs sớm (CHoCH)  |
+//| IntradayStructure.mqh — Intraday trend (H1) + IsAllowTrade gate  |
+//+------------------------------------------------------------------+
+//| TF: InpIntradayTf (default H1)                                    |
+//|                                                                   |
+//| Phân loại HH-HL / LH-LL bằng "2 đỉnh + 2 đáy gần nhất" trong       |
+//| InpIntradayRecentBars (default 80 H1 bars) — KHÔNG ghép leg 4     |
+//| swing dài như Daily (tránh dùng cấu trúc cũ khi giá đã đổi).       |
+//|                                                                   |
+//| CHoCH ưu tiên trước HH-HL/LH-LL: nếu H[1].close phá Key cũ →      |
+//| chuyển sang "sớm" (Bull/Bear sớm) bất kể pivot vẫn còn HH-HL.      |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictIntraday     — IctIntradayState (trend, swings, event,    |
+//|                        isAllowTrade)                              |
+//|   g_ictIntradayCtx  — context truyền vào IctResolveTrend          |
+//|                                                                   |
+//| IsAllowTrade (truth table):                                       |
+//|   Bias=BULL + Intraday∈{UP, BULL EARLY}        ⇒ true             |
+//|   Bias=BEAR + Intraday∈{DOWN, BEAR EARLY}      ⇒ true             |
+//|   Intraday=NONE / opposite                      ⇒ false           |
+//|                                                                   |
+//| Public API:                                                       |
+//|   bool IctIntraday_Init(sym)                                      |
+//|   bool IctIntraday_Update(sym)  — true khi có nến H1 mới          |
+//|   void IctIntraday_UpdateAllowTrade()  — tính lại isAllowTrade   |
+//|   bool IctIntraday_IsAllowTrade()                                 |
+//|   ENUM_ICT_TREND ICT2026_GetIntradayTrend()                       |
+//|   bool IctIntraday_TrendAlignsWithBias(bias, trend) — predicate   |
+//|                                                                   |
+//| Lưu ý v1.181: isAllowTrade KHÔNG còn dùng để gate MSS pipeline    |
+//| nữa (mặc định). Pipeline chạy theo Bias, isAllowTrade chỉ gate    |
+//| entry khi InpMssRequireIntradayAligned=true.                      |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_INTRADAYSTRUCTURE_MQH
 #define ICT2026_INTRADAYSTRUCTURE_MQH

@@ -1,5 +1,39 @@
 //+------------------------------------------------------------------+
-//| Swing.mqh — pivot & swing set H0–L1 (tham khảo HyperICT)         |
+//| Swing.mqh — pivot detection + swing set 4-point (H0/L0/H1/L1)    |
+//+------------------------------------------------------------------+
+//| Foundation module — không phụ thuộc bất kỳ file nào khác ngoài    |
+//| Types.mqh.                                                        |
+//|                                                                   |
+//| Pivot definition (N-bar fractal, N = swingRange):                 |
+//|   Swing High at shift k = High[k] > High[k±i] for i=1..N         |
+//|   Swing Low  at shift k = Low[k]  < Low[k±i]  for i=1..N         |
+//|                                                                   |
+//| Build swing set (4-point leg):                                    |
+//|   IctBuildBiasSwingSet      — H0/L0/H1/L1 ghép theo leg time     |
+//|   IctBuildIntradaySwingSet — 2 đỉnh + 2 đáy gần nhất (không leg)|
+//|   IctBuildConfirmSwingSet  — như intraday cho M5                 |
+//|                                                                   |
+//| Classification (IctClassifyStructure):                            |
+//|   H0 > H1 && L0 > L1  ⇒ HH-HL (bull)                              |
+//|   H0 < H1 && L0 < L1  ⇒ LH-LL (bear)                              |
+//|   else                ⇒ MIXED                                    |
+//|                                                                   |
+//| Key level:                                                         |
+//|   Bull: keyLv1 = L0, keyLv2 = H0                                  |
+//|   Bear: keyLv1 = H0, keyLv2 = L0                                  |
+//|                                                                   |
+//| Fib validation (tùy chọn):                                         |
+//|   Sóng hồi H1→L0 ≥ InpFibMinRatio × sóng L1→H1                   |
+//|                                                                   |
+//| Public API:                                                       |
+//|   bool IctIsSwingHigh/Low(sym, tf, shift, range)                  |
+//|   bool IctBuildBiasSwingSet(sym, tf, &set, range, lookback)       |
+//|   bool IctBuildIntradaySwingSet(sym, tf, &set, range, lookback,  |
+//|                                  recentBars)                      |
+//|   bool IctBuildConfirmSwingSet(sym, tf, &set, range, lookback,   |
+//|                                 recentBars)                       |
+//|   ENUM_ICT_STRUCT IctClassifyStructure(&set)                      |
+//|   bool IctValidateFib(&set, minRatio)                             |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_SWING_MQH
 #define ICT2026_SWING_MQH

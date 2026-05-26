@@ -1,5 +1,23 @@
 //+------------------------------------------------------------------+
-//| Journal.mqh — log lý do chặn MSS/entry vào Experts journal        |
+//| Journal.mqh — log MSS pipeline + entry block reasons (de-dup)    |
+//+------------------------------------------------------------------+
+//| Log lên Experts Journal kèm de-dup (cùng reason consecutive →    |
+//| skip) để journal không spam khi pipeline đứng yên.                |
+//|                                                                   |
+//| Skip nếu: InpOnlyStatsMode = true (silent tester mode v1.162)    |
+//|                                                                   |
+//| 2 channels:                                                       |
+//|   IctMss_JournalPipeline(reason) — phase transition / wait        |
+//|   IctMss_JournalEntryBlock(reason) — lý do block không entry      |
+//|   IctMss_JournalReset() — reset cache khi setup reset             |
+//|                                                                   |
+//| Globals owned:                                                    |
+//|   g_ictMssJournalLast       — cache last pipeline reason          |
+//|   g_ictMssEntryJournalLast  — cache last block reason             |
+//|                                                                   |
+//| Helper:                                                           |
+//|   IctMss_IsEntryReadyReason(reason) — true nếu reason hợp lệ      |
+//|     (không thuộc "block" — e.g. "READY", "Limit placed")          |
 //+------------------------------------------------------------------+
 #ifndef ICT2026_JOURNAL_MQH
 #define ICT2026_JOURNAL_MQH

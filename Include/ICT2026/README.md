@@ -2,7 +2,7 @@
 
 Expert Advisor ICT 2026 — module hóa theo hướng ICT/SMC. **Không phụ thuộc HyperICT** (chỉ tham khảo ý tưởng swing & key level).
 
-Phiên bản hiện tại: **1.10**
+Phiên bản hiện tại: **1.184**
 
 ---
 
@@ -17,13 +17,192 @@ Phiên bản hiện tại: **1.10**
 ## Mục lục
 
 1. [Cấu trúc thư mục](#folder-structure)
-2. [Pipeline Daily Bias](#pipeline)
-3. [Logic nghiệp vụ](#business-logic)
-4. [Mô tả từng file](#file-reference)
-5. [API](#api)
-6. [Input](#inputs)
-7. [Chưa implement](#roadmap)
-8. [Changelog](#changelog)
+2. [Current architecture (v1.187) — flow end-to-end](#current-architecture)
+3. [Pipeline Daily Bias](#pipeline)
+4. [Logic nghiệp vụ](#business-logic)
+5. [Mô tả từng file](#file-reference)
+6. [API](#api)
+7. [Input](#inputs)
+8. [Chưa implement](#roadmap)
+9. [Changelog](#changelog)
+
+---
+
+<a id="current-architecture"></a>
+
+## Current Architecture (v1.187) — flow end-to-end
+
+> **Nếu bạn chỉ đọc 1 mục, đọc mục này.** Các mục bên dưới là chi tiết từng phần.
+
+### A. Mỗi tick (`OnTick` trong `ICT_2026.mq5`)
+
+```
+OnTick(sym)
+ ├─ IctDailyBias_Update(sym)        ── D1 nến mới ⇒ recompute bias
+ │   └─ IctDailyBias_TrackTransition() ⇒ set g_ictBiasInto{Bull,Bear}Time (v1.182)
+ │
+ ├─ IctIntraday_Update(sym)         ── H1 nến mới ⇒ trend + IsAllowTrade
+ │
+ ├─ IctLowTfTrend_Update(sym)       ── H1 (FvgTf) nến mới ⇒ FVG scan + MSS pipeline
+ │   ├─ IctIntraday_UpdateAllowTrade()
+ │   ├─ IctFvg_UpdateAll(sym, tf)   ⇒ Available / Used / PD
+ │   ├─ IctFvg_ScanNew(...)         ⇒ thêm FVG thuận Bias
+ │   ├─ IctMss_Update(sym)          ⇒ phase machine (IDLE→H1_TOUCH→CHOCH→M5_FVG→ENTRY_FILL→READY)
+ │   ├─ IctMssEntry_Update(sym)     ⇒ place/replace/cancel limit
+ │   └─ IctEaState_Refresh(sym)     ⇒ map sang STATE code cho panel
+ │
+ ├─ IctLowTfTrend_TickRefresh(sym)  ── update fill ratio + PD on every tick
+ │
+ └─ if(!OnlyStatsMode)
+     ├─ IctPanel_Render(sym)
+     ├─ IctDraw_Render(sym)
+     ├─ IctFvgDraw_Render(sym)      ⇒ top-N + price-near (v1.180)
+     └─ IctMssDraw_Render(sym)      ⇒ live/locked labels
+```
+
+### B. Daily Bias resolution (`DailyBias.mqh`, v1.175)
+
+Thứ tự ưu tiên (cao→thấp):
+
+```
+1) D1/D2 pattern (IctDailyBias_ResolveD1D2)
+   ├─ D[1].close > D[2].high                → BULL  (breakout)
+   ├─ D[1].close < D[2].low                 → BEAR  (breakdown)
+   ├─ D[1].high > D[2].high && close ∈ D[2] → BEAR  (sweep bear liq)
+   └─ D[1].low  < D[2].low  && close ∈ D[2] → BULL  (sweep bull liq)
+
+2) Structural HH-HL / LH-LL (IctResolveTrend)
+
+3) HTF fallback (IctUpdateHTFBias — Previous Day Model)
+```
+
+Sau khi resolve: `IctDailyBias_TrackTransition()` cập nhật `g_ictBiasIntoBullTime` / `g_ictBiasIntoBearTime` nếu bias xoay side ⇒ dùng làm cutoff cho FVG fresh touch (xem D bên dưới).
+
+### C. MSS Pipeline (`MssSetup.mqh`)
+
+State machine `g_ictLowTf.mss.phase`:
+
+```
+IDLE
+ │ IctMss_SelectNearestH1Poi() ⇒ chọn H1 FVG gần giá nhất
+ │ IctMss_HasFreshFvgTouch()   ⇒ touch hợp lệ (xem D)
+ ↓
+H1_TOUCH                         ──── (Retest FVG H1 OK)
+ │ IctMss_UpdateLiveM5Swings()  ⇒ liveL0/H0/L1/H1 structural (v1.171)
+ │ IctMss_TryLockMss()          ⇒ M5 phá L0 (BEAR) / H0 (BULL)
+ │                                  cấu trúc đầy đủ ≥ 2 đỉnh/đáy SAU touch
+ │ veto nếu InpMssRequireIntradayAligned && intraday ngược bias (v1.174/1.181)
+ ↓
+CHOCH                            ──── (MSS↑/↓ locked)
+ │ IctConfirmFvg_ScanNew()      ⇒ tìm M5 FVG sau chochTime
+ │                                  (M5 FVG optional — entry tại MSS keyLV nếu vắng)
+ │ IctMss_ZonesOverlapH1()       ⇒ M5 FVG phải gần H1 FVG
+ ↓
+M5_FVG → ENTRY_FILL → READY      ──── (chờ giá hồi vào M5 FVG)
+```
+
+Entry gating (`IctMssEntry_Update`):
+
+```
+gate1: InpMssTradeEnabled (true)
+gate2: phase >= CHOCH && chochLocked && chochKeyLevel > 0
+gate3: intradayBlock = InpMssRequireIntradayAligned && !isAllowTrade  (default FALSE)
+gate4: !InpMssOnePosition || no existing position+pending
+```
+
+ComputeLevels (`MssEntry.mqh`, v1.164 + v1.184):
+
+```
+side ← (m5 FVG.side) hoặc chochBias
+SL  ← max(H0,H1)+buffer  (BEAR) / min(L0,L1)-buffer  (BULL)
+        buffer = InpMssSlSpreadMult × spread
+
+2 candidates entry:
+  A) M5 FVG limit price
+  B) MSS keyLV (chochKeyLevel)
+chọn cái có risk = |entry - SL| nhỏ hơn (limit phải đúng phía thị trường)
+
+TP target = iH0/iL0 (sóng H1):
+  RR(TP@iH0) > InpMssMinRR ⇒ TP @ iH0 - InpMssTpSpreadMult × spread (swing target)
+  else ⇒ TP = entry ± risk × InpMssMinRR (= 2R fixed)
+
+partialTriggerPrice = swingTp (nếu TP gồng xa hơn swing) ⇒ partial 50% + SL→BE
+
+CHECK CUỐI (v1.184): |entry - market| ≤ InpMssMaxLimitDistAtrMult × ATR(FvgTf)
+  Quá xa ⇒ skip + mark FVG used + reset state
+```
+
+Place limit (`IctMssEntry_PlaceLimit`):
+- BUY_LIMIT (BULL) / SELL_LIMIT (BEAR), magic = `InpMssMagic`
+- Lưu `pendingTicket`, `pendingPlacedTime`, `pendingEntry/Sl/Tp`, `partialTriggerPrice`
+
+Per-tick checks (xem `IctMssEntry_Update`):
+```
+IctMssEntry_CheckEodCancel()      ── cancel cuối phiên Mỹ
+IctMssEntry_CheckPendingTimeout() ── cancel sau N giờ (default 1h)
+IctMssEntry_CheckTpReachedBeforeFill() ── cancel nếu giá đã chạm TP (v1.185)
+IctMssEntry_CheckStaleLimit()     ── cancel nếu rời xa giá > N×ATR (v1.184)
+IctMssEntry_CheckBreakevenAtRR()  ── dời SL→entry @ N×R (default off)
+IctMssEntry_CheckPartialClose()   ── partial 50% @ swingTp + SL→BE
+```
+
+### D. FVG fresh touch (`MssSetup.mqh`, v1.182)
+
+Touch hợp lệ khi xảy ra **sau** cutoff (latest của):
+1. `g_ictMssAfterCloseGuard` (sau TP/SL/manual close / timeout / stale limit)
+2. `g_ictBiasIntoBullTime` (nếu bias hiện tại = BULL) hoặc `g_ictBiasIntoBearTime` (nếu BEAR)
+
+```
+IctMss_GetFvgTouchTime(sym, h1):
+   cutoff = IctMss_GetFvgTouchCutoff()
+   t = h1.firstTouchTime (nếu > cutoff) || 0
+   tM5 = IctMss_FirstM5TouchInFvg(sym, h1, since=cutoff)
+   t = min(t, tM5) (lấy sớm nhất sau cutoff)
+   nếu vẫn 0 && IctMss_LivePriceTouchesFvg(sym, h1) && curBar ≥ cutoff
+      t = curBar
+   return t
+
+IctMss_HasFreshFvgTouch(sym, h1):
+   tTouch = IctMss_GetFvgTouchTime(sym, h1)
+   nếu tTouch ≤ 0 ⇒ false
+   requiredPct = IctFvg_RequiredTouchFillPct(h1)
+              = Pure (25%) nếu FVG hoàn toàn trong vùng PD đúng chiều / lớn / PD off
+              = Mixed (50%) nếu straddle equilibrium
+   return h1.maxFillRatio × 100 ≥ requiredPct
+```
+
+### E. POI filtering (`Fvg.mqh`)
+
+```
+IctFvg_IsEntryRepPd(zone, bias):
+   nếu !InpFvgPdEnabled ⇒ true (toàn bộ FVG qualify) [v1.179]
+   else:    (v1.187: bỏ large-FVG bypass — áp PD cho TẤT CẢ FVG)
+      BEAR ⇒ overlap với Premium ≥ InpFvgPdMinOverlapPct (0=any overlap)
+      BULL ⇒ overlap với Discount tương tự
+```
+
+### F. State reset triggers (giai đoạn sau-trade / failsafe)
+
+| Trigger | Hành động | Function |
+|---|---|---|
+| TP/SL/manual close | mark M5 used + reset + set guard | `IctMss_OnPositionClosed` |
+| EOD (cuối phiên Mỹ) | cancel pending + reset | `IctMss_OnEodCancel` |
+| Pending timeout (1h) | cancel + mark used + reset + guard | `IctMss_OnPendingTimeout` |
+| Stale limit (> N×ATR) | cancel + mark used + reset + guard | `IctMssEntry_CheckStaleLimit` |
+| Bias xoay side | cutoff áp dụng cho touch tự động | `IctDailyBias_TrackTransition` |
+| H1 body đóng xuyên FVG | FVG → Used, reset | `IctMss_FailFvgH1Body` |
+| FVG POI → Used giữa setup | reset | trong `IctMss_Update` |
+
+### G. Tầng gating 2-layer
+
+| Layer | Check | File |
+|---|---|---|
+| **Pipeline gate** | `g_ictDailyBias.bias != NONE` (Bias rõ) | `IctMss_Update`, `IctLowTfTrend_Update` |
+| **Entry gate** | `intradayBlock = InpMssRequireIntradayAligned && !isAllowTrade` | `IctMssEntry_Update` |
+
+Mặc định v1.181: cả 2 layer đều **cho phép** khi Bias rõ, không yêu cầu intraday align.
+
+---
 
 ---
 
@@ -463,16 +642,56 @@ Màu chữ: **Up** = xanh lá, **Down** = đỏ cam, **Range** = vàng, **None**
 
 ## Mô tả từng file
 
+### Foundation (types + utils + io)
+
+| File | Trách nhiệm | Globals owned |
+|------|-------------|---------------|
+| `Types.mqh` | Enums (`ENUM_ICT_BIAS/STRUCT/MS_EVENT/TREND/FVG_*/MSS_PHASE`), structs (`IctSwingPoint`, `IctSwingSet`, `IctDailyBiasState`, `IctIntradayState`, `IctFvgZone`, `IctMssState`, `IctEaState`, `IctLowTfState`) | — |
+| `Config.mqh` | Tất cả `input` params (~50 inputs gom 8 groups: Bias / Intraday / Test / Display / Confirm / FVG / MSS / Debug) | — |
+| `Journal.mqh` | `IctMss_JournalPipeline`, `IctMss_JournalEntryBlock`, `IctMss_JournalReset` — gated bởi `InpOnlyStatsMode` | `g_ictMssLastJournalReason` |
+| `Swing.mqh` | Pivot detection (5-bar fractal), `IctBuildBiasSwingSet`, `IctBuildIntradaySwingSet`, `IctBuildConfirmSwingSet`, fib validate | — |
+| `StructureCore.mqh` | `IctBodyBreakAbove/Below`, `IctDetectStructureEvent` (BOS/CHoCH detect trên Key H0/L0) | — |
+| `StructureTrend.mqh` | `IctResolveTrend` (rõ HH-HL / LH-LL vs sớm sau CHoCH) — chia sẻ cho cả Daily + Intraday | — |
+
+### Bias & Trend (3 tầng TF)
+
+| File | Trách nhiệm | Globals owned |
+|------|-------------|---------------|
+| `DailyBias.mqh` | D1 bias resolver theo thứ tự ưu tiên D1/D2 → structural → HTF fallback. Track bias transition (v1.182) | `g_ictDailyBias`, `g_ictDailyCtx`, `g_ictBiasIntoBullTime`, `g_ictBiasIntoBearTime` |
+| `IntradayStructure.mqh` | H1 trend (HH-HL / LH-LL với 2 đỉnh + 2 đáy gần nhất trong `InpIntradayRecentBars`), CHoCH ưu tiên trước, `isAllowTrade` (`Bias align Intraday`) | `g_ictIntraday` |
+
+### Low TF (FVG + Confirm)
+
+| File | Trách nhiệm | Globals owned |
+|------|-------------|---------------|
+| `Fvg.mqh` | Detect FVG 3 nến A-B-C, fill ratio, PD zone từ pivot swing-1/swing-2, ATR helper | `g_ictFvgZones[]`, `g_ictFvgCount` |
+| `ConfirmFvg.mqh` | M5 (Confirm TF) FVG pool — scan sau CHoCH | `g_ictConfirmFvgZones[]`, `g_ictConfirmFvgCount` |
+| `LowTfApi.mqh` | Helpers truy cập `g_ictLowTf`, FVG side from bias, market side text | `g_ictLowTf` |
+| `LowTfTrend.mqh` | Orchestrator: H1 nến mới ⇒ scan FVG, gọi MSS pipeline, refresh tick (PD/fill update) | — (sử dụng `g_ictLowTf`) |
+
+### MSS Pipeline (setup → entry)
+
+| File | Trách nhiệm | Globals owned |
+|------|-------------|---------------|
+| `MssSetup.mqh` | Phase machine IDLE→H1_TOUCH→CHOCH→M5_FVG→ENTRY_FILL→READY, fresh touch cutoff (v1.182), structural keylv lock (v1.171), MSS lock + invalidation | `g_ictMssAfterCloseGuard` |
+| `MssEntry.mqh` | Order management: ComputeLevels (2-candidate min-risk + cap distance), PlaceLimit, partial close, BE@N×R, stale limit, EOD/timeout cancel, OnPositionClosed | `g_ictMssTrade` (CTrade) |
+
+### State + UI
+
+| File | Trách nhiệm | Globals owned |
+|------|-------------|---------------|
+| `EaState.mqh` | Map `mss.phase` + flags ⇒ EA STATE code (STOP_*/SETUP_*/TRADE_*). Cấp tiêu đề + chi tiết cho panel | `g_ictEaState` |
+| `Panel.mqh` | Vẽ panel 8-10 dòng góc trên trái: state, bias, intraday, AllowEntry, MSS reason, Stats line | — |
+| `Draw.mqh` | Label swing trên chart (bH0–bL1, iH0–iL1, H0–L1 confirm) — auto theo TF chart | — |
+| `FvgDraw.mqh` | Render FVG + PD top-N gần nhất + price-near (v1.180) — bỏ vẽ FVG xa giá để chart không lag | — |
+| `MssDraw.mqh` | Vẽ MSS objects: H1 touch line, retest label, live L0/H0 (dotted gold), MSS↑/↓ confirmed (solid), entry/SL/TP lines | — |
+| `Stats.mqh` | Quét HistoryDeals theo magic, đếm TP/SL/total/WR/sumR/netProfit (chỉ TP/SL — v1.183) | `g_ictMssStats`, `g_ictMssStatsLastScan` |
+
+### EA root
+
 | File | Trách nhiệm |
 |------|-------------|
-| `Types.mqh` | `ENUM_ICT_BIAS`, `ENUM_ICT_STRUCT`, `ENUM_ICT_MS_EVENT`, `IctSwingSet`, `IctDailyBiasState` |
-| `Config.mqh` | Input: TF, swing range, lookback, Fib, debug |
-| `Swing.mqh` | Pivot detection, build swing set, classify HH-HL/LH-LL, key level, Fib validate |
-| `StructureCore.mqh` | `IctBodyBreak*`, `IctDetectStructureEvent` |
-| `DailyBias.mqh` | `IctUpdateHTFBias`, veto, `g_ictDailyBias` |
-| `IntradayStructure.mqh` | `IctIntraday_Update`, trend, `isAllowTrade`, `g_ictIntraday` |
-| `Panel.mqh` | Bias + Intraday + IsAllowTrade trên chart |
-| `ICT_2026.mq5` | Init/Update Daily + Intraday → panel |
+| `Experts/ICT_2026.mq5` | `OnInit` (gọi init từng module), `OnTick` (orchestrator), `OnTradeTransaction` (detect close → call `IctMss_OnPositionClosed`), `OnDeinit` |
 
 ---
 
@@ -566,6 +785,217 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 
 ## Changelog
 
+### v1.187 — Bỏ large-FVG bypass: áp PD cho TẤT CẢ FVG
+
+- **Lý do**: feature "dấu chân cá mập" (v1.178) cho FVG lớn vào MSS bất kể Premium/Discount → nhiều setup vào ngược vùng (Premium khi bull, Discount khi bear) → kết quả backtest kém.
+- **Thay đổi**:
+  - **Xoá inputs** khỏi `Config.mqh`: `InpFvgLargeBypassPd`, `InpFvgLargeMinAtrMult`.
+  - **Xoá helper** `IctFvg_IsLargeFvg(zone, sym)` trong `Fvg.mqh`.
+  - **Bỏ bypass call** trong `IctFvg_IsEntryRepPd` (mọi FVG phải qua check overlap ≥ `InpFvgPdMinOverlapPct`).
+  - **Bỏ bypass call** trong `IctFvg_RequiredTouchFillPct` (mọi FVG phải dùng threshold theo overlap thực tế: 25% Pure / 50% Mixed).
+- **Giữ lại**:
+  - Helper `IctFvg_AtrFvgTf(sym)` — vẫn được `MssEntry.mqh` dùng cho stale-limit cap (v1.184) và `FvgDraw.mqh` dùng cho rendering.
+  - Toggle global `InpFvgPdEnabled` — vẫn dùng được để tắt toàn bộ PD filter (cho A/B test).
+- **Hệ quả**: ít POI hơn (FVG lớn nằm sai vùng giờ bị loại), nhưng quality cao hơn (mọi entry đều ở vùng PD đúng chiều bias). Khôi phục hành vi trước v1.178.
+
+### v1.186 — Siết chặt body-break: thân nến đóng vượt level ≥ N × spread
+
+- **Vấn đề**: nến đóng "sát mép" key level/swing (close vượt 1 point) vẫn được tính là body-break ⇒ BOS/CHoCH/MSS-confirm + H1 invalidate kích hoạt nhầm trên nhiễu giá / spike trong spread → setup hủy oan hoặc MSS lock sai keyLv.
+- **Input mới** (`Config.mqh`):
+  - `InpBodyBreakSpreadMult = 10` — body close phải vượt level ≥ N × spread (Ask−Bid hiện tại). Fallback `_Point` khi spread = 0 (thị trường đóng cửa).
+- **Logic** (`StructureCore.mqh`):
+  - Helper mới `IctBodyBreakBuffer(sym) = MathMax(_Point, max(0, Ask−Bid) × InpBodyBreakSpreadMult)`.
+  - `IctBodyBreakAbove(level)` ⇔ `BodyTop > level + buffer`.
+  - `IctBodyBreakBelow(level)` ⇔ `BodyBottom < level − buffer`.
+- **Áp dụng** (mọi callsite dùng `IctBodyBreakAbove/Below`):
+  - BOS/CHoCH detect daily/intraday (`IctDetectStructureEvent`, `IctDetectTrendSwingEvent`).
+  - MSS confirm (`IctMss_FindMssBreakBar`, `IctMss_TryLockMss` shift=1).
+  - H1 invalidation (`IctMss_H1BodyInvalidatedSetup`) cũng dùng `IctBodyBreakBuffer` thay vì `_Point`.
+- **Hệ quả**: ít event giả; cấu trúc chỉ flip khi có close-through "có ý nghĩa" (≥ 10 spread, ~5–10 pip tuỳ symbol). Tránh churn keyLv khi giá lưỡng lự quanh đỉnh/đáy.
+
+### v1.185 — Cancel limit khi giá đã chạm TP trước khi khớp
+
+- **Vấn đề**: setup MSS bull/bear đúng, limit đặt tại M5 FVG / MSS keyLV, nhưng giá chạy thẳng đến TP target (iL0/iH0) mà KHÔNG hồi lại entry → khi giá đảo chiều quay về khớp limit thì "TP move" đã hết, lệnh chạy ngược → SL.
+- **Input mới** (`Config.mqh`):
+  - `InpMssCancelLimitWhenTpReached = true` — bật/tắt feature.
+- **Logic** (`MssEntry.mqh` → `IctMssEntry_CheckTpReachedBeforeFill`):
+  - Gọi mỗi tick trong `IctMssEntry_Update`, ngay sau `CheckPendingTimeout`, trước `CheckStaleLimit`.
+  - Có pending `BUY_LIMIT`/`SELL_LIMIT` + TP > 0 → so sánh:
+    - **BUY**: `Bid ≥ TP − Point` ⇒ giá đã chạm TP target
+    - **SELL**: `Ask ≤ TP + Point` ⇒ giá đã chạm TP target
+  - Nếu match: `OrderDelete(pendingTicket)` + `MarkM5FvgUsed` + `IctMss_ResetState` + set `g_ictMssAfterCloseGuard` → quay về `WAIT_FVG_TOUCH`.
+- **Hệ quả**: không bao giờ khớp lệnh "muộn" sau khi target đã được giá quét. Setup này coi như miss, EA tìm POI mới.
+- **So sánh stale-limit (v1.184)**: stale-limit cancel khi giá CHẠY XA entry (vượt N×ATR theo hướng cùng phía); TP-reached cancel khi giá đã ĐẾN TP (vượt qua entry rồi qua TP). Hai cơ chế bổ sung cho nhau.
+
+### v1.181 — Mặc định KHÔNG yêu cầu Intraday cùng chiều Bias
+
+- **Vấn đề**: nhiều setup giá đã chạy tới TP rồi mới khớp limit (vì Intraday chuyển sang thuận Bias muộn) → giá quay lại → SL
+- **Lý do**: v1.169-v1.174 yêu cầu Intraday cùng chiều Bias mới entry, dẫn đến miss setup khi Intraday lag
+- **Fix**: thêm toggle `InpMssRequireIntradayAligned = false` (mặc định **tắt**)
+  - **Tắt** (mặc định mới): MSS + entry chạy thuần theo Daily Bias, **không** quan tâm Intraday trend. Pipeline lock MSS + đặt limit ngay khi MSS valid
+  - **Bật**: behavior cũ — chặn entry + veto MSS lock khi Intraday ngược Bias
+- Thay đổi cụ thể:
+  - `MssSetup.mqh` (v1.174 veto): wrap với `if(InpMssRequireIntradayAligned && ...)`
+  - `MssEntry.mqh` (gate `isAllowTrade`): thay bằng `intradayBlock = (InpMssRequireIntradayAligned && !isAllowTrade)`
+- Trade-off:
+  - Tắt: nhiều entry hơn, ít miss setup, nhưng có thể vào lệnh khi Intraday đang ngược (phụ thuộc vào MSS quality)
+  - Bật: chất lượng entry cao hơn (đồng thuận TF), nhưng dễ bị "lag entry"
+- Intraday vẫn được tính + hiển thị trên panel — chỉ KHÔNG gate entry nữa (mặc định)
+
+### v1.180 — Tối ưu rendering: top-N FVG/PD + price-near, bỏ qua các FVG xa
+
+- **Vấn đề**: mỗi tick `IctFvgDraw_Render` `DeleteAll` + redraw toàn bộ FVG (24 H1 + N M5), mỗi FVG kèm 3 PD object → ~100+ object operation/tick → chart nặng
+- **Fix**: chỉ vẽ tập hợp tối thiểu cần thiết
+  - **Top-N USED gần nhất** (mặc định 3) — sort theo `createdTime` desc
+  - **Top-N AVAILABLE gần nhất** (mặc định 3)
+  - **FVG price-near**: giá hiện tại nằm trong `[lower − N×ATR, upper + N×ATR]` (mặc định 2×ATR)
+  - **M5 FVG đang được dùng cho MSS** luôn ép vẽ (ngay cả khi không nằm trong top/near)
+- Inputs mới:
+  - `InpDrawMaxRecentPerState = 3` — số FVG/PD gần nhất mỗi state (Used/Available)
+  - `InpDrawNearAtrMult = 2.0` — bán kính "near price" theo ATR(InpFvgTf) (0=tắt)
+- Helpers mới trong `FvgDraw.mqh`:
+  - `IctFvgDraw_SortIdxByTimeDesc(idx[], n, zones[])` — insertion sort indices
+  - `IctFvgDraw_BuildVisibleMask(zones[], count, sym, &visible[])` — build mask vẽ
+- Áp dụng cho cả H1 FVG (kèm PD) và M5 FVG (ConfirmFvg)
+- PD array tự động đi theo FVG → giảm tương ứng
+- Không ảnh hưởng logic pipeline (chỉ thay đổi rendering)
+
+### v1.179 — Toggle global bật/tắt PD filter (cho A/B test)
+
+- Input mới: `InpFvgPdEnabled = true` — bật/tắt điều kiện Premium/Discount toàn cục
+- Khi `false`: mọi FVG đều qualify làm POI (chỉ cần có Bias rõ ràng để chọn side)
+  - `IctFvg_IsEntryRepPd`: return true ngay
+  - `IctFvg_RequiredTouchFillPct`: trả về `InpFvgTouchFillPure` (25%) thay vì 50% mixed
+- Mặc định `true` ⇒ giữ hành vi cũ
+- Mục đích: A/B test "số lượng vs chất lượng":
+  - `true` = ít POI hơn nhưng chất lượng cao (sai vùng PD bị loại)
+  - `false` = nhiều POI hơn nhưng có thể trade trong vùng counter (Discount khi BEAR / Premium khi BULL)
+- Tương tác:
+  - Toggle global `InpFvgPdEnabled=true` ⇒ áp PD cho TẤT CẢ FVG (không còn ngoại lệ kể từ v1.187 — large-FVG bypass đã bị bỏ)
+  - `InpFvgPdEnabled=false` ⇒ bỏ qua PD hoàn toàn cho mọi FVG
+
+### v1.178 — (REMOVED in v1.187) FVG "dấu chân cá mập" bypass PD filter
+
+- ~~FVG height ≥ N × ATR ⇒ bypass PD filter~~ — **đã bỏ** ở v1.187 (xem changelog v1.187).
+- Inputs `InpFvgLargeBypassPd` và `InpFvgLargeMinAtrMult` đã được xoá khỏi `Config.mqh`.
+- Helper `IctFvg_IsLargeFvg(zone, sym)` đã bị xoá khỏi `Fvg.mqh`.
+- `IctFvg_AtrFvgTf(sym)` **vẫn được giữ** vì còn được dùng bởi `MssEntry.mqh` (stale-limit cap v1.184) và `FvgDraw.mqh`.
+
+### v1.177 — Tách toggle bật/tắt BE@RR (mặc định tắt)
+
+- Input mới: `InpMssBeEnabled = false` — bật/tắt độc lập với ngưỡng RR (mặc định **tắt**)
+- `InpMssBeAtRR = 2.0` — vẫn dùng để cấu hình ngưỡng khi `InpMssBeEnabled=true`
+- `IctMssEntry_CheckBreakevenAtRR`: thêm `if(!InpMssBeEnabled) return;` ở đầu
+- Lý do: tách boolean toggle khỏi giá trị số để config rõ ràng hơn, dễ A/B test BE on/off mà không phải nhớ giá trị cũ
+
+### v1.176 — Dời SL về entry khi đạt 2R (Breakeven sớm)
+
+- Input mới: `InpMssBeAtRR = 2.0` — dời SL về entry khi giá đi được N×R (0=tắt)
+- Function mới: `IctMssEntry_CheckBreakevenAtRR(sym)` — check mỗi tick
+- State mới: `IctMssState.beMovedDone` (bool) — đánh dấu đã dời BE, tránh dời lặp
+- Trigger: `price ≥ entry + N×risk` (BUY) hoặc `price ≤ entry − N×risk` (SELL)
+  - `risk = |pendingEntry − pendingSl|` (từ thời điểm đặt limit)
+- Hành vi: `PositionModify(ticket, entry, curTp)` — chỉ dời SL, TP giữ nguyên
+- Skip cases:
+  - `InpMssBeAtRR ≤ 0`
+  - `beMovedDone` đã true
+  - `partialCloseDone` đã true (partial close ở swing đã set BE)
+  - SL hiện tại đã ≥ entry (cho BUY) hoặc ≤ entry (cho SELL) — chỉ set flag
+- Tương tác với partial close (v1.168):
+  - Nếu **2R < swing target**: BE@2R chạy trước, dời SL→entry. Khi giá tiếp tục lên swing → partial close vẫn 50% (PositionModify SL=entry là no-op, không lỗi)
+  - Nếu **2R ≥ swing target**: partial close chạy trước ở swing (50% + SL→BE), khi giá lên 2R thì BE check skip vì `partialCloseDone=true`
+
+### v1.175 — Bias D1/D2 ưu tiên trên structural (thêm sweep liquidity)
+
+- **Thay đổi**: thứ tự ưu tiên xác định bias đảo lại
+  - **Trước**: structural HH-HL/LH-LL trước → HTF (UP/DOWN/SIDEWAY) fallback
+  - **Sau**: D1/D2 pattern trước → structural HH-HL/LH-LL fallback → HTF fallback
+- **D1/D2 pattern (4 cases)**:
+  1. `D[1].close > D[2].high` → **BULL** (Breakout)
+  2. `D[1].close < D[2].low` → **BEAR** (Breakdown)
+  3. `D[1].high > D[2].high & close < D[2].high & close > D[2].low` → **BEAR** (sweep bear liq — false breakout)
+  4. `D[1].low < D[2].low & close > D[2].low & close < D[2].high` → **BULL** (sweep bull liq — false breakdown)
+- **Tie-break**: D1 sweep cả 2 phía + close kẹt trong range D2 ⇒ không xác định ⇒ rơi xuống structural
+- Function mới: `IctDailyBias_ResolveD1D2(sym, tf, &biasOut, &reasonOut)` trong `DailyBias.mqh`
+- D1/D2 bias luôn `biasPhase = CLEAR` (không "sớm")
+- DisplayReason hiển thị trực tiếp pattern match (vd: `"D[1].high > D[2].high & close < D[2].high → sweep bear liq → BEAR"`)
+- Lý do: liquidity sweep + close-back là tín hiệu reversal mạnh, structural HH-HL/LH-LL có thể vẫn chưa "xoay" kịp ⇒ D1/D2 phản ánh "bias hôm nay" chuẩn hơn
+
+### v1.174 — Veto MSS khi Intraday ngược Bias tại thời điểm lock
+
+- **Bug**: MSS lock khi Intraday=BEAR / Bias=BULL → keylv ở đáy xa. Khi Intraday đảo về BULL, AllowTrade=true → bot đặt limit ở keylv cũ (xa):
+  - Giá quay lại khớp = thường hết trend → SL
+  - Giá tiếp tục đi = không khớp → khoá cơ hội tới khi timeout (1h)
+- **Fix**: Ngay sau `IctMss_TryLockMss` thành công, check `IctIntraday_TrendAlignsWithBias(bias, intraday)`:
+  - Nếu **ngược** ⇒ `MarkM5FvgUsed` + `IctMss_ResetState` ⇒ về `WAIT_FVG_TOUCH`
+  - Không transition `phase = ICT_MSS_CHOCH`, không quét M5 FVG
+- DisplayReason: `"MSS↑/↓ khớp khi Intraday=<x> ngược Bias — bỏ POI, chờ POI mới"`
+- Khác với v1.170 (decouple pipeline-AllowTrade): pipeline vẫn chạy phát hiện MSS, **chỉ veto tại thời điểm lock** nếu intraday lệch hướng — không để MSS dangling chờ AllowTrade
+
+### v1.173 — Timeout pending limit 4h → 1h
+
+- `Config.mqh`: `InpMssPendingExpireHours` mặc định `4 → 1`
+- Logic huỷ pending unchanged (vẫn dùng `IctMssEntry_CheckPendingTimeout` ở mỗi tick)
+- Sau 1h limit chưa khớp ⇒ `OrderDelete` + `MarkM5FvgUsed` + `IctMss_ResetState` → quay về `WAIT_FVG_TOUCH`
+
+### v1.172 — Guard tTouch ≤ 0 trong UpdateLiveM5Swings
+
+- **Bug v1.171**: filter `if(highs[i].time < tTouch) continue;` không có tác dụng khi `tTouch = 0` (mọi `time >= 0`) ⇒ liveH0/L0 lấy cả pivot **TRƯỚC** thời điểm chạm FVG ⇒ MSS keylv sai
+- **Fix**: thêm guard `if(tTouch <= 0) return false;` ở đầu `IctMss_UpdateLiveM5Swings`
+- Trường hợp đi vào guard: `h1TouchTime` chưa được set xong (race / GetFvgTouchTime trả 0) — pipeline sẽ hiển thị "M5 trong FVG — chờ pivot L0/H0" thay vì compute sai
+- Đảm bảo: `liveH0Time` (BULL) & `liveL0Time` (BEAR) luôn `>= tTouch`
+
+### v1.171 — Lock keylv MSS (chống "H0 nhảy")
+
+- **Vấn đề**: `liveL0/H0` dùng "pivot mới nhất" (`IctBuildConfirmSwingSet`) → mỗi nến mới có swing mới là keylv MSS đổi → label "L0/H0" nhảy liên tục, MSS chạy lệch theo đỉnh/đáy mới hình thành SAU extreme pullback
+- **Fix**: `IctMss_UpdateLiveM5Swings` chuyển sang định nghĩa **structural keylv**:
+  - **BEAR bias** (pullback UP):
+    - `liveH0` = đỉnh CAO NHẤT sau touch (extreme đỉnh pullback)
+    - `liveL0` = đáy **gần nhất theo time TRƯỚC liveH0** = *"đáy tạo ra đỉnh cao nhất"* — keylv MSS↓
+    - `liveH1` = đỉnh gần nhất TRƯỚC `liveL0`
+    - `liveL1` = đáy gần nhất TRƯỚC `liveH1`
+  - **BULL bias** (pullback DOWN):
+    - `liveL0` = đáy THẤP NHẤT sau touch (extreme đáy pullback)
+    - `liveH0` = đỉnh **gần nhất theo time TRƯỚC liveL0** = *"đỉnh tạo ra đáy thấp nhất"* — keylv MSS↑
+    - `liveL1` = đáy gần nhất TRƯỚC `liveH0`
+    - `liveH1` = đỉnh gần nhất TRƯỚC `liveL1`
+- **Hệ quả "lock" tự nhiên**: pivot mới hình thành SAU extreme KHÔNG đổi keylv; chỉ khi pullback thực sự tạo extreme mới (BEAR: high cao hơn; BULL: low thấp hơn) thì keylv mới recompute
+- **Không đổi**: validation cấu trúc đủ 2 đỉnh/đáy SAU touch vẫn giữ (v1.165), SL stack max(H0,H1) / min(L0,L1) vẫn giữ
+- **UI**: label "L0 live" / "H0 live" (gold dotted) bây giờ ổn định, chỉ dịch khi pullback mở rộng
+
+### v1.184 — Cap khoảng cách limit-giá (tránh limit chết)
+
+- **Vấn đề**: MSS confirm muộn khi Intraday đảo chiều mạnh → entry tại MSS keyLV / M5 FVG nằm xa giá hiện tại → limit "chết", không bao giờ khớp; hết phiên hoặc timeout 1h mới hủy → lỡ cơ hội mới.
+- **Inputs mới** (`Config.mqh`):
+  - `InpMssMaxLimitDistAtrMult = 3.0` — cap = N × ATR(`InpFvgTf`). `>cap` ⇒ skip / cancel. `0` = tắt.
+  - `InpMssCancelStaleLimit = true` — cancel pending + mark FVG used + reset state khi vượt cap (chọn POI khác).
+- **Logic**:
+  - `IctMssEntry_IsLimitTooFar(sym, entry, isBuy, …)` so sánh `|Ask − entry|` (BUY) / `|entry − Bid|` (SELL) với cap.
+  - `ComputeLevels` check sau khi pick entry → fail với reason `"Entry xa giá X pts > Y pts (N×ATR)"`.
+  - `IctMssEntry_Update`: nếu fail vì lý do trên + `InpMssCancelStaleLimit` ⇒ cancel pending + `MarkM5FvgUsed` + `IctMss_ResetState` + set `g_ictMssAfterCloseGuard` → quay về `WAIT_FVG_TOUCH`.
+  - `IctMssEntry_CheckStaleLimit(sym)` chạy mỗi tick: pending order đã đặt nhưng giá rời xa → cancel + reset (cùng flow).
+- **Hệ quả**: nếu MSS confirm muộn (giá đã chạy xa khỏi keyLV/FVG), EA bỏ qua POI hiện tại + chọn POI/touch mới ngay thay vì đặt limit chết hàng giờ.
+
+### v1.183 — Stats chỉ đếm TP/SL, bỏ partial/manual close khỏi total
+
+- `Stats.mqh`: pass-2 skip non-TP/SL deals khỏi `total`, `tpCount`, `slCount`,
+  `sumR`, `winCount`, `lossCount`. Chỉ giữ `otherCount` để log.
+- `netProfit` vẫn cộng dồn TẤT CẢ deals (partial close P&L được phản ánh đúng).
+- `AvgR` = `sumR / (TP+SL)` thay vì `/ total` (đồng nhất với cách đếm).
+- Panel: `IctMssStats_LineCounts` bỏ phần `khác X` → "Stats: N lệnh | TP X | SL Y".
+- **Lý do**: partial close (50% ở swing target) tạo deal `DEAL_REASON_EXPERT` → trước
+  đây tính vào "khác" nhưng không phản ánh kết quả lệnh. Sau fix: 1 setup = 1 entry
+  → 1 TP/SL outcome.
+
+### v1.182 — Fix: chặn FVG touch xảy ra TRƯỚC khi Bias chuyển vào side
+
+- **Bug**: Bias UP → giá đi qua bear FVG (EA bỏ qua vì bias ngược) → bias xoay DOWN → EA pick up `firstTouchTime` cũ (trước khi xoay) → đặt limit ngay, dù chưa có touch fresh sau khi bias đổi side
+- **Fix**: thêm `g_ictBiasIntoBullTime` / `g_ictBiasIntoBearTime` (`DailyBias.mqh`) lưu thời điểm Bias chuyển vào BULL/BEAR. `IctDailyBias_TrackTransition()` chạy mỗi `IctDailyBias_Update` để cập nhật.
+- **Cutoff bias-aware** (`IctMss_GetFvgTouchCutoff`): touch hợp lệ phải xảy ra SAU `max(BiasInto<side>Time, AfterCloseGuard)`
+- `IctMss_GetFvgTouchTime` reject `firstTouchTime` cũ → scan M5 bars sau cutoff (`IctMss_FirstM5TouchInFvg` nhận thêm param `since`) → nếu vẫn 0 → check `LivePriceTouchesFvg` (curBar phải ≥ cutoff)
+- **Hệ quả**: Sau Bias flip, FVG side mới chỉ hợp lệ khi có touch NEW (re-touch hoặc giá đang trong gap với current bar sau cutoff). Tránh entry từ context cũ.
+- **Tích hợp**: `HasFreshFvgTouch` dùng `GetFvgTouchTime` (đã apply cutoff) → bỏ block check redundant; fill ratio vẫn check Pure 25% / Mixed 50%
+
 ### v1.142 — Fix Stats đếm thiếu lệnh
 
 - Bug v1.141: `IctMssStats_ComputeR` gọi `HistorySelectByPosition` **bên trong vòng quét history toàn cục**
@@ -597,7 +1027,7 @@ ENUM_ICT_BIAS ICT2026_GetDailyBias();
 
 ### v1.160 — Pending timeout 4h → reset chờ FVG mới
 
-- Input: `InpMssPendingExpireHours = 4` (mặc định, 0 = không timeout)
+- Input: `InpMssPendingExpireHours = 1` (mặc định, 0 = không timeout)
 - Tracked `pendingPlacedTime` trong `IctMssState`
 - Mỗi tick (`IctMssEntry_CheckPendingTimeout`): nếu `TimeCurrent() - pendingPlacedTime ≥ N×3600s` hoặc order biến mất (broker expire) → `OrderDelete` + `MarkM5FvgUsed` + `IctMss_ResetState` + set `g_ictMssAfterCloseGuard`
 - Hành vi giống TP/SL close: reset về `WAIT_FVG_TOUCH`, chỉ accept H1 FVG có touch sau timeout
