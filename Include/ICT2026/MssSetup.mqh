@@ -740,7 +740,12 @@ void IctMss_Update(const string sym)
 
    IctMss_CheckH1WatchInvalidation(sym);
 
-   if(!g_ictIntraday.isAllowTrade)
+   // Pipeline gate = Bias rõ ràng (KHÔNG gate theo Intraday trend).
+   //   → POI scan + MSS detect chạy liên tục trong giai đoạn intraday transition
+   //   → Entry vẫn bị chặn bởi isAllowTrade trong IctMssEntry_Update
+   const ENUM_TIMEFRAMES cTf = InpConfirmTf;
+   const ENUM_ICT_FVG_SIDE wantSide = IctFvgSideFromBias(g_ictDailyBias.bias);
+   if(wantSide == ICT_FVG_NONE)
    {
       if(g_ictLowTf.mss.phase != ICT_MSS_IDLE)
       {
@@ -748,17 +753,7 @@ void IctMss_Update(const string sym)
             g_ictLowTf.mss.h1WatchFvgId = g_ictLowTf.mss.h1FvgId;
          IctMss_ResetPipelineKeepWatch();
       }
-      if(StringFind(g_ictLowTf.mss.displayReason, "FVG Used") != 0)
-         g_ictLowTf.mss.displayReason = "AllowTrade=false (H1 lệch Bias — MSS tạm dừng)";
-      return;
-   }
-
-   const ENUM_TIMEFRAMES cTf = InpConfirmTf;
-   const ENUM_ICT_FVG_SIDE wantSide = IctFvgSideFromBias(g_ictDailyBias.bias);
-   if(wantSide == ICT_FVG_NONE)
-   {
-      IctMss_ResetState();
-      g_ictLowTf.mss.displayReason = "Bias none";
+      g_ictLowTf.mss.displayReason = "Bias none — MSS pipeline tạm dừng";
       return;
    }
 

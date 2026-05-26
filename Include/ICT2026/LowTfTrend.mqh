@@ -49,22 +49,26 @@ bool IctLowTfTrend_Update(const string sym, const bool force = false)
    IctIntraday_UpdateAllowTrade();
    IctFvg_UpdateAll(sym, tf);
 
-   static bool s_prevAllowTrade = false;
-   const bool allowNow = g_ictIntraday.isAllowTrade;
-   const bool allowJustOn = (allowNow && !s_prevAllowTrade);
-   s_prevAllowTrade = allowNow;
+   // Pipeline gate = Bias rõ ràng (không gate theo Intraday trend).
+   //   → POI scan + MSS pipeline chạy liên tục trong giai đoạn intraday transition
+   //   → Entry vẫn bị chặn bởi isAllowTrade trong IctMssEntry_Update
+   static bool s_prevBiasOk = false;
+   const bool biasOk = (g_ictDailyBias.bias != ICT_BIAS_NONE);
+   const bool biasJustOn = (biasOk && !s_prevBiasOk);
+   s_prevBiasOk = biasOk;
 
-   if(allowNow)
+   if(biasOk)
    {
       const ENUM_ICT_FVG_SIDE side = IctFvgSideFromBias(g_ictDailyBias.bias);
-      IctFvg_ScanNew(sym, tf, side, force || allowJustOn);
-      g_ictLowTf.displayReason = StringFormat("H1 POI %d avail / %d FVG | scan %s",
+      IctFvg_ScanNew(sym, tf, side, force || biasJustOn);
+      const string allowTag = g_ictIntraday.isAllowTrade ? "" : " | AllowEntry=NO";
+      g_ictLowTf.displayReason = StringFormat("H1 POI %d avail / %d FVG | scan %s%s",
                                               IctMss_CountH1PoiEligible(), g_ictFvgCount,
-                                              IctFvgSideText(side));
+                                              IctFvgSideText(side), allowTag);
    }
    else
    {
-      g_ictLowTf.displayReason = "IsAllowTrade=false — giữ FVG đã khóa";
+      g_ictLowTf.displayReason = "Bias none — giữ FVG đã khóa";
    }
 
    g_ictLowTf.activeCount    = g_ictFvgCount;
@@ -124,7 +128,7 @@ void IctLowTfTrend_TickRefresh(const string sym)
          MathAbs(g_ictFvgZones[i].pdLow - oldPdLo[i]) > _Point)
          dirty = true;
    }
-   if(g_ictIntraday.isAllowTrade)
+   if(g_ictDailyBias.bias != ICT_BIAS_NONE)
    {
       const ENUM_ICT_MSS_PHASE prevMss = g_ictLowTf.mss.phase;
       IctMss_Update(sym);

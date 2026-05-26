@@ -62,16 +62,25 @@ void IctIntraday_SyncFromCtx(IctSwingSet &sw, const ENUM_ICT_STRUCT pivotStruct)
    }
 }
 
-// Up/Bull sớm đều là ICT_TREND_UP; Down/Bear sớm đều là ICT_TREND_DOWN
-// → bật sớm ngay khi H1 CHoCH, không cần đợi HH-HL/LH-LL rõ
+// Bias làm chủ đạo: AllowTrade chỉ block khi Intraday CONFIRMED NGƯỢC chiều Bias.
+// Intraday NONE (đang transition / chưa rõ) → vẫn allow theo Bias.
+//   BULL bias + UP   trend → allow ✓
+//   BULL bias + NONE trend → allow ✓ (transition, không ngược)
+//   BULL bias + DOWN trend → BLOCK ✗ (ngược chiều rõ ràng)
+//   BEAR bias + DOWN trend → allow ✓
+//   BEAR bias + NONE trend → allow ✓
+//   BEAR bias + UP   trend → BLOCK ✗
+//   NONE bias              → BLOCK ✗ (không có direction)
 bool IctIntraday_TrendAlignsWithBias(const ENUM_ICT_BIAS bias,
                                      const ENUM_ICT_TREND trend)
 {
-   if(bias == ICT_BIAS_BULL && trend == ICT_TREND_UP)
-      return true;
-   if(bias == ICT_BIAS_BEAR && trend == ICT_TREND_DOWN)
-      return true;
-   return false;
+   if(bias == ICT_BIAS_NONE)
+      return false;
+   if(bias == ICT_BIAS_BULL && trend == ICT_TREND_DOWN)
+      return false;
+   if(bias == ICT_BIAS_BEAR && trend == ICT_TREND_UP)
+      return false;
+   return true;
 }
 
 void IctIntraday_UpdateAllowTrade()

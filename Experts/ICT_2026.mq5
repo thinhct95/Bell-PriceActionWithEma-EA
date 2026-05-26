@@ -3,8 +3,8 @@
 //| BOS = Continue | CHoCH = Reversal                                |
 //+------------------------------------------------------------------+
 #property copyright "ICT 2026"
-#property version   "1.168"
-#property description "ICT2026 MSS | Partial close 50% + SL→BE khi giá đạt swing iL0/iH0 (TP gồng xa hơn)"
+#property version   "1.170"
+#property description "ICT2026 MSS | Pipeline gate=Bias, Entry gate=AllowTrade — track MSS cả khi intraday ngược, chỉ block entry"
 
 #include <ICT2026/Config.mqh>
 #include <ICT2026/DailyBias.mqh>
